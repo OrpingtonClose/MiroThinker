@@ -68,6 +68,7 @@ def before_tool_callback(
     that ADK will use as the tool result (blocking the actual execution).
     """
     tool_name: str = tool.name if hasattr(tool, "name") else str(tool)
+    state = tool_context.state
 
     # ── Algorithm 8: Arg Fix ────────────────────────────────────────────
     original_args = dict(args)  # snapshot before fix
@@ -100,7 +101,6 @@ def before_tool_callback(
         )
 
     # ── Algorithm 2: Dedup Guard ────────────────────────────────────────
-    state = tool_context.state
 
     # Initialise session-state buckets on first use
     if "seen_queries" not in state:

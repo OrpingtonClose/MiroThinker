@@ -136,8 +136,14 @@ async def load_report(filename: str):
     """Load a specific saved report."""
     from dashboard.collector import DashboardCollector
 
+    # Validate that the file is within the expected reports directory
+    reports_dir = Path("dashboard_logs").resolve()
+    target = (reports_dir / Path(filename).name).resolve()
+    if not str(target).startswith(str(reports_dir)):
+        return JSONResponse({"error": "Invalid path"}, status_code=400)
+
     try:
-        data = DashboardCollector.load(filename)
+        data = DashboardCollector.load(str(target))
         return data
     except FileNotFoundError:
         return JSONResponse({"error": "Report not found"}, status_code=404)
