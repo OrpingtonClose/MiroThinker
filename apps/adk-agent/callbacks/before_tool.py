@@ -18,15 +18,11 @@ Algorithm 2 — Dedup Guard:
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-import time
 from typing import Any, Dict, Optional
 
 from google.adk.tools import ToolContext
 
-from dashboard.registry import get_collector
 from utils.query_key import build_query_key
 
 logger = logging.getLogger(__name__)
@@ -75,27 +71,8 @@ def before_tool_callback(
     original_args = dict(args)  # snapshot before fix
     _fix_args(tool_name, args)
 
-    # Emit arg-fix event if anything changed
-    collector = get_collector()
-    if collector and args != original_args:
-        from dashboard.models import DashboardEvent, EventType
-
-        fix_desc = ", ".join(
-            f"{k} -> {args.get(k, '?')}" for k in original_args if k not in args
-        ) or "parameters renamed"
-        collector.emit_sync(
-            DashboardEvent(
-                event_type=EventType.ARG_FIX_APPLIED,
-                agent_name=getattr(tool_context, "agent_name", ""),
-                turn=collector.current_turn,
-                data={
-                    "tool_name": tool_name,
-                    "fix_description": fix_desc,
-                    "original_keys": list(original_args.keys()),
-                    "fixed_keys": list(args.keys()),
-                },
-            )
-        )
+    if args != original_args:
+        logger.info("Arg fix applied for %s: %s", tool_name, list(args.keys()))
 
     # ── Algorithm 2: Dedup Guard ────────────────────────────────────────
 
@@ -124,22 +101,7 @@ def before_tool_callback(
                     query_key,
                 )
                 state["consecutive_dedup_errors"] = 0
-                if collector:
-                    from dashboard.models import DashboardEvent, EventType
-
-                    collector.emit_sync(
-                        DashboardEvent(
-                            event_type=EventType.DEDUP_ALLOWED,
-                            agent_name=getattr(tool_context, "agent_name", ""),
-                            turn=collector.current_turn,
-                            data={
-                                "tool_name": tool_name,
-                                "query_key": query_key,
-                                "consecutive_errors": consecutive,
-                            },
-                        )
-                    )
-                # Fall through to emit TOOL_CALL_START and allow execution
+                # Fall through to allow execution
             else:
                 logger.info(
                     "Dedup guard blocked duplicate (tool=%s, key=%s, consecutive=%d)",
@@ -147,23 +109,6 @@ def before_tool_callback(
                     query_key,
                     consecutive,
                 )
-                if collector:
-                    from dashboard.models import DashboardEvent, EventType
-
-                    collector.emit_sync(
-                        DashboardEvent(
-                            event_type=EventType.DEDUP_BLOCKED,
-                            agent_name=getattr(tool_context, "agent_name", ""),
-                            turn=collector.current_turn,
-                            data={
-                                "tool_name": tool_name,
-                                "query_key": query_key,
-                                "previous_count": seen.get(query_key, 0),
-                            },
-                        )
-                    )
-                # Return early WITHOUT emitting TOOL_CALL_START — dedup-blocked
-                # calls are not real tool calls, so no start/end pair needed.
                 return {
                     "error": (
                         f"Duplicate query detected for '{query_key}'. "
@@ -173,23 +118,5 @@ def before_tool_callback(
         else:
             # Not a duplicate — reset the consecutive error counter
             state["consecutive_dedup_errors"] = 0
-
-    # ── Emit TOOL_CALL_START (only for calls that will actually execute) ──
-    if collector:
-        from dashboard.models import DashboardEvent, EventType
-
-        state["_tool_start_time"] = time.time()
-        collector.emit_sync(
-            DashboardEvent(
-                event_type=EventType.TOOL_CALL_START,
-                agent_name=getattr(tool_context, "agent_name", ""),
-                turn=collector.current_turn,
-                data={
-                    "tool_name": tool_name,
-                    "arguments_summary": json.dumps(args, default=str)[:200],
-                    "arg_fix_applied": args != original_args,
-                },
-            )
-        )
 
     return None  # allow execution; recording happens in after_tool

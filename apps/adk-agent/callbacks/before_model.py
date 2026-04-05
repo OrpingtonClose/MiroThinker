@@ -15,15 +15,12 @@ state so the agent instruction can trigger a final answer.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from typing import Any, List, Optional
 
 from google.adk.agents.callback_context import CallbackContext
 from google.genai import types as genai_types
-
-from dashboard.registry import get_collector
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +87,6 @@ def before_model_callback(
             and any(hasattr(p, "function_response") and p.function_response for p in content.parts)
         ):
             tool_indices.append(idx)
-
-    collector = get_collector()
 
     if keep_k >= 0 and len(tool_indices) > keep_k:
         # Replace all but the last K tool results with placeholder.
@@ -166,39 +161,8 @@ def before_model_callback(
             omitted_count,
             keep_k,
         )
-        if collector:
-            from dashboard.models import DashboardEvent, EventType
-
-            collector.emit_sync(
-                DashboardEvent(
-                    event_type=EventType.CONTEXT_TRIMMED,
-                    turn=collector.current_turn,
-                    data={
-                        "total_tool_results": len(tool_indices),
-                        "kept_results": keep_k,
-                        "omitted_count": omitted_count,
-                        "total_messages": len(contents),
-                    },
-                )
-            )
-
     # ── Context length check ────────────────────────────────────────────
     estimated = _estimate_tokens(contents)
-
-    # Emit LLM_CALL_START with token estimate
-    if collector:
-        from dashboard.models import DashboardEvent, EventType
-
-        collector.emit_sync(
-            DashboardEvent(
-                event_type=EventType.LLM_CALL_START,
-                turn=collector.current_turn,
-                data={
-                    "estimated_prompt_tokens": estimated,
-                    "max_context_tokens": MAX_CONTEXT_TOKENS,
-                },
-            )
-        )
 
     if estimated > MAX_CONTEXT_TOKENS and not state.get("force_end"):
         state["force_end"] = True
@@ -208,17 +172,6 @@ def before_model_callback(
             estimated,
             MAX_CONTEXT_TOKENS,
         )
-        if collector:
-            collector.emit_sync(
-                DashboardEvent(
-                    event_type=EventType.FORCE_END_TRIGGERED,
-                    turn=collector.current_turn,
-                    data={
-                        "estimated_tokens": estimated,
-                        "max_tokens": MAX_CONTEXT_TOKENS,
-                    },
-                )
-            )
         # Inject a system-level message telling the model to wrap up now
         force_end_msg = genai_types.Content(
             role="user",
