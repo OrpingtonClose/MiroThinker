@@ -20,6 +20,9 @@ const App = {
     intermediateAnswers: 0, elapsed: 0, dedupBlocks: 0,
   },
 
+  // Accumulate all received events for client-side post-hoc stats
+  _events: [],
+
   // ------------------------------------------------------------------
   // Initialisation
   // ------------------------------------------------------------------
@@ -101,8 +104,11 @@ const App = {
     this.mode = 'static';
     this._updateStatus('ended', 'Session complete');
     clearInterval(this.elapsedTimer);
+    // Freeze elapsed at final value
+    this.kpi.elapsed = (Date.now() - this.startTime) / 1000;
+    KPIPanel.update(this.kpi);
 
-    // Load final metrics for post-hoc stats
+    // Try server-side metrics first, fall back to client-side synthesis
     this._loadFinalMetrics(this.sessionId);
   },
 
@@ -111,6 +117,9 @@ const App = {
   // ------------------------------------------------------------------
 
   _handleEvent(event) {
+    // Accumulate for client-side post-hoc stats
+    this._events.push(event);
+
     // Always add to timeline
     TimelinePanel.addEntry(event);
 
@@ -213,8 +222,8 @@ const App = {
   // ------------------------------------------------------------------
 
   async _loadFinalMetrics(sessionId) {
+    // Try server-side metrics first
     try {
-      // Try live metrics endpoint first
       const resp = await fetch(`/api/metrics/${sessionId}`);
       if (resp.ok) {
         const metrics = await resp.json();
@@ -222,24 +231,110 @@ const App = {
         return;
       }
     } catch (e) {
-      console.warn('Live metrics unavailable, trying saved reports:', e.message);
+      console.warn('Live metrics unavailable:', e.message);
     }
-    // Fallback: try to load from saved reports
+    // Try saved reports
     try {
       const reportResp = await fetch('/api/reports');
-      if (!reportResp.ok) return;
-      const reports = await reportResp.json();
-      const match = reports.find(r => r.filename.includes(sessionId));
-      if (match) {
-        const dataResp = await fetch(`/api/reports/${match.filename}`);
-        if (dataResp.ok) {
-          const metrics = await dataResp.json();
-          this._populateFromMetrics(metrics);
+      if (reportResp.ok) {
+        const reports = await reportResp.json();
+        const match = reports.find(r => r.filename.includes(sessionId));
+        if (match) {
+          const dataResp = await fetch(`/api/reports/${match.filename}`);
+          if (dataResp.ok) {
+            const metrics = await dataResp.json();
+            this._populateFromMetrics(metrics);
+            return;
+          }
         }
       }
     } catch (e) {
-      console.error('Failed to load final metrics from reports:', e);
+      console.warn('Saved reports unavailable:', e.message);
     }
+    // Final fallback: build post-hoc stats from client-side accumulated events
+    console.info('Building post-hoc stats from client-side event data');
+    this._buildPostHocFromClientState();
+  },
+
+  _buildPostHocFromClientState() {
+    // Count algorithm events from accumulated SSE events
+    let dedupBlocks = 0, contextTrims = 0, argFixes = 0;
+    let badResults = 0, retryAttempts = 0, intermediateAnswers = 0, forceEnds = 0;
+    const toolUsage = {};
+
+    for (const evt of this._events) {
+      const d = evt.data || {};
+      switch (evt.type) {
+        case 'dedup_blocked': dedupBlocks++; break;
+        case 'context_trimmed': contextTrims++; break;
+        case 'arg_fix_applied': argFixes++; break;
+        case 'bad_result': badResults++; break;
+        case 'retry_attempt': retryAttempts = Math.max(retryAttempts, d.attempt_number || 0); break;
+        case 'boxed_extracted': intermediateAnswers++; break;
+        case 'force_end': forceEnds++; break;
+        case 'tool_call_end': {
+          const name = d.tool_name || 'unknown';
+          if (!toolUsage[name]) toolUsage[name] = { count: 0, total_duration: 0, errors: 0 };
+          toolUsage[name].count++;
+          toolUsage[name].total_duration += d.duration_secs || 0;
+          if (d.error) toolUsage[name].errors++;
+          break;
+        }
+      }
+    }
+
+    // Count tool_call_start for tools that never got a tool_call_end
+    const startCounts = {};
+    for (const evt of this._events) {
+      if (evt.type === 'tool_call_start') {
+        const name = (evt.data || {}).tool_name || 'unknown';
+        startCounts[name] = (startCounts[name] || 0) + 1;
+      }
+    }
+    // Use start counts if no end events were captured for a tool
+    for (const [name, startCount] of Object.entries(startCounts)) {
+      if (!toolUsage[name]) {
+        toolUsage[name] = { count: startCount, total_duration: 0, errors: 0 };
+      } else if (toolUsage[name].count < startCount) {
+        toolUsage[name].count = startCount;
+      }
+    }
+
+    const metrics = {
+      algorithm_stats: {
+        dedup_blocks_saved: dedupBlocks,
+        context_trims_performed: contextTrims,
+        arg_fixes_applied: argFixes,
+        bad_results_caught: badResults,
+        retry_attempts_used: retryAttempts,
+        intermediate_answers_extracted: intermediateAnswers,
+        force_end_triggered: forceEnds,
+      },
+      llm_summary: {
+        total_calls: this.kpi.llmCalls,
+        total_prompt_tokens_est: this.kpi.promptTokens,
+        total_completion_tokens_est: this.kpi.completionTokens,
+        avg_duration_secs: 0,
+      },
+      tool_summary: toolUsage,
+    };
+
+    // Calculate avg LLM duration from events
+    let llmDurations = [];
+    let llmStart = null;
+    for (const evt of this._events) {
+      if (evt.type === 'llm_call_start') llmStart = evt.timestamp;
+      if (evt.type === 'llm_call_end' && llmStart) {
+        llmDurations.push(evt.timestamp - llmStart);
+        llmStart = null;
+      }
+    }
+    if (llmDurations.length > 0) {
+      metrics.llm_summary.avg_duration_secs =
+        llmDurations.reduce((a, b) => a + b, 0) / llmDurations.length;
+    }
+
+    this._renderPostHocStats(metrics);
   },
 
   async _loadReport(filename) {
