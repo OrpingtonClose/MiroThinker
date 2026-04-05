@@ -168,11 +168,36 @@ def before_model_callback(
                     role="model", parts=new_parts
                 )
 
-            # Replace the tool response with a text placeholder
-            contents[idx] = genai_types.Content(
-                role=contents[idx].role,
-                parts=[genai_types.Part(text=_PLACEHOLDER)],
-            )
+            # Replace the tool response with a placeholder.
+            # IMPORTANT: role="tool" messages MUST contain function_response
+            # parts (not plain text) to satisfy the API schema. For role="user"
+            # messages that happen to carry function_response parts, plain text
+            # is acceptable.
+            orig_role = getattr(contents[idx], "role", "user")
+            if orig_role == "tool":
+                # Build proper FunctionResponse placeholders preserving names
+                placeholder_parts = []
+                for part in (contents[idx].parts or []):
+                    if hasattr(part, "function_response") and part.function_response:
+                        fr_name = getattr(part.function_response, "name", "unknown")
+                        placeholder_parts.append(genai_types.Part(
+                            function_response=genai_types.FunctionResponse(
+                                name=fr_name,
+                                response={"result": _PLACEHOLDER},
+                            )
+                        ))
+                if not placeholder_parts:
+                    # Fallback: shouldn't happen, but use text under "user" role
+                    placeholder_parts = [genai_types.Part(text=_PLACEHOLDER)]
+                    orig_role = "user"
+                contents[idx] = genai_types.Content(
+                    role=orig_role, parts=placeholder_parts
+                )
+            else:
+                contents[idx] = genai_types.Content(
+                    role=orig_role,
+                    parts=[genai_types.Part(text=_PLACEHOLDER)],
+                )
         omitted_count = len(indices_to_trim)
         logger.info(
             "Keep-K-Recent: trimmed %d tool results, kept last %d",
