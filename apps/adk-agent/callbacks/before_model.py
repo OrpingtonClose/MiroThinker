@@ -200,7 +200,7 @@ def before_model_callback(
             )
         )
 
-    if estimated > MAX_CONTEXT_TOKENS:
+    if estimated > MAX_CONTEXT_TOKENS and not state.get("force_end"):
         state["force_end"] = True
         logger.warning(
             "Context length estimate (%d tokens) exceeds threshold (%d). "

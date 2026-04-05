@@ -175,7 +175,6 @@ const App = {
         break;
 
       case 'bad_result':
-        this.kpi.toolErrors++;
         AlgorithmsPanel.addEvent(event);
         break;
 
