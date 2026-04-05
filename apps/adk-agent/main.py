@@ -33,8 +33,12 @@ load_dotenv()
 # Then open http://localhost:6006 to view traces.
 from phoenix.otel import register
 
+_phoenix_endpoint = os.environ.get(
+    "PHOENIX_COLLECTOR_ENDPOINT", "http://localhost:6006/v1/traces"
+)
 _tracer_provider = register(
     project_name="mirothinker-adk",
+    endpoint=_phoenix_endpoint,
     auto_instrument=True,  # auto-instruments ADK via openinference
 )
 
