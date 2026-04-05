@@ -97,7 +97,84 @@ def before_tool_callback(
             )
         )
 
-    # ── Emit TOOL_CALL_START for every tool call ─────────────────────────
+    # ── Algorithm 2: Dedup Guard ────────────────────────────────────────
+
+    # Initialise session-state buckets on first use
+    if "seen_queries" not in state:
+        state["seen_queries"] = {}
+    if "consecutive_dedup_errors" not in state:
+        state["consecutive_dedup_errors"] = 0
+
+    query_key = build_query_key(tool_name, args)
+
+    if query_key is not None:
+        seen: Dict[str, int] = state["seen_queries"]
+
+        if query_key in seen:
+            consecutive = state["consecutive_dedup_errors"] + 1
+            state["consecutive_dedup_errors"] = consecutive
+
+            if consecutive > MAX_CONSECUTIVE_ERRORS:
+                # Escape hatch: allow the duplicate through
+                logger.warning(
+                    "Dedup escape hatch: allowing duplicate after %d consecutive blocks "
+                    "(tool=%s, key=%s)",
+                    consecutive,
+                    tool_name,
+                    query_key,
+                )
+                state["consecutive_dedup_errors"] = 0
+                if collector:
+                    from dashboard.models import DashboardEvent, EventType
+
+                    collector.emit_sync(
+                        DashboardEvent(
+                            event_type=EventType.DEDUP_ALLOWED,
+                            agent_name=getattr(tool_context, "agent_name", ""),
+                            turn=collector.current_turn,
+                            data={
+                                "tool_name": tool_name,
+                                "query_key": query_key,
+                                "consecutive_errors": consecutive,
+                            },
+                        )
+                    )
+                # Fall through to emit TOOL_CALL_START and allow execution
+            else:
+                logger.info(
+                    "Dedup guard blocked duplicate (tool=%s, key=%s, consecutive=%d)",
+                    tool_name,
+                    query_key,
+                    consecutive,
+                )
+                if collector:
+                    from dashboard.models import DashboardEvent, EventType
+
+                    collector.emit_sync(
+                        DashboardEvent(
+                            event_type=EventType.DEDUP_BLOCKED,
+                            agent_name=getattr(tool_context, "agent_name", ""),
+                            turn=collector.current_turn,
+                            data={
+                                "tool_name": tool_name,
+                                "query_key": query_key,
+                                "previous_count": seen.get(query_key, 0),
+                            },
+                        )
+                    )
+                # Return early WITHOUT emitting TOOL_CALL_START — dedup-blocked
+                # calls are not real tool calls, so no start/end pair needed.
+                return {
+                    "error": (
+                        f"Duplicate query detected for '{query_key}'. "
+                        "Use a different search query or URL."
+                    )
+                }
+        else:
+            # Not a duplicate — reset the consecutive error counter
+            state["consecutive_dedup_errors"] = 0
+
+    # ── Emit TOOL_CALL_START (only for calls that will actually execute) ──
     if collector:
         from dashboard.models import DashboardEvent, EventType
 
@@ -114,82 +191,5 @@ def before_tool_callback(
                 },
             )
         )
-
-    # ── Algorithm 2: Dedup Guard ────────────────────────────────────────
-
-    # Initialise session-state buckets on first use
-    if "seen_queries" not in state:
-        state["seen_queries"] = {}
-    if "consecutive_dedup_errors" not in state:
-        state["consecutive_dedup_errors"] = 0
-
-    query_key = build_query_key(tool_name, args)
-    if query_key is None:
-        # Tool type not tracked — allow through
-        return None
-
-    seen: Dict[str, int] = state["seen_queries"]
-
-    if query_key in seen:
-        consecutive = state["consecutive_dedup_errors"] + 1
-        state["consecutive_dedup_errors"] = consecutive
-
-        if consecutive > MAX_CONSECUTIVE_ERRORS:
-            # Escape hatch: allow the duplicate through
-            logger.warning(
-                "Dedup escape hatch: allowing duplicate after %d consecutive blocks "
-                "(tool=%s, key=%s)",
-                consecutive,
-                tool_name,
-                query_key,
-            )
-            state["consecutive_dedup_errors"] = 0
-            if collector:
-                from dashboard.models import DashboardEvent, EventType
-
-                collector.emit_sync(
-                    DashboardEvent(
-                        event_type=EventType.DEDUP_ALLOWED,
-                        agent_name=getattr(tool_context, "agent_name", ""),
-                        turn=collector.current_turn,
-                        data={
-                            "tool_name": tool_name,
-                            "query_key": query_key,
-                            "consecutive_errors": consecutive,
-                        },
-                    )
-                )
-            return None  # let it run
-
-        logger.info(
-            "Dedup guard blocked duplicate (tool=%s, key=%s, consecutive=%d)",
-            tool_name,
-            query_key,
-            consecutive,
-        )
-        if collector:
-            from dashboard.models import DashboardEvent, EventType
-
-            collector.emit_sync(
-                DashboardEvent(
-                    event_type=EventType.DEDUP_BLOCKED,
-                    agent_name=getattr(tool_context, "agent_name", ""),
-                    turn=collector.current_turn,
-                    data={
-                        "tool_name": tool_name,
-                        "query_key": query_key,
-                        "previous_count": seen.get(query_key, 0),
-                    },
-                )
-            )
-        return {
-            "error": (
-                f"Duplicate query detected for '{query_key}'. "
-                "Use a different search query or URL."
-            )
-        }
-
-    # Not a duplicate — reset the consecutive error counter
-    state["consecutive_dedup_errors"] = 0
 
     return None  # allow execution; recording happens in after_tool

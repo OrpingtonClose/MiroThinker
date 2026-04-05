@@ -94,9 +94,34 @@ def before_model_callback(
     collector = get_collector()
 
     if keep_k >= 0 and len(tool_indices) > keep_k:
-        # Replace all but the last K tool results with placeholder
+        # Replace all but the last K tool results with placeholder.
+        # IMPORTANT: Also replace the corresponding FunctionCall parts in
+        # the preceding model message to maintain the FunctionCall →
+        # FunctionResponse pairing required by both Gemini and OpenAI APIs.
         indices_to_trim = tool_indices[: len(tool_indices) - keep_k]
         for idx in indices_to_trim:
+            # Build a summary of the tool call being omitted
+            tool_name_hint = ""
+            # Look at the preceding model message for a FunctionCall
+            if idx > 0:
+                prev = contents[idx - 1]
+                prev_role = getattr(prev, "role", None)
+                if prev_role == "model" and prev.parts:
+                    new_parts = []
+                    for part in prev.parts:
+                        if hasattr(part, "function_call") and part.function_call:
+                            fc = part.function_call
+                            tool_name_hint = getattr(fc, "name", "tool")
+                            # Replace FunctionCall with text summary
+                            new_parts.append(genai_types.Part(
+                                text=f"[Called {tool_name_hint} — result omitted to save tokens]"
+                            ))
+                        else:
+                            new_parts.append(part)
+                    contents[idx - 1] = genai_types.Content(
+                        role="model", parts=new_parts
+                    )
+            # Replace the tool response with a matching text placeholder
             contents[idx] = genai_types.Content(
                 role=contents[idx].role,
                 parts=[genai_types.Part(text=_PLACEHOLDER)],
