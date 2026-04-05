@@ -291,5 +291,8 @@ async def main(task: str | None = None) -> str:
 
 
 if __name__ == "__main__":
+    import sys
+
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())
+    _task = sys.argv[1] if len(sys.argv) > 1 else None
+    asyncio.run(main(_task))

@@ -135,8 +135,38 @@ class DashboardCollector:
             self.boxed_answers.append(data | {"timestamp": event.timestamp, "turn": event.turn})
         elif et == EventType.TOOL_CALL_START:
             self.total_tool_calls += 1
+            # Create a tracking record from the event data
+            call_id = data.get("call_id") or f"tool_{self.total_tool_calls}"
+            self.start_tool_call(
+                call_id=call_id,
+                tool_name=data.get("tool_name", ""),
+                agent_name=event.agent_name,
+                arguments=data.get("arguments_summary", ""),
+            )
+        elif et == EventType.TOOL_CALL_END:
+            # Finalize the tracking record
+            call_id = data.get("call_id") or f"tool_{self.total_tool_calls}"
+            record = self._active_tool_calls.pop(call_id, None)
+            if record:
+                record.duration_secs = data.get("duration_secs", 0.0)
+                record.result_size_chars = data.get("result_size_chars", 0)
+                record.error = data.get("error", "")
+                self.tool_calls.append(record)
         elif et == EventType.LLM_CALL_START:
             self.total_llm_calls += 1
+            call_id = data.get("call_id") or f"llm_{self.total_llm_calls}"
+            self.start_llm_call(
+                call_id=call_id,
+                agent_name=event.agent_name,
+                prompt_tokens_est=data.get("estimated_prompt_tokens", 0),
+            )
+        elif et == EventType.LLM_CALL_END:
+            call_id = data.get("call_id") or f"llm_{self.total_llm_calls}"
+            record = self._active_llm_calls.pop(call_id, None)
+            if record:
+                record.completion_tokens_est = data.get("completion_tokens_est", 0)
+                record.duration_secs = round(time.time() - record.start_time, 4)
+                self.llm_calls.append(record)
         elif et == EventType.TURN_START:
             self.current_turn = event.turn
         elif et == EventType.AGENT_START:
