@@ -12,6 +12,7 @@ For Playwright browser: wraps it as a FunctionTool since ADK's MCPToolset
 doesn't support persistent sessions.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -207,20 +208,23 @@ _BRAVE_TOOLS = [
 # Playwright browser wrapper (persistent session via FunctionTool)
 # ---------------------------------------------------------------------------
 _browser_session = None
+_browser_lock = asyncio.Lock()
 
 
 async def _get_browser_session():
     """Lazily initialise and return the shared PlaywrightSession."""
     global _browser_session
-    if _browser_session is None:
-        from miroflow_tools.mcp_servers.browser_session import PlaywrightSession
+    async with _browser_lock:
+        if _browser_session is None:
+            from miroflow_tools.mcp_servers.browser_session import PlaywrightSession
 
-        params = StdioServerParameters(
-            command="npx",
-            args=["@playwright/mcp@latest"],
-        )
-        _browser_session = PlaywrightSession(params)
-        await _browser_session.connect()
+            params = StdioServerParameters(
+                command="npx",
+                args=["@playwright/mcp@latest"],
+            )
+            session = PlaywrightSession(params)
+            await session.connect()
+            _browser_session = session
     return _browser_session
 
 

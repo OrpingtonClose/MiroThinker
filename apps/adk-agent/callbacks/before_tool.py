@@ -91,7 +91,7 @@ def before_tool_callback(
             consecutive = state["consecutive_dedup_errors"] + 1
             state["consecutive_dedup_errors"] = consecutive
 
-            if consecutive > MAX_CONSECUTIVE_ERRORS:
+            if consecutive >= MAX_CONSECUTIVE_ERRORS:
                 # Escape hatch: allow the duplicate through
                 logger.warning(
                     "Dedup escape hatch: allowing duplicate after %d consecutive blocks "
