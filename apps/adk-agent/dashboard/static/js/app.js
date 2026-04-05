@@ -145,10 +145,10 @@ const App = {
 
       case 'llm_call_start':
         this.kpi.llmCalls++;
+        this.kpi.promptTokens += d.estimated_prompt_tokens || 0;
         break;
 
       case 'llm_call_end':
-        this.kpi.promptTokens += d.prompt_tokens_est || 0;
         this.kpi.completionTokens += d.completion_tokens_est || 0;
         break;
 
@@ -214,12 +214,31 @@ const App = {
 
   async _loadFinalMetrics(sessionId) {
     try {
+      // Try live metrics endpoint first
       const resp = await fetch(`/api/metrics/${sessionId}`);
-      if (!resp.ok) return;
-      const metrics = await resp.json();
-      this._populateFromMetrics(metrics);
+      if (resp.ok) {
+        const metrics = await resp.json();
+        this._populateFromMetrics(metrics);
+        return;
+      }
     } catch (e) {
-      console.error('Failed to load final metrics:', e);
+      console.warn('Live metrics unavailable, trying saved reports:', e.message);
+    }
+    // Fallback: try to load from saved reports
+    try {
+      const reportResp = await fetch('/api/reports');
+      if (!reportResp.ok) return;
+      const reports = await reportResp.json();
+      const match = reports.find(r => r.filename.includes(sessionId));
+      if (match) {
+        const dataResp = await fetch(`/api/reports/${match.filename}`);
+        if (dataResp.ok) {
+          const metrics = await dataResp.json();
+          this._populateFromMetrics(metrics);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load final metrics from reports:', e);
     }
   },
 
