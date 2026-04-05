@@ -85,6 +85,37 @@ def _maybe_truncate_scrape(tool_name: str, result_text: str) -> str:
 # ── callback ─────────────────────────────────────────────────────────────────
 
 
+def _emit_tool_call_end(
+    tool_name: str,
+    tool_context: ToolContext,
+    result_text: str,
+    error: str = "",
+    was_bad_result: bool = False,
+) -> None:
+    """Emit TOOL_CALL_END so every TOOL_CALL_START gets a matching end event."""
+    collector = get_collector()
+    if not collector:
+        return
+    from dashboard.models import DashboardEvent, EventType
+
+    start_t = tool_context.state.get("_tool_start_time", time.time())
+    duration = round(time.time() - start_t, 4)
+    collector.emit_sync(
+        DashboardEvent(
+            event_type=EventType.TOOL_CALL_END,
+            agent_name=getattr(tool_context, "agent_name", ""),
+            turn=collector.current_turn,
+            data={
+                "tool_name": tool_name,
+                "duration_secs": duration,
+                "result_size_chars": len(result_text),
+                "error": error,
+                "was_bad_result": was_bad_result,
+            },
+        )
+    )
+
+
 def after_tool_callback(
     tool: Any, args: Dict[str, Any], tool_context: ToolContext, tool_response: Any
 ) -> Optional[Dict[str, Any]]:
@@ -119,6 +150,8 @@ def after_tool_callback(
                     },
                 )
             )
+        # Emit TOOL_CALL_END even on bad results so start/end counts match
+        _emit_tool_call_end(tool_name, tool_context, result_text, error=bad[:200], was_bad_result=True)
         return {"error": bad}
 
     # ── Complete Algorithm 2: record successful query ───────────────────
@@ -132,26 +165,11 @@ def after_tool_callback(
     # ── DEMO_MODE truncation ────────────────────────────────────────────
     truncated = _maybe_truncate_scrape(tool_name, result_text)
     if truncated != result_text:
+        # Emit TOOL_CALL_END before returning truncated result
+        _emit_tool_call_end(tool_name, tool_context, truncated)
         return {"result": truncated}
 
-    # Emit tool-call-end event
-    if collector:
-        from dashboard.models import DashboardEvent, EventType
-
-        start_t = state.get("_tool_start_time", time.time())
-        duration = round(time.time() - start_t, 4)
-        collector.emit_sync(
-            DashboardEvent(
-                event_type=EventType.TOOL_CALL_END,
-                agent_name=getattr(tool_context, "agent_name", ""),
-                turn=collector.current_turn,
-                data={
-                    "tool_name": tool_name,
-                    "duration_secs": duration,
-                    "result_size_chars": len(result_text),
-                    "error": "",
-                },
-            )
-        )
+    # Emit tool-call-end event for the normal path
+    _emit_tool_call_end(tool_name, tool_context, result_text)
 
     return None  # keep the original result

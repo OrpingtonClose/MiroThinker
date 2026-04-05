@@ -275,12 +275,14 @@ async def main(task: str | None = None) -> str:
 
     # ── Dashboard teardown ───────────────────────────────────────────────
     if collector:
-        # end_session() emits SESSION_END internally — no separate emit needed
-        report_path = collector.save()
+        # end_session() emits SESSION_END internally — no separate emit needed.
+        # Must call end_session() BEFORE save() so the SESSION_END event and
+        # final_answer data are included in the persisted JSON report.
         await collector.end_session(
             final_answer=str(final_answer)[:500],
             attempts_used=min(attempt, CONTEXT_COMPRESS_LIMIT),
         )
+        report_path = collector.save()
         clear_collector()
         logger.info("Dashboard metrics saved to %s", report_path)
 
