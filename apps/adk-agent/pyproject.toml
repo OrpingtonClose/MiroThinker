@@ -7,7 +7,9 @@ dependencies = [
     "miroflow-tools>=0.1.0",
     "python-dotenv",
     "litellm",
-    "agentops",
+    "arize-phoenix",
+    "arize-phoenix-otel",
+    "openinference-instrumentation-google-adk",
 ]
 
 [tool.uv.sources]

@@ -27,9 +27,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import agentops
+# ── Phoenix self-hosted observability (zero custom code) ────────────────
+# Automatically instruments all ADK agent runs, tool calls, and LLM requests.
+# Start the local Phoenix server with:  python -m phoenix.server.main serve
+# Then open http://localhost:6006 to view traces.
+from phoenix.otel import register
 
-agentops.init()
+_tracer_provider = register(
+    project_name="mirothinker-adk",
+    auto_instrument=True,  # auto-instruments ADK via openinference
+)
 
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
@@ -188,7 +195,6 @@ async def main(task: str | None = None) -> str:
         final_answer = "(No answer could be determined)"
 
     print(f"\nFinal answer: {final_answer}\n")
-    agentops.end_session("Success" if final_answer != "(No answer could be determined)" else "Fail")
     return final_answer
 
 
