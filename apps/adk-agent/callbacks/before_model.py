@@ -87,7 +87,7 @@ def before_model_callback(
             role == "user"
             and idx != first_user_idx
             and content.parts
-            and any(hasattr(p, "function_response") for p in content.parts)
+            and any(hasattr(p, "function_response") and p.function_response for p in content.parts)
         ):
             tool_indices.append(idx)
 
@@ -99,10 +99,27 @@ def before_model_callback(
         # the preceding model message to maintain the FunctionCall →
         # FunctionResponse pairing required by both Gemini and OpenAI APIs.
         indices_to_trim = tool_indices[: len(tool_indices) - keep_k]
+        # Collect the function names being trimmed so we only replace
+        # matching FunctionCall parts (not all FunctionCalls in a shared
+        # model message with parallel tool calls).
+        trimmed_fn_names: set[str] = set()
         for idx in indices_to_trim:
-            # Build a summary of the tool call being omitted
-            tool_name_hint = ""
-            # Look at the preceding model message for a FunctionCall
+            for part in (contents[idx].parts or []):
+                if hasattr(part, "function_response") and part.function_response:
+                    name = getattr(part.function_response, "name", None)
+                    if name:
+                        trimmed_fn_names.add(name)
+
+        for idx in indices_to_trim:
+            # Find the function name(s) in this tool response
+            response_names: set[str] = set()
+            for part in (contents[idx].parts or []):
+                if hasattr(part, "function_response") and part.function_response:
+                    name = getattr(part.function_response, "name", None)
+                    if name:
+                        response_names.add(name)
+
+            # Look at the preceding model message for matching FunctionCalls
             if idx > 0:
                 prev = contents[idx - 1]
                 prev_role = getattr(prev, "role", None)
@@ -110,12 +127,16 @@ def before_model_callback(
                     new_parts = []
                     for part in prev.parts:
                         if hasattr(part, "function_call") and part.function_call:
-                            fc = part.function_call
-                            tool_name_hint = getattr(fc, "name", "tool")
-                            # Replace FunctionCall with text summary
-                            new_parts.append(genai_types.Part(
-                                text=f"[Called {tool_name_hint} — result omitted to save tokens]"
-                            ))
+                            fc_name = getattr(part.function_call, "name", "")
+                            if fc_name in response_names:
+                                # Replace only the FunctionCall matching
+                                # the trimmed FunctionResponse
+                                new_parts.append(genai_types.Part(
+                                    text=f"[Called {fc_name} — result omitted to save tokens]"
+                                ))
+                            else:
+                                # Keep FunctionCalls for non-trimmed results
+                                new_parts.append(part)
                         else:
                             new_parts.append(part)
                     contents[idx - 1] = genai_types.Content(
