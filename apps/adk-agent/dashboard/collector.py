@@ -144,9 +144,19 @@ class DashboardCollector:
                 arguments=data.get("arguments_summary", ""),
             )
         elif et == EventType.TOOL_CALL_END:
-            # Finalize the tracking record
-            call_id = data.get("call_id") or f"tool_{self.total_tool_calls}"
-            record = self._active_tool_calls.pop(call_id, None)
+            # Finalize the tracking record.  Match by call_id first; if
+            # missing, fall back to the most recent active call with the
+            # same tool_name to avoid mismatches when multiple tools are
+            # in-flight concurrently.
+            call_id = data.get("call_id")
+            record = self._active_tool_calls.pop(call_id, None) if call_id else None
+            if record is None:
+                # Fallback: find by tool_name (pop the matching entry)
+                tool_name = data.get("tool_name", "")
+                for cid, rec in list(self._active_tool_calls.items()):
+                    if rec.tool_name == tool_name:
+                        record = self._active_tool_calls.pop(cid)
+                        break
             if record:
                 record.duration_secs = data.get("duration_secs", 0.0)
                 record.result_size_chars = data.get("result_size_chars", 0)

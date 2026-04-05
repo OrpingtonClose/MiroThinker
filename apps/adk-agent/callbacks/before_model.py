@@ -119,29 +119,42 @@ def before_model_callback(
                     if name:
                         response_names.add(name)
 
-            # Look at the preceding model message for matching FunctionCalls
-            if idx > 0:
-                prev = contents[idx - 1]
+            # Search backwards for the nearest model message containing
+            # matching FunctionCall parts.  For parallel tool calls
+            # (OpenAI/LiteLLM format) a single model message at index M
+            # may contain multiple FunctionCalls followed by separate tool
+            # response messages at M+1, M+2, etc.  Looking only at
+            # contents[idx-1] would fail for M+2 and beyond.
+            for prev_idx in range(idx - 1, -1, -1):
+                prev = contents[prev_idx]
                 prev_role = getattr(prev, "role", None)
                 if prev_role == "model" and prev.parts:
-                    new_parts = []
-                    for part in prev.parts:
-                        if hasattr(part, "function_call") and part.function_call:
-                            fc_name = getattr(part.function_call, "name", "")
-                            if fc_name in response_names:
-                                # Replace only the FunctionCall matching
-                                # the trimmed FunctionResponse
-                                new_parts.append(genai_types.Part(
-                                    text=f"[Called {fc_name} — result omitted to save tokens]"
-                                ))
-                            else:
-                                # Keep FunctionCalls for non-trimmed results
-                                new_parts.append(part)
-                        else:
-                            new_parts.append(part)
-                    contents[idx - 1] = genai_types.Content(
-                        role="model", parts=new_parts
+                    # Check if this model message has matching FunctionCalls
+                    has_match = any(
+                        hasattr(p, "function_call") and p.function_call
+                        and getattr(p.function_call, "name", "") in response_names
+                        for p in prev.parts
                     )
+                    if has_match:
+                        new_parts = []
+                        for part in prev.parts:
+                            if hasattr(part, "function_call") and part.function_call:
+                                fc_name = getattr(part.function_call, "name", "")
+                                if fc_name in response_names:
+                                    # Replace only the FunctionCall matching
+                                    # the trimmed FunctionResponse
+                                    new_parts.append(genai_types.Part(
+                                        text=f"[Called {fc_name} — result omitted to save tokens]"
+                                    ))
+                                else:
+                                    # Keep FunctionCalls for non-trimmed results
+                                    new_parts.append(part)
+                            else:
+                                new_parts.append(part)
+                        contents[prev_idx] = genai_types.Content(
+                            role="model", parts=new_parts
+                        )
+                        break
             # Replace the tool response with a matching text placeholder
             contents[idx] = genai_types.Content(
                 role=contents[idx].role,
@@ -202,7 +215,7 @@ def before_model_callback(
                     turn=collector.current_turn,
                     data={
                         "estimated_tokens": estimated,
-                        "threshold": MAX_CONTEXT_TOKENS,
+                        "max_tokens": MAX_CONTEXT_TOKENS,
                     },
                 )
             )
