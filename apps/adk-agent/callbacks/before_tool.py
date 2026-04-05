@@ -75,36 +75,43 @@ def before_tool_callback(
         logger.info("Arg fix applied for %s: %s", tool_name, list(args.keys()))
 
     # ── Algorithm 2: Dedup Guard ────────────────────────────────────────
+    # Per-agent isolation: each agent has its own dedup cache and
+    # consecutive-error counter, matching original MiroThinker where
+    # cache_name = agent_id + "_" + tool_name.
+    agent_name: str = getattr(tool_context, "agent_name", "")
+    dedup_counter_key = f"consecutive_dedup_errors:{agent_name}"
 
     # Initialise session-state buckets on first use
     if "seen_queries" not in state:
         state["seen_queries"] = {}
-    if "consecutive_dedup_errors" not in state:
-        state["consecutive_dedup_errors"] = 0
+    if dedup_counter_key not in state:
+        state[dedup_counter_key] = 0
 
-    query_key = build_query_key(tool_name, args)
+    query_key = build_query_key(tool_name, args, agent_name=agent_name)
 
     if query_key is not None:
         seen: Dict[str, int] = state["seen_queries"]
 
         if query_key in seen:
-            consecutive = state["consecutive_dedup_errors"] + 1
-            state["consecutive_dedup_errors"] = consecutive
+            consecutive = state[dedup_counter_key] + 1
+            state[dedup_counter_key] = consecutive
 
             if consecutive >= MAX_CONSECUTIVE_ERRORS:
                 # Escape hatch: allow the duplicate through
                 logger.warning(
                     "Dedup escape hatch: allowing duplicate after %d consecutive blocks "
-                    "(tool=%s, key=%s)",
+                    "(agent=%s, tool=%s, key=%s)",
                     consecutive,
+                    agent_name,
                     tool_name,
                     query_key,
                 )
-                state["consecutive_dedup_errors"] = 0
+                state[dedup_counter_key] = 0
                 # Fall through to allow execution
             else:
                 logger.info(
-                    "Dedup guard blocked duplicate (tool=%s, key=%s, consecutive=%d)",
+                    "Dedup guard blocked duplicate (agent=%s, tool=%s, key=%s, consecutive=%d)",
+                    agent_name,
                     tool_name,
                     query_key,
                     consecutive,
@@ -117,10 +124,10 @@ def before_tool_callback(
                 }
         else:
             # Not a duplicate — reset the consecutive error counter
-            state["consecutive_dedup_errors"] = 0
+            state[dedup_counter_key] = 0
     else:
         # Non-tracked tool call — also reset consecutive counter
         # (matches original MiroThinker algorithm which resets after any successful turn)
-        state["consecutive_dedup_errors"] = 0
+        state[dedup_counter_key] = 0
 
     return None  # allow execution; recording happens in after_tool

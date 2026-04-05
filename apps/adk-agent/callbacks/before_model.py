@@ -207,15 +207,17 @@ def before_model_callback(
     # ── Context length check ────────────────────────────────────────────
     estimated = _estimate_tokens(contents)
 
-    if estimated > MAX_CONTEXT_TOKENS and not state.get("force_end"):
-        state["force_end"] = True
-        logger.warning(
-            "Context length estimate (%d tokens) exceeds threshold (%d). "
-            "Setting force_end=True and injecting wrap-up instruction.",
-            estimated,
-            MAX_CONTEXT_TOKENS,
-        )
-        # Inject a system-level message telling the model to wrap up now
+    if estimated > MAX_CONTEXT_TOKENS:
+        if not state.get("force_end"):
+            state["force_end"] = True
+            logger.warning(
+                "Context length estimate (%d tokens) exceeds threshold (%d). "
+                "Setting force_end=True and injecting wrap-up instruction.",
+                estimated,
+                MAX_CONTEXT_TOKENS,
+            )
+        # Re-inject on every call since contents are rebuilt from session
+        # history (the injected message is not persisted to the session)
         force_end_msg = genai_types.Content(
             role="user",
             parts=[genai_types.Part(text=(

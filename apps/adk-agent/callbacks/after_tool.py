@@ -106,7 +106,8 @@ def after_tool_callback(
     if "seen_queries" not in state:
         state["seen_queries"] = {}
 
-    query_key = build_query_key(tool_name, args)
+    agent_name: str = getattr(tool_context, "agent_name", "")
+    query_key = build_query_key(tool_name, args, agent_name=agent_name)
     if query_key is not None:
         state["seen_queries"][query_key] = state["seen_queries"].get(query_key, 0) + 1
 
