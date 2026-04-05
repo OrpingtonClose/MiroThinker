@@ -27,11 +27,12 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-# ── Phoenix self-hosted observability (zero custom code) ────────────────
-# Automatically instruments all ADK agent runs, tool calls, and LLM requests.
+# ── Phoenix/Arize observability (zero custom code) ─────────────────────
+# Uses phoenix.otel + GoogleADKInstrumentor for rich agent graph visualization.
 # Start the local Phoenix server with:  python -m phoenix.server.main serve
-# Then open http://localhost:6006 to view traces.
+# Then open http://localhost:6006 to view traces + Agent Graph & Path.
 from phoenix.otel import register
+from openinference.instrumentation.google_adk import GoogleADKInstrumentor
 
 _phoenix_endpoint = os.environ.get(
     "PHOENIX_COLLECTOR_ENDPOINT", "http://localhost:6006/v1/traces"
@@ -39,8 +40,8 @@ _phoenix_endpoint = os.environ.get(
 _tracer_provider = register(
     project_name="mirothinker-adk",
     endpoint=_phoenix_endpoint,
-    auto_instrument=True,  # auto-instruments ADK via openinference
 )
+GoogleADKInstrumentor().instrument(tracer_provider=_tracer_provider)
 
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService

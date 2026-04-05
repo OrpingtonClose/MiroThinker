@@ -124,51 +124,13 @@ def before_model_callback(
 
         indices_to_trim = tool_indices[:raw_split]
 
-        # Track which FunctionCalls have already been replaced to handle
-        # parallel calls correctly (use positional index within model message)
-        replaced_fc_positions: dict[int, set[int]] = {}  # model_idx -> set of part positions
-
         for idx in indices_to_trim:
-            # Find the function name(s) in this tool response
-            response_names: list[str] = []
-            for part in (contents[idx].parts or []):
-                if hasattr(part, "function_response") and part.function_response:
-                    name = getattr(part.function_response, "name", None)
-                    if name:
-                        response_names.append(name)
-
-            # Search backwards for the nearest model message containing
-            # matching FunctionCall parts.
-            model_idx = _find_model_msg(idx)
-            if model_idx >= 0:
-                prev = contents[model_idx]
-                if model_idx not in replaced_fc_positions:
-                    replaced_fc_positions[model_idx] = set()
-
-                new_parts = []
-                names_to_replace = list(response_names)  # consume one per match
-                for part_pos, part in enumerate(prev.parts):
-                    if (
-                        hasattr(part, "function_call") and part.function_call
-                        and part_pos not in replaced_fc_positions[model_idx]
-                    ):
-                        fc_name = getattr(part.function_call, "name", "")
-                        if fc_name in names_to_replace:
-                            # Replace this specific FunctionCall (by position)
-                            names_to_replace.remove(fc_name)
-                            replaced_fc_positions[model_idx].add(part_pos)
-                            new_parts.append(genai_types.Part(
-                                text=f"[Called {fc_name} — result omitted to save tokens]"
-                            ))
-                        else:
-                            new_parts.append(part)
-                    else:
-                        new_parts.append(part)
-                contents[model_idx] = genai_types.Content(
-                    role="model", parts=new_parts
-                )
-
-            # Replace the tool response with a placeholder.
+            # Replace the tool response content with a placeholder.
+            # IMPORTANT: Leave the corresponding FunctionCall parts in
+            # model messages UNTOUCHED to maintain the FunctionCall →
+            # FunctionResponse structural pairing required by both
+            # Gemini and OpenAI APIs. Only the bulky response content
+            # is replaced — this mirrors the original MiroThinker approach.
             # IMPORTANT: role="tool" messages MUST contain function_response
             # parts (not plain text) to satisfy the API schema. For role="user"
             # messages that happen to carry function_response parts, plain text
