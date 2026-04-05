@@ -37,6 +37,7 @@ from agents.research import research_agent
 from agents.summary import summary_agent
 from dashboard.collector import DashboardCollector
 from dashboard.models import DashboardEvent, EventType
+from dashboard.registry import clear_collector, set_collector
 from dashboard.server import app as dashboard_app
 from dashboard.server import collectors as dashboard_collectors
 from prompts.templates import (
@@ -112,6 +113,7 @@ async def main(task: str | None = None) -> str:
         _start_dashboard_server()
         collector = DashboardCollector(session_id=session_id, query=task)
         dashboard_collectors[session_id] = collector
+        set_collector(collector)  # module-level global for callbacks
         print(f"\n  Dashboard: http://localhost:{DASHBOARD_PORT}/?session={session_id}\n")
 
         await collector.emit(
@@ -124,6 +126,7 @@ async def main(task: str | None = None) -> str:
     session_service = InMemorySessionService()
     failure_experiences: list[str] = []
     final_answer: str | None = None
+    attempt = 0  # initialise so it's defined even if CONTEXT_COMPRESS_LIMIT is 0
 
     for attempt in range(1, CONTEXT_COMPRESS_LIMIT + 1):
         is_final = attempt == CONTEXT_COMPRESS_LIMIT
@@ -160,9 +163,8 @@ async def main(task: str | None = None) -> str:
             app_name=APP_NAME, user_id=USER_ID
         )
 
-        # Inject collector into session state so callbacks can access it
-        if collector:
-            session.state["_dashboard_collector"] = collector
+        # Collector is accessible via dashboard.registry (module-level global)
+        # ADK's InMemorySessionService doesn't persist arbitrary objects in state
 
         # Run the research agent
         runner = Runner(
@@ -273,17 +275,13 @@ async def main(task: str | None = None) -> str:
 
     # ── Dashboard teardown ───────────────────────────────────────────────
     if collector:
-        await collector.emit(
-            DashboardEvent(
-                event_type=EventType.SESSION_END,
-                data={
-                    "final_answer": str(final_answer)[:500],
-                    "attempts_used": min(attempt, CONTEXT_COMPRESS_LIMIT),
-                },
-            )
-        )
+        # end_session() emits SESSION_END internally — no separate emit needed
         report_path = collector.save()
-        await collector.end_session()
+        await collector.end_session(
+            final_answer=str(final_answer)[:500],
+            attempts_used=min(attempt, CONTEXT_COMPRESS_LIMIT),
+        )
+        clear_collector()
         logger.info("Dashboard metrics saved to %s", report_path)
 
     print(f"\nFinal answer: {final_answer}\n")

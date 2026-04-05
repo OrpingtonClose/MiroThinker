@@ -20,14 +20,15 @@ from typing import Any, Optional
 from google.adk.agents.callback_context import CallbackContext
 from google.genai import types as genai_types
 
+from dashboard.registry import get_collector
 from utils.boxed import extract_boxed_content
 
 logger = logging.getLogger(__name__)
 
 
 def after_model_callback(
-    callback_context: CallbackContext, llm_response: genai_types.GenerateContentResponse
-) -> Optional[genai_types.GenerateContentResponse]:
+    callback_context: CallbackContext, llm_response: Any
+) -> Optional[Any]:
     """
     ADK after_model_callback.
 
@@ -41,14 +42,14 @@ def after_model_callback(
     if "intermediate_boxed_answers" not in state:
         state["intermediate_boxed_answers"] = []
 
-    # Extract text from all candidates / parts
+    # Extract text from LlmResponse.content (not .candidates)
     response_text = ""
-    if llm_response and llm_response.candidates:
-        for candidate in llm_response.candidates:
-            if candidate.content and candidate.content.parts:
-                for part in candidate.content.parts:
-                    if hasattr(part, "text") and part.text:
-                        response_text += part.text
+    if llm_response and getattr(llm_response, "content", None):
+        content = llm_response.content
+        if hasattr(content, "parts") and content.parts:
+            for part in content.parts:
+                if hasattr(part, "text") and part.text:
+                    response_text += part.text
 
     if not response_text:
         return None
@@ -59,20 +60,16 @@ def after_model_callback(
         logger.info("Intermediate boxed answer captured: %s", boxed[:200])
 
         # Emit boxed-extraction event
-        collector = state.get("_dashboard_collector")
+        collector = get_collector()
         if collector:
             from dashboard.models import DashboardEvent, EventType
 
-            asyncio.get_event_loop().call_soon(
-                lambda: asyncio.ensure_future(
-                    collector.emit(
-                        DashboardEvent(
-                            event_type=EventType.BOXED_EXTRACTED,
-                            turn=collector.current_turn,
-                            data={"content": boxed[:500]},
-                        )
-                    )
-                ),
+            collector.emit_sync(
+                DashboardEvent(
+                    event_type=EventType.BOXED_EXTRACTED,
+                    turn=collector.current_turn,
+                    data={"content": boxed[:500]},
+                )
             )
 
     return None  # keep the original response

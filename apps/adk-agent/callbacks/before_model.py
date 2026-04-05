@@ -23,6 +23,8 @@ from typing import Any, List, Optional
 from google.adk.agents.callback_context import CallbackContext
 from google.genai import types as genai_types
 
+from dashboard.registry import get_collector
+
 logger = logging.getLogger(__name__)
 
 # Default number of recent tool results to keep (matches keep_tool_result=5)
@@ -89,7 +91,7 @@ def before_model_callback(
         ):
             tool_indices.append(idx)
 
-    collector = state.get("_dashboard_collector")
+    collector = get_collector()
 
     if keep_k >= 0 and len(tool_indices) > keep_k:
         # Replace all but the last K tool results with placeholder
@@ -108,21 +110,17 @@ def before_model_callback(
         if collector:
             from dashboard.models import DashboardEvent, EventType
 
-            asyncio.get_event_loop().call_soon(
-                lambda: asyncio.ensure_future(
-                    collector.emit(
-                        DashboardEvent(
-                            event_type=EventType.CONTEXT_TRIMMED,
-                            turn=collector.current_turn,
-                            data={
-                                "total_tool_results": len(tool_indices),
-                                "kept_results": keep_k,
-                                "omitted_count": omitted_count,
-                                "total_messages": len(contents),
-                            },
-                        )
-                    )
-                ),
+            collector.emit_sync(
+                DashboardEvent(
+                    event_type=EventType.CONTEXT_TRIMMED,
+                    turn=collector.current_turn,
+                    data={
+                        "total_tool_results": len(tool_indices),
+                        "kept_results": keep_k,
+                        "omitted_count": omitted_count,
+                        "total_messages": len(contents),
+                    },
+                )
             )
 
     # ── Context length check ────────────────────────────────────────────
@@ -132,19 +130,15 @@ def before_model_callback(
     if collector:
         from dashboard.models import DashboardEvent, EventType
 
-        asyncio.get_event_loop().call_soon(
-            lambda: asyncio.ensure_future(
-                collector.emit(
-                    DashboardEvent(
-                        event_type=EventType.LLM_CALL_START,
-                        turn=collector.current_turn,
-                        data={
-                            "estimated_prompt_tokens": estimated,
-                            "max_context_tokens": MAX_CONTEXT_TOKENS,
-                        },
-                    )
-                )
-            ),
+        collector.emit_sync(
+            DashboardEvent(
+                event_type=EventType.LLM_CALL_START,
+                turn=collector.current_turn,
+                data={
+                    "estimated_prompt_tokens": estimated,
+                    "max_context_tokens": MAX_CONTEXT_TOKENS,
+                },
+            )
         )
 
     if estimated > MAX_CONTEXT_TOKENS:
@@ -156,19 +150,15 @@ def before_model_callback(
             MAX_CONTEXT_TOKENS,
         )
         if collector:
-            asyncio.get_event_loop().call_soon(
-                lambda: asyncio.ensure_future(
-                    collector.emit(
-                        DashboardEvent(
-                            event_type=EventType.FORCE_END_TRIGGERED,
-                            turn=collector.current_turn,
-                            data={
-                                "estimated_tokens": estimated,
-                                "threshold": MAX_CONTEXT_TOKENS,
-                            },
-                        )
-                    )
-                ),
+            collector.emit_sync(
+                DashboardEvent(
+                    event_type=EventType.FORCE_END_TRIGGERED,
+                    turn=collector.current_turn,
+                    data={
+                        "estimated_tokens": estimated,
+                        "threshold": MAX_CONTEXT_TOKENS,
+                    },
+                )
             )
         # Inject a system-level message telling the model to wrap up now
         force_end_msg = genai_types.Content(

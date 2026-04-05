@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import os
+import queue
 import time
 from collections import defaultdict
 from dataclasses import asdict
@@ -55,8 +56,9 @@ class DashboardCollector:
         self.started_at = datetime.now(timezone.utc).isoformat()
         self._start_time = time.time()
 
-        # SSE event queue (consumers read from here)
-        self.event_queue: asyncio.Queue[Optional[DashboardEvent]] = asyncio.Queue()
+        # SSE event queue — thread-safe so the uvicorn server thread
+        # can safely read while the main event loop writes.
+        self.event_queue: queue.Queue[Optional[DashboardEvent]] = queue.Queue()
 
         # Full event history
         self.events: list[DashboardEvent] = []
@@ -95,14 +97,20 @@ class DashboardCollector:
     # ------------------------------------------------------------------
 
     async def emit(self, event: DashboardEvent) -> None:
-        """Push event to SSE queue and record in history."""
+        """Push event to SSE queue and record in history (async)."""
+        self._push(event)
+
+    def emit_sync(self, event: DashboardEvent) -> None:
+        """Push event synchronously — safe to call from non-async callbacks."""
+        self._push(event)
+
+    def _push(self, event: DashboardEvent) -> None:
+        """Internal: append event and push to the thread-safe queue."""
         self.events.append(event)
         try:
             self.event_queue.put_nowait(event)
-        except asyncio.QueueFull:
+        except queue.Full:
             logger.warning("Dashboard event queue full, dropping event")
-
-        # Route to typed lists
         self._route_event(event)
 
     def _route_event(self, event: DashboardEvent) -> None:
@@ -210,10 +218,15 @@ class DashboardCollector:
     # End session
     # ------------------------------------------------------------------
 
-    async def end_session(self) -> None:
+    async def end_session(self, final_answer: str = "", attempts_used: int = 0) -> None:
         """Signal that the session is over (sends sentinel to SSE queue)."""
-        await self.emit(DashboardEvent(event_type=EventType.SESSION_END))
-        await self.event_queue.put(None)  # sentinel
+        await self.emit(
+            DashboardEvent(
+                event_type=EventType.SESSION_END,
+                data={"final_answer": final_answer, "attempts_used": attempts_used},
+            )
+        )
+        self.event_queue.put_nowait(None)  # sentinel
 
     # ------------------------------------------------------------------
     # Metrics summary

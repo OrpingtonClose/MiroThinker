@@ -15,8 +15,10 @@ Provides:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import queue
 from pathlib import Path
 from typing import Any
 
@@ -68,7 +70,13 @@ async def stream_events(session_id: str):
 
     async def event_generator():
         while True:
-            event = await collector.event_queue.get()
+            # Poll the thread-safe queue with a short sleep to
+            # avoid blocking the asyncio event loop.
+            try:
+                event = collector.event_queue.get_nowait()
+            except queue.Empty:
+                await asyncio.sleep(0.1)
+                continue
             if event is None:
                 # Sentinel: session ended
                 yield f"data: {json.dumps({'type': 'end'})}\n\n"

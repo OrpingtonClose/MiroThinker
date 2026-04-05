@@ -12,16 +12,21 @@ For Playwright browser: wraps it as a FunctionTool since ADK's MCPToolset
 doesn't support persistent sessions.
 """
 
+import json
+import logging
 import os
 import sys
 from typing import List
 
+import httpx
 from dotenv import load_dotenv
 from google.adk.tools import FunctionTool
 from google.adk.tools.mcp_tool import MCPToolset
 from mcp import StdioServerParameters
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Environment variables
@@ -36,6 +41,8 @@ SUMMARY_LLM_BASE_URL = os.environ.get("SUMMARY_LLM_BASE_URL", "")
 SUMMARY_LLM_MODEL_NAME = os.environ.get("SUMMARY_LLM_MODEL_NAME", "")
 TENCENTCLOUD_SECRET_ID = os.environ.get("TENCENTCLOUD_SECRET_ID", "")
 TENCENTCLOUD_SECRET_KEY = os.environ.get("TENCENTCLOUD_SECRET_KEY", "")
+BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "")
+FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # MCP server configs — mirrors settings.py from miroflow-agent
@@ -88,6 +95,112 @@ _TOOL_CONFIGS = {
         },
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# Brave Search + Firecrawl FunctionTools (alternative to Serper/Jina)
+# ---------------------------------------------------------------------------
+
+
+async def brave_web_search(
+    q: str,
+    count: int = 10,
+    country: str = "",
+    search_lang: str = "en",
+    freshness: str = "",
+) -> str:
+    """Search the web using the Brave Search API.
+
+    Args:
+        q: Search query string.
+        count: Number of results to return (default: 10, max: 20).
+        country: Country code for regional results (e.g., 'US', 'PL').
+        search_lang: Language code (default: 'en').
+        freshness: Time filter — 'pd' (past day), 'pw' (past week), 'pm' (past month), 'py' (past year), or empty for any time.
+
+    Returns:
+        JSON string with search results including title, url, and description for each result.
+    """
+    if not BRAVE_API_KEY:
+        return json.dumps({"error": "BRAVE_API_KEY not set", "organic": []})
+
+    params = {"q": q, "count": min(count, 20), "search_lang": search_lang}
+    if country:
+        params["country"] = country
+    if freshness:
+        params["freshness"] = freshness
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                params=params,
+                headers={
+                    "Accept": "application/json",
+                    "Accept-Encoding": "gzip",
+                    "X-Subscription-Token": BRAVE_API_KEY,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        results = []
+        for item in data.get("web", {}).get("results", []):
+            results.append({
+                "title": item.get("title", ""),
+                "link": item.get("url", ""),
+                "snippet": item.get("description", ""),
+            })
+
+        return json.dumps({"organic": results, "searchParameters": {"q": q}}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": f"Brave search failed: {exc}", "organic": []})
+
+
+async def firecrawl_scrape(url: str, only_main_content: bool = True) -> str:
+    """Scrape a webpage and return its content as clean markdown using the Firecrawl API.
+
+    Args:
+        url: The URL of the webpage to scrape.
+        only_main_content: If True, return only the main content (skip navbars, footers, etc.). Default True.
+
+    Returns:
+        The scraped page content as markdown text, or an error message.
+    """
+    if not FIRECRAWL_API_KEY:
+        return "[ERROR]: FIRECRAWL_API_KEY not set, scraping is unavailable."
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                "https://api.firecrawl.dev/v1/scrape",
+                json={"url": url, "formats": ["markdown"], "onlyMainContent": only_main_content},
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {FIRECRAWL_API_KEY}",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        if data.get("success"):
+            md = data.get("data", {}).get("markdown", "")
+            title = data.get("data", {}).get("metadata", {}).get("title", "")
+            # Truncate to 30K chars to avoid overwhelming context
+            if len(md) > 30000:
+                md = md[:30000] + "\n\n[... content truncated at 30K characters ...]"
+            header = f"# {title}\nSource: {url}\n\n" if title else f"Source: {url}\n\n"
+            return header + md
+        else:
+            return f"[ERROR]: Firecrawl scrape failed: {data}"
+    except Exception as exc:
+        return f"[ERROR]: Firecrawl scrape error: {exc}"
+
+
+_BRAVE_TOOLS = [
+    FunctionTool(brave_web_search),
+    FunctionTool(firecrawl_scrape),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +270,7 @@ def get_tools(tool_names: List[str]):
     Args:
         tool_names: List of config names such as ``"tool-google-search"``,
             ``"search_and_scrape_webpage"``, ``"jina_scrape_llm_summary"``,
-            ``"tool-python"``, or ``"browser"``.
+            ``"tool-python"``, ``"browser"``, or ``"brave-search"``.
 
     Returns:
         A list of MCPToolset / FunctionTool instances ready for an ADK Agent.
@@ -166,6 +279,8 @@ def get_tools(tool_names: List[str]):
     for name in tool_names:
         if name == "browser":
             tools.extend(_BROWSER_TOOLS)
+        elif name == "brave-search":
+            tools.extend(_BRAVE_TOOLS)
         elif name in _TOOL_CONFIGS:
             server_params = _TOOL_CONFIGS[name]()
             toolset = MCPToolset(
@@ -175,6 +290,6 @@ def get_tools(tool_names: List[str]):
         else:
             raise ValueError(
                 f"Unknown tool config name: {name!r}. "
-                f"Available: {sorted(list(_TOOL_CONFIGS.keys()) + ['browser'])}"
+                f"Available: {sorted(list(_TOOL_CONFIGS.keys()) + ['browser', 'brave-search'])}"
             )
     return tools

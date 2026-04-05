@@ -32,7 +32,7 @@ browsing_agent = Agent(
         "relevant background, and focus on factual gaps."
     ),
     instruction=BROWSING_AGENT_INSTRUCTION,
-    tools=get_tools(["tool-google-search"]),
+    tools=get_tools(["brave-search"]),
     before_tool_callback=before_tool_callback,
     after_tool_callback=after_tool_callback,
 )

@@ -34,4 +34,8 @@ def build_query_key(tool_name: str, args: Dict[str, Any]) -> Optional[str]:
         )
     if tool_name == "search_and_browse":
         return tool_name + "_" + args.get("subtask", "")
+    if tool_name == "brave_web_search":
+        return tool_name + "_" + args.get("q", "")
+    if tool_name == "firecrawl_scrape":
+        return tool_name + "_" + args.get("url", "")
     return None
