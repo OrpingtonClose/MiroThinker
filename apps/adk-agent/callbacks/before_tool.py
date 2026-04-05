@@ -18,7 +18,10 @@ Algorithm 2 — Dedup Guard:
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import time
 from typing import Any, Dict, Optional
 
 from google.adk.tools import ToolContext
@@ -67,7 +70,34 @@ def before_tool_callback(
     tool_name: str = tool.name if hasattr(tool, "name") else str(tool)
 
     # ── Algorithm 8: Arg Fix ────────────────────────────────────────────
+    original_args = dict(args)  # snapshot before fix
     _fix_args(tool_name, args)
+
+    # Emit arg-fix event if anything changed
+    collector = state.get("_dashboard_collector")
+    if collector and args != original_args:
+        from dashboard.models import DashboardEvent, EventType
+
+        fix_desc = ", ".join(
+            f"{k} -> {args.get(k, '?')}" for k in original_args if k not in args
+        ) or "parameters renamed"
+        asyncio.get_event_loop().call_soon(
+            lambda: asyncio.ensure_future(
+                collector.emit(
+                    DashboardEvent(
+                        event_type=EventType.ARG_FIX_APPLIED,
+                        agent_name=getattr(tool_context, "agent_name", ""),
+                        turn=collector.current_turn,
+                        data={
+                            "tool_name": tool_name,
+                            "fix_description": fix_desc,
+                            "original_keys": list(original_args.keys()),
+                            "fixed_keys": list(args.keys()),
+                        },
+                    )
+                )
+            ),
+        )
 
     # ── Algorithm 2: Dedup Guard ────────────────────────────────────────
     state = tool_context.state
@@ -99,6 +129,25 @@ def before_tool_callback(
                 query_key,
             )
             state["consecutive_dedup_errors"] = 0
+            if collector:
+                from dashboard.models import DashboardEvent, EventType
+
+                asyncio.get_event_loop().call_soon(
+                    lambda: asyncio.ensure_future(
+                        collector.emit(
+                            DashboardEvent(
+                                event_type=EventType.DEDUP_ALLOWED,
+                                agent_name=getattr(tool_context, "agent_name", ""),
+                                turn=collector.current_turn,
+                                data={
+                                    "tool_name": tool_name,
+                                    "query_key": query_key,
+                                    "consecutive_errors": consecutive,
+                                },
+                            )
+                        )
+                    ),
+                )
             return None  # let it run
 
         logger.info(
@@ -107,6 +156,25 @@ def before_tool_callback(
             query_key,
             consecutive,
         )
+        if collector:
+            from dashboard.models import DashboardEvent, EventType
+
+            asyncio.get_event_loop().call_soon(
+                lambda: asyncio.ensure_future(
+                    collector.emit(
+                        DashboardEvent(
+                            event_type=EventType.DEDUP_BLOCKED,
+                            agent_name=getattr(tool_context, "agent_name", ""),
+                            turn=collector.current_turn,
+                            data={
+                                "tool_name": tool_name,
+                                "query_key": query_key,
+                                "previous_count": seen.get(query_key, 0),
+                            },
+                        )
+                    )
+                ),
+            )
         return {
             "error": (
                 f"Duplicate query detected for '{query_key}'. "
@@ -116,4 +184,27 @@ def before_tool_callback(
 
     # Not a duplicate — reset the consecutive error counter
     state["consecutive_dedup_errors"] = 0
+
+    # Emit tool-call-start event
+    if collector:
+        from dashboard.models import DashboardEvent, EventType
+
+        state["_tool_start_time"] = time.time()
+        asyncio.get_event_loop().call_soon(
+            lambda: asyncio.ensure_future(
+                collector.emit(
+                    DashboardEvent(
+                        event_type=EventType.TOOL_CALL_START,
+                        agent_name=getattr(tool_context, "agent_name", ""),
+                        turn=collector.current_turn,
+                        data={
+                            "tool_name": tool_name,
+                            "arguments_summary": json.dumps(args, default=str)[:200],
+                            "arg_fix_applied": args != original_args,
+                        },
+                    )
+                )
+            ),
+        )
+
     return None  # allow execution; recording happens in after_tool

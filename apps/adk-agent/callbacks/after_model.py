@@ -13,6 +13,7 @@ fails to produce a valid boxed answer.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Optional
 
@@ -56,5 +57,22 @@ def after_model_callback(
     if boxed:
         state["intermediate_boxed_answers"].append(boxed)
         logger.info("Intermediate boxed answer captured: %s", boxed[:200])
+
+        # Emit boxed-extraction event
+        collector = state.get("_dashboard_collector")
+        if collector:
+            from dashboard.models import DashboardEvent, EventType
+
+            asyncio.get_event_loop().call_soon(
+                lambda: asyncio.ensure_future(
+                    collector.emit(
+                        DashboardEvent(
+                            event_type=EventType.BOXED_EXTRACTED,
+                            turn=collector.current_turn,
+                            data={"content": boxed[:500]},
+                        )
+                    )
+                ),
+            )
 
     return None  # keep the original response

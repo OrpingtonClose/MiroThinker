@@ -15,6 +15,7 @@ state so the agent instruction can trigger a final answer.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any, List, Optional
@@ -88,6 +89,8 @@ def before_model_callback(
         ):
             tool_indices.append(idx)
 
+    collector = state.get("_dashboard_collector")
+
     if keep_k >= 0 and len(tool_indices) > keep_k:
         # Replace all but the last K tool results with placeholder
         indices_to_trim = tool_indices[: len(tool_indices) - keep_k]
@@ -96,14 +99,54 @@ def before_model_callback(
                 role=contents[idx].role,
                 parts=[genai_types.Part(text=_PLACEHOLDER)],
             )
+        omitted_count = len(indices_to_trim)
         logger.info(
             "Keep-K-Recent: trimmed %d tool results, kept last %d",
-            len(indices_to_trim),
+            omitted_count,
             keep_k,
         )
+        if collector:
+            from dashboard.models import DashboardEvent, EventType
+
+            asyncio.get_event_loop().call_soon(
+                lambda: asyncio.ensure_future(
+                    collector.emit(
+                        DashboardEvent(
+                            event_type=EventType.CONTEXT_TRIMMED,
+                            turn=collector.current_turn,
+                            data={
+                                "total_tool_results": len(tool_indices),
+                                "kept_results": keep_k,
+                                "omitted_count": omitted_count,
+                                "total_messages": len(contents),
+                            },
+                        )
+                    )
+                ),
+            )
 
     # ── Context length check ────────────────────────────────────────────
     estimated = _estimate_tokens(contents)
+
+    # Emit LLM_CALL_START with token estimate
+    if collector:
+        from dashboard.models import DashboardEvent, EventType
+
+        asyncio.get_event_loop().call_soon(
+            lambda: asyncio.ensure_future(
+                collector.emit(
+                    DashboardEvent(
+                        event_type=EventType.LLM_CALL_START,
+                        turn=collector.current_turn,
+                        data={
+                            "estimated_prompt_tokens": estimated,
+                            "max_context_tokens": MAX_CONTEXT_TOKENS,
+                        },
+                    )
+                )
+            ),
+        )
+
     if estimated > MAX_CONTEXT_TOKENS:
         state["force_end"] = True
         logger.warning(
@@ -112,6 +155,21 @@ def before_model_callback(
             estimated,
             MAX_CONTEXT_TOKENS,
         )
+        if collector:
+            asyncio.get_event_loop().call_soon(
+                lambda: asyncio.ensure_future(
+                    collector.emit(
+                        DashboardEvent(
+                            event_type=EventType.FORCE_END_TRIGGERED,
+                            turn=collector.current_turn,
+                            data={
+                                "estimated_tokens": estimated,
+                                "threshold": MAX_CONTEXT_TOKENS,
+                            },
+                        )
+                    )
+                ),
+            )
         # Inject a system-level message telling the model to wrap up now
         force_end_msg = genai_types.Content(
             role="user",

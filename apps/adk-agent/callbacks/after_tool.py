@@ -12,9 +12,11 @@ truncates scrape results in DEMO_MODE.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, Optional
 
 from google.adk.tools import ToolContext
@@ -95,13 +97,34 @@ def after_tool_callback(
     result_text = str(tool_response) if tool_response is not None else ""
 
     # ── Algorithm 4: Bad Result Detection ───────────────────────────────
+    state = tool_context.state
+    collector = state.get("_dashboard_collector")
+
     bad = _is_bad_result(tool_name, result_text)
     if bad is not None:
         logger.warning("Bad result detected for %s: %s", tool_name, bad[:200])
+        if collector:
+            from dashboard.models import DashboardEvent, EventType
+
+            asyncio.get_event_loop().call_soon(
+                lambda: asyncio.ensure_future(
+                    collector.emit(
+                        DashboardEvent(
+                            event_type=EventType.BAD_RESULT_DETECTED,
+                            agent_name=getattr(tool_context, "agent_name", ""),
+                            turn=collector.current_turn,
+                            data={
+                                "tool_name": tool_name,
+                                "reason": bad[:200],
+                                "error_message": bad[:500],
+                            },
+                        )
+                    )
+                ),
+            )
         return {"error": bad}
 
     # ── Complete Algorithm 2: record successful query ───────────────────
-    state = tool_context.state
     if "seen_queries" not in state:
         state["seen_queries"] = {}
 
@@ -113,5 +136,29 @@ def after_tool_callback(
     truncated = _maybe_truncate_scrape(tool_name, result_text)
     if truncated != result_text:
         return {"result": truncated}
+
+    # Emit tool-call-end event
+    if collector:
+        from dashboard.models import DashboardEvent, EventType
+
+        start_t = state.get("_tool_start_time", time.time())
+        duration = round(time.time() - start_t, 4)
+        asyncio.get_event_loop().call_soon(
+            lambda: asyncio.ensure_future(
+                collector.emit(
+                    DashboardEvent(
+                        event_type=EventType.TOOL_CALL_END,
+                        agent_name=getattr(tool_context, "agent_name", ""),
+                        turn=collector.current_turn,
+                        data={
+                            "tool_name": tool_name,
+                            "duration_secs": duration,
+                            "result_size_chars": len(result_text),
+                            "error": "",
+                        },
+                    )
+                )
+            ),
+        )
 
     return None  # keep the original result

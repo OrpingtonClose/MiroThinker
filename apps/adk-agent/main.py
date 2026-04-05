@@ -22,6 +22,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
+import uuid
 
 from dotenv import load_dotenv
 
@@ -33,6 +35,10 @@ from google.genai import types as genai_types
 
 from agents.research import research_agent
 from agents.summary import summary_agent
+from dashboard.collector import DashboardCollector
+from dashboard.models import DashboardEvent, EventType
+from dashboard.server import app as dashboard_app
+from dashboard.server import collectors as dashboard_collectors
 from prompts.templates import (
     FAILURE_EXPERIENCE_FOOTER,
     FAILURE_EXPERIENCE_HEADER,
@@ -47,6 +53,8 @@ logger = logging.getLogger(__name__)
 APP_NAME = "mirothinker-adk"
 USER_ID = "user"
 CONTEXT_COMPRESS_LIMIT = int(os.environ.get("CONTEXT_COMPRESS_LIMIT", "5"))
+DASHBOARD_PORT = int(os.environ.get("DASHBOARD_PORT", "8080"))
+DASHBOARD_ENABLED = os.environ.get("DASHBOARD_ENABLED", "1") != "0"
 
 
 async def _collect_response_text(runner: Runner, user_id: str, session_id: str, message: str) -> str:
@@ -65,6 +73,23 @@ async def _collect_response_text(runner: Runner, user_id: str, session_id: str, 
     return collected
 
 
+def _start_dashboard_server() -> None:
+    """Start the FastAPI dashboard server in a background thread."""
+    import uvicorn
+
+    def _run():
+        uvicorn.run(
+            dashboard_app,
+            host="0.0.0.0",
+            port=DASHBOARD_PORT,
+            log_level="warning",
+        )
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    logger.info("Dashboard server started on http://localhost:%d", DASHBOARD_PORT)
+
+
 async def main(task: str | None = None) -> str:
     """
     Run the MiroThinker ADK agent with context-compression retry.
@@ -79,6 +104,23 @@ async def main(task: str | None = None) -> str:
     if task is None:
         task = "What is the title of today's arxiv paper in computer science?"
 
+    # ── Dashboard setup ──────────────────────────────────────────────────
+    collector: DashboardCollector | None = None
+    session_id = str(uuid.uuid4())[:8]
+
+    if DASHBOARD_ENABLED:
+        _start_dashboard_server()
+        collector = DashboardCollector(session_id=session_id, query=task)
+        dashboard_collectors[session_id] = collector
+        print(f"\n  Dashboard: http://localhost:{DASHBOARD_PORT}/?session={session_id}\n")
+
+        await collector.emit(
+            DashboardEvent(
+                event_type=EventType.SESSION_START,
+                data={"query": task, "max_attempts": CONTEXT_COMPRESS_LIMIT},
+            )
+        )
+
     session_service = InMemorySessionService()
     failure_experiences: list[str] = []
     final_answer: str | None = None
@@ -86,6 +128,21 @@ async def main(task: str | None = None) -> str:
     for attempt in range(1, CONTEXT_COMPRESS_LIMIT + 1):
         is_final = attempt == CONTEXT_COMPRESS_LIMIT
         logger.info("=== Attempt %d / %d ===", attempt, CONTEXT_COMPRESS_LIMIT)
+
+        # Emit retry-attempt event
+        if collector:
+            collector.start_retry(attempt, CONTEXT_COMPRESS_LIMIT)
+            await collector.emit(
+                DashboardEvent(
+                    event_type=EventType.RETRY_ATTEMPT,
+                    attempt=attempt,
+                    data={
+                        "attempt_number": attempt,
+                        "max_attempts": CONTEXT_COMPRESS_LIMIT,
+                        "is_final": is_final,
+                    },
+                )
+            )
 
         # Build user message with failure experiences from prior attempts
         user_message = task
@@ -102,6 +159,10 @@ async def main(task: str | None = None) -> str:
         session = await session_service.create_session(
             app_name=APP_NAME, user_id=USER_ID
         )
+
+        # Inject collector into session state so callbacks can access it
+        if collector:
+            session.state["_dashboard_collector"] = collector
 
         # Run the research agent
         runner = Runner(
@@ -123,6 +184,10 @@ async def main(task: str | None = None) -> str:
         if boxed and boxed not in ("?", "unknown"):
             final_answer = boxed
             logger.info("Valid answer found on attempt %d: %s", attempt, boxed[:200])
+            if collector and collector.retry_attempts:
+                collector.retry_attempts[-1].answer_found = True
+                collector.retry_attempts[-1].answer_source = "research"
+                collector.retry_attempts[-1].finish()
             break
 
         # No boxed answer from research — run explicit summarization step
@@ -148,6 +213,10 @@ async def main(task: str | None = None) -> str:
                 attempt,
                 boxed[:200],
             )
+            if collector and collector.retry_attempts:
+                collector.retry_attempts[-1].answer_found = True
+                collector.retry_attempts[-1].answer_source = "summarization"
+                collector.retry_attempts[-1].finish()
             break
 
         if is_final and intermediate:
@@ -157,6 +226,10 @@ async def main(task: str | None = None) -> str:
                 "Using intermediate answer on final attempt: %s",
                 final_answer[:200],
             )
+            if collector and collector.retry_attempts:
+                collector.retry_attempts[-1].answer_found = True
+                collector.retry_attempts[-1].answer_source = "intermediate"
+                collector.retry_attempts[-1].finish()
             break
 
         if not is_final:
@@ -179,8 +252,39 @@ async def main(task: str | None = None) -> str:
                 "Failure summary for attempt %d: %s", attempt, failure_text[:300]
             )
 
+            # Emit failure-summary event
+            if collector:
+                if collector.retry_attempts:
+                    collector.retry_attempts[-1].failure_summary = failure_text[:500]
+                    collector.retry_attempts[-1].finish()
+                await collector.emit(
+                    DashboardEvent(
+                        event_type=EventType.FAILURE_SUMMARY,
+                        attempt=attempt,
+                        data={
+                            "attempt_number": attempt,
+                            "summary_preview": failure_text[:500],
+                        },
+                    )
+                )
+
     if final_answer is None:
         final_answer = "(No answer could be determined)"
+
+    # ── Dashboard teardown ───────────────────────────────────────────────
+    if collector:
+        await collector.emit(
+            DashboardEvent(
+                event_type=EventType.SESSION_END,
+                data={
+                    "final_answer": str(final_answer)[:500],
+                    "attempts_used": min(attempt, CONTEXT_COMPRESS_LIMIT),
+                },
+            )
+        )
+        report_path = collector.save()
+        await collector.end_session()
+        logger.info("Dashboard metrics saved to %s", report_path)
 
     print(f"\nFinal answer: {final_answer}\n")
     return final_answer
