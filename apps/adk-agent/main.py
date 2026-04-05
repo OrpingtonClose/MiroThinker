@@ -25,7 +25,7 @@ import os
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 # ── Phoenix self-hosted observability (zero custom code) ────────────────
 # Automatically instruments all ADK agent runs, tool calls, and LLM requests.
