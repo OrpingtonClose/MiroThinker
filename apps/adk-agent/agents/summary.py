@@ -15,8 +15,6 @@ import os
 
 from google.adk import Agent
 
-from prompts.templates import build_main_summary_prompt
-
 _MODEL = os.environ.get("ADK_MODEL", "litellm/openai/gpt-4o")
 
 # The instruction is generic; the actual task-specific summary prompt

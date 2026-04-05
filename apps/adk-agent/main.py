@@ -114,7 +114,7 @@ async def main(task: str | None = None) -> str:
             runner, USER_ID, session.id, user_message
         )
 
-        # Check for valid \boxed{} answer
+        # Check for valid \boxed{} answer in the research result
         boxed = extract_boxed_content(research_result)
 
         # Also check intermediate answers captured by after_model_callback
@@ -123,6 +123,31 @@ async def main(task: str | None = None) -> str:
         if boxed and boxed not in ("?", "unknown"):
             final_answer = boxed
             logger.info("Valid answer found on attempt %d: %s", attempt, boxed[:200])
+            break
+
+        # No boxed answer from research — run explicit summarization step
+        summary_prompt = build_main_summary_prompt(task)
+        summary_session = await session_service.create_session(
+            app_name=APP_NAME, user_id=USER_ID
+        )
+        summary_runner = Runner(
+            agent=summary_agent,
+            app_name=APP_NAME,
+            session_service=session_service,
+        )
+        # Feed the research result as context followed by the summary prompt
+        summary_input = research_result + "\n\n" + summary_prompt
+        summary_result = await _collect_response_text(
+            summary_runner, USER_ID, summary_session.id, summary_input
+        )
+        boxed = extract_boxed_content(summary_result)
+        if boxed and boxed not in ("?", "unknown"):
+            final_answer = boxed
+            logger.info(
+                "Answer found via summarization on attempt %d: %s",
+                attempt,
+                boxed[:200],
+            )
             break
 
         if is_final and intermediate:

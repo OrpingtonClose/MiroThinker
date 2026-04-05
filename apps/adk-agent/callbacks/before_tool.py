@@ -18,12 +18,12 @@ Algorithm 2 — Dedup Guard:
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Dict, Optional
 
-from google.adk.agents.callback_context import CallbackContext
 from google.adk.tools import ToolContext
+
+from utils.query_key import build_query_key
 
 logger = logging.getLogger(__name__)
 
@@ -31,27 +31,6 @@ MAX_CONSECUTIVE_ERRORS = 5
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
-
-
-def _build_query_key(tool_name: str, args: Dict[str, Any]) -> Optional[str]:
-    """Build a canonical dedup key from tool name + relevant arg."""
-    if tool_name == "google_search":
-        return tool_name + "_" + args.get("q", "")
-    if tool_name == "sogou_search":
-        return tool_name + "_" + args.get("Query", "")
-    if tool_name == "scrape_website":
-        return tool_name + "_" + args.get("url", "")
-    if tool_name == "scrape_and_extract_info":
-        return (
-            tool_name
-            + "_"
-            + args.get("url", "")
-            + "_"
-            + args.get("info_to_extract", "")
-        )
-    if tool_name == "search_and_browse":
-        return tool_name + "_" + args.get("subtask", "")
-    return None
 
 
 def _fix_args(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -99,7 +78,7 @@ def before_tool_callback(
     if "consecutive_dedup_errors" not in state:
         state["consecutive_dedup_errors"] = 0
 
-    query_key = _build_query_key(tool_name, args)
+    query_key = build_query_key(tool_name, args)
     if query_key is None:
         # Tool type not tracked — allow through
         return None
