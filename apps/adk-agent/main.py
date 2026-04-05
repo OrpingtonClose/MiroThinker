@@ -170,8 +170,9 @@ async def main(task: str | None = None) -> str:
                 session_service=session_service,
             )
 
+            failure_input = research_result + "\n\n" + FAILURE_SUMMARY_PROMPT
             failure_text = await _collect_response_text(
-                summary_runner, USER_ID, summary_session.id, FAILURE_SUMMARY_PROMPT
+                summary_runner, USER_ID, summary_session.id, failure_input
             )
             failure_experiences.append(failure_text)
             logger.info(

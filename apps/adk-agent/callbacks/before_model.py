@@ -108,9 +108,19 @@ def before_model_callback(
         state["force_end"] = True
         logger.warning(
             "Context length estimate (%d tokens) exceeds threshold (%d). "
-            "Setting force_end=True.",
+            "Setting force_end=True and injecting wrap-up instruction.",
             estimated,
             MAX_CONTEXT_TOKENS,
         )
+        # Inject a system-level message telling the model to wrap up now
+        force_end_msg = genai_types.Content(
+            role="user",
+            parts=[genai_types.Part(text=(
+                "[SYSTEM] Your context window is nearly full. You MUST produce "
+                "your final \\boxed{} answer NOW without making any more tool "
+                "calls. Summarize what you have found and give your best answer."
+            ))],
+        )
+        contents.append(force_end_msg)
 
     return None  # proceed with the (modified) request
