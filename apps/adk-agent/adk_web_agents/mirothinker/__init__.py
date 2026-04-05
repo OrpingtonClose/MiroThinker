@@ -25,7 +25,11 @@ import sys
 # Add apps/adk-agent/ to sys.path so existing imports
 # (agents.research, callbacks.*, tools.*, prompts.*) resolve correctly.
 # AgentLoader only adds adk_web_agents/ to sys.path.
-_ADK_AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Path: __file__ = .../apps/adk-agent/adk_web_agents/mirothinker/__init__.py
+#   dirname x1 = .../adk_web_agents/mirothinker
+#   dirname x2 = .../adk_web_agents
+#   dirname x3 = .../apps/adk-agent  <-- what we need
+_ADK_AGENT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _ADK_AGENT_DIR not in sys.path:
     sys.path.insert(0, _ADK_AGENT_DIR)
 
