@@ -118,5 +118,9 @@ def before_tool_callback(
         else:
             # Not a duplicate — reset the consecutive error counter
             state["consecutive_dedup_errors"] = 0
+    else:
+        # Non-tracked tool call — also reset consecutive counter
+        # (matches original MiroThinker algorithm which resets after any successful turn)
+        state["consecutive_dedup_errors"] = 0
 
     return None  # allow execution; recording happens in after_tool
