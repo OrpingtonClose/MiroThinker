@@ -2,8 +2,13 @@
 # This source code is licensed under the Apache 2.0 License.
 
 """
-Before-tool callback implementing Algorithm 2 (Dedup Guard) and
-Algorithm 8 (Arg Fix).
+Before-tool callback implementing Algorithm 2 (Dedup Guard),
+Algorithm 8 (Arg Fix), and source-level context budget for Exa tools.
+
+Source-level Context Budget:
+  Injects Exa API parameters (textMaxCharacters, numResults) into every Exa
+  tool call so results are bounded at the source — no post-hoc truncation.
+  This is equivalent to a SQL LIMIT clause: the API simply returns less data.
 
 Algorithm 8 — Arg Fix:
   Correct common parameter-name mistakes the LLM makes when calling tools.
@@ -29,8 +34,50 @@ logger = logging.getLogger(__name__)
 
 MAX_CONSECUTIVE_ERRORS = 5
 
+# Source-level context budget defaults for Exa tools.
+# These cap how much TEXT the Exa API returns per result — not truncation,
+# just telling the API to send less, like numResults caps how many results.
+EXA_DEFAULT_TEXT_MAX_CHARS = 3000  # per-result text cap (chars)
+EXA_DEFAULT_NUM_RESULTS = 8       # max results per search
+EXA_CRAWL_TEXT_MAX_CHARS = 10000  # crawling a specific URL gets more
+
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
+
+def _enforce_exa_budget(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    """Inject source-level size controls into Exa tool calls.
+
+    This is NOT truncation — it tells the Exa API to return less data per
+    result, the same way numResults tells it to return fewer results.
+    The LLM's instruction says to use these params, but it doesn't always
+    comply, so we enforce them deterministically here.
+    """
+    if tool_name in ("web_search_exa", "web_search_advanced_exa"):
+        if "numResults" not in args:
+            args["numResults"] = EXA_DEFAULT_NUM_RESULTS
+        # Cap numResults if LLM asked for too many
+        if args.get("numResults", 0) > 10:
+            args["numResults"] = 10
+        # Inject textMaxCharacters if LLM didn't set it
+        if "textMaxCharacters" not in args:
+            args["textMaxCharacters"] = EXA_DEFAULT_TEXT_MAX_CHARS
+        # Enable highlights for focused excerpts
+        if "enableHighlights" not in args:
+            args["enableHighlights"] = True
+
+    elif tool_name == "crawling_exa":
+        # Crawling a specific URL: allow more text but still bounded
+        if "textMaxCharacters" not in args:
+            args["textMaxCharacters"] = EXA_CRAWL_TEXT_MAX_CHARS
+        if "enableHighlights" not in args:
+            args["enableHighlights"] = True
+
+    elif tool_name == "get_code_context_exa":
+        if "numResults" not in args:
+            args["numResults"] = EXA_DEFAULT_NUM_RESULTS
+
+    return args
 
 
 def _fix_args(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -66,6 +113,9 @@ def before_tool_callback(
     """
     tool_name: str = tool.name if hasattr(tool, "name") else str(tool)
     state = tool_context.state
+
+    # ── Source-level context budget for Exa ───────────────────────────
+    _enforce_exa_budget(tool_name, args)
 
     # ── Algorithm 8: Arg Fix ────────────────────────────────────────────
     original_args = dict(args)  # snapshot before fix
