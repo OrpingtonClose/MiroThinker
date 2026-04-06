@@ -35,7 +35,7 @@ from utils.query_key import build_query_key
 logger = logging.getLogger(__name__)
 
 MAX_CONSECUTIVE_ERRORS = 5
-MAX_PER_CATEGORY = 3  # max searches per source category before nudging
+MAX_PER_CATEGORY = 5  # max searches per source category before nudging
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
