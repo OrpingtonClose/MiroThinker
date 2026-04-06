@@ -246,12 +246,12 @@ def before_tool_callback(
                         )
                     }
 
-            # Record this search's category
-            cat_counts[category] = current_count + 1
-            state[cat_counts_key] = cat_counts
+            # Category count is incremented in after_tool_callback
+            # (only after confirming the search succeeded), matching
+            # how Algorithm 2 records queries post-execution.
             logger.info(
-                "Search diversity: query '%s' → category '%s' (count: %d)",
-                search_query[:60], category, cat_counts[category],
+                "Search diversity: query '%s' → category '%s' (pre-exec, count so far: %d)",
+                search_query[:60], category, current_count,
             )
 
     return None  # allow execution; recording happens in after_tool

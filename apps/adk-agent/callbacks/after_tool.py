@@ -19,6 +19,7 @@ from typing import Any, Dict, Optional
 
 from google.adk.tools import ToolContext
 
+from callbacks.before_tool import _classify_query
 from utils.query_key import build_query_key
 
 logger = logging.getLogger(__name__)
@@ -113,6 +114,22 @@ def after_tool_callback(
     query_key = build_query_key(tool_name, args, agent_name=agent_name)
     if query_key is not None:
         state["seen_queries"][query_key] = state["seen_queries"].get(query_key, 0) + 1
+
+    # ── Complete Algorithm 9: record successful search category ──────────
+    if tool_name == "brave_web_search":
+        search_query = args.get("q", "")
+        if search_query:
+            category = _classify_query(search_query)
+            cat_counts_key = "search_category_counts"
+            if cat_counts_key not in state:
+                state[cat_counts_key] = {}
+            cat_counts: Dict[str, int] = state[cat_counts_key]
+            cat_counts[category] = cat_counts.get(category, 0) + 1
+            state[cat_counts_key] = cat_counts
+            logger.info(
+                "Search diversity (post-exec): query '%s' → category '%s' (count: %d)",
+                search_query[:60], category, cat_counts[category],
+            )
 
     # ── DEMO_MODE truncation ────────────────────────────────────────────
     truncated = _maybe_truncate_scrape(tool_name, result_text)
