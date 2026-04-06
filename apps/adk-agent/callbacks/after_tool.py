@@ -50,8 +50,11 @@ def _is_bad_result(tool_name: str, result_text: str) -> Optional[str]:
     if tool_name in ("google_search", "brave_web_search"):
         try:
             parsed = json.loads(text)
-            if isinstance(parsed, dict) and parsed.get("organic") == []:
-                return "Search returned no results. Try rephrasing your query."
+            if isinstance(parsed, dict):
+                if parsed.get("error"):
+                    return f"Search API error: {parsed['error']}"
+                if parsed.get("organic") == []:
+                    return "Search returned no results. Try rephrasing your query."
         except (json.JSONDecodeError, TypeError):
             pass
 
