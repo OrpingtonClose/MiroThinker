@@ -412,7 +412,7 @@ async def run_batch(
             runner, USER_ID, session.id, discovery_prompt,
             stall_timeout=stall_timeout,
         )
-    except (asyncio.TimeoutError, Exception) as exc:
+    except Exception as exc:
         logger.warning(
             "Phase 1 discovery failed (%s: %s); falling back to report mode",
             type(exc).__name__, exc,
@@ -442,47 +442,46 @@ async def run_batch(
     # ── Phase 2: Parallel batch evaluation ──────────────────────────
     results: list[str | BaseException] = []
 
-    if items:  # skip if checkpoint already covered everything
-        logger.info("=== Phase 2: Parallel batch evaluation (%d workers) ===", workers)
+    logger.info("=== Phase 2: Parallel batch evaluation (%d workers) ===", workers)
 
-        batches = [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
-        sem = asyncio.Semaphore(workers)
+    batches = [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
+    sem = asyncio.Semaphore(workers)
 
-        async def _guarded_worker(batch: list[dict], bid: int) -> str:
-            async with sem:
-                batch_desc = "\n".join(
-                    f"- {item.get('name', 'unknown')}: {item.get('url', 'N/A')}"
-                    for item in batch
+    async def _guarded_worker(batch: list[dict], bid: int) -> str:
+        async with sem:
+            batch_desc = "\n".join(
+                f"- {item.get('name', 'unknown')}: {item.get('url', 'N/A')}"
+                for item in batch
+            )
+            prompt = (
+                f"Original task: {task}\n\n"
+                f"PHASE 2 INSTRUCTIONS: Evaluate these {len(batch)} items. "
+                "For each item, scrape it and call store_finding with your "
+                "evaluation (name, url, category, summary, rating 1-10).\n\n"
+                f"Items to evaluate:\n{batch_desc}"
+            )
+            try:
+                return await _run_batch_worker(
+                    batch_app, session_service, prompt, bid, keep_k,
+                    stall_timeout=stall_timeout,
                 )
-                prompt = (
-                    f"Original task: {task}\n\n"
-                    f"PHASE 2 INSTRUCTIONS: Evaluate these {len(batch)} items. "
-                    "For each item, scrape it and call store_finding with your "
-                    "evaluation (name, url, category, summary, rating 1-10).\n\n"
-                    f"Items to evaluate:\n{batch_desc}"
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Batch worker %d stalled (no event for %.0fs) — moving on",
+                    bid, stall_timeout,
                 )
-                try:
-                    return await _run_batch_worker(
-                        batch_app, session_service, prompt, bid, keep_k,
-                        stall_timeout=stall_timeout,
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "Batch worker %d stalled (no event for %.0fs) — moving on",
-                        bid, stall_timeout,
-                    )
-                    return "(stalled)"
-                except Exception as exc:
-                    logger.warning(
-                        "Batch worker %d failed (%s: %s) — moving on",
-                        bid, type(exc).__name__, exc,
-                    )
-                    return "(error)"
+                return "(stalled)"
+            except Exception as exc:
+                logger.warning(
+                    "Batch worker %d failed (%s: %s) — moving on",
+                    bid, type(exc).__name__, exc,
+                )
+                return "(error)"
 
-        batch_tasks = [
-            _guarded_worker(batch, i) for i, batch in enumerate(batches)
-        ]
-        results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+    batch_tasks = [
+        _guarded_worker(batch, i) for i, batch in enumerate(batches)
+    ]
+    results = await asyncio.gather(*batch_tasks, return_exceptions=True)
 
     completed = sum(1 for r in results if isinstance(r, str) and r not in ("(stalled)", "(error)"))
     stalled = sum(1 for r in results if r == "(stalled)")
