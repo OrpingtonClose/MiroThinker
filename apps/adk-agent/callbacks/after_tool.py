@@ -47,15 +47,26 @@ def _is_bad_result(tool_name: str, result_text: str) -> Optional[str]:
     if text.startswith("Error executing tool"):
         return text
 
-    # Empty Google search results
+    # Empty / error search results (handles both legacy JSON and MCP text)
     if tool_name in ("google_search", "brave_web_search", "firecrawl_search"):
+        # MCP servers return plain-text or multi-part text; legacy tools
+        # returned JSON with {"organic": [...]} or {"data": [...]}
+        stripped = text.strip()
+        if not stripped or stripped in ("[]", "{}", "null"):
+            return "Search returned no results. Try rephrasing your query."
         try:
-            parsed = json.loads(text)
+            parsed = json.loads(stripped)
             if isinstance(parsed, dict):
                 if parsed.get("error"):
                     return f"Search API error: {parsed['error']}"
+                # Legacy Brave wrapper format
                 if parsed.get("organic") == []:
                     return "Search returned no results. Try rephrasing your query."
+                # Firecrawl format
+                if parsed.get("data") == [] and parsed.get("success") is not False:
+                    return "Search returned no results. Try rephrasing your query."
+            if isinstance(parsed, list) and len(parsed) == 0:
+                return "Search returned no results. Try rephrasing your query."
         except (json.JSONDecodeError, TypeError):
             pass
 
