@@ -19,7 +19,7 @@ from typing import Any, Optional
 from google.adk.agents.callback_context import CallbackContext
 from google.genai import types as genai_types
 
-from callbacks.before_model import _llm_semaphore
+from callbacks.before_model import release_llm_semaphore_if_held
 from utils.boxed import extract_boxed_content
 
 logger = logging.getLogger(__name__)
@@ -41,10 +41,7 @@ def after_model_callback(
     state = callback_context.state
 
     # Release LLM concurrency semaphore (acquired in before_model_callback)
-    if state.get("_llm_sem_held"):
-        _llm_semaphore.release()
-        state["_llm_sem_held"] = False
-        logger.debug("LLM semaphore released")
+    release_llm_semaphore_if_held(state)
 
     if "intermediate_boxed_answers" not in state:
         state["intermediate_boxed_answers"] = []

@@ -32,6 +32,13 @@ logger = logging.getLogger(__name__)
 _MAX_CONCURRENT_LLM = int(os.environ.get("MAX_CONCURRENT_LLM", "2"))
 _llm_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_LLM)
 
+
+def release_llm_semaphore_if_held(state: dict) -> None:
+    """Safety release — call from after_model or any error-cleanup path."""
+    if state.get("_llm_sem_held"):
+        _llm_semaphore.release()
+        state["_llm_sem_held"] = False
+
 # Default number of recent tool results to keep (matches keep_tool_result=5)
 DEFAULT_KEEP_K = int(os.environ.get("KEEP_TOOL_RESULT", "5"))
 

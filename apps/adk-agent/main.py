@@ -133,25 +133,30 @@ async def _collect_with_heartbeat(
         user_id=user_id, session_id=session_id, new_message=content
     ).__aiter__()
 
-    while True:
-        try:
-            event = await asyncio.wait_for(
-                aiter.__anext__(), timeout=stall_timeout
-            )
-        except StopAsyncIteration:
-            break
-        except asyncio.TimeoutError:
-            logger.warning(
-                "%s stalled — no event for %.0fs after %d events",
-                tag, stall_timeout, event_count,
-            )
-            raise
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(
+                    aiter.__anext__(), timeout=stall_timeout
+                )
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "%s stalled — no event for %.0fs after %d events",
+                    tag, stall_timeout, event_count,
+                )
+                raise
 
-        event_count += 1
-        if event.content and event.content.parts:
-            for part in event.content.parts:
-                if hasattr(part, "text") and part.text:
-                    collected += part.text
+            event_count += 1
+            if event.content and event.content.parts:
+                for part in event.content.parts:
+                    if hasattr(part, "text") and part.text:
+                        collected += part.text
+    finally:
+        # Always close the async generator to free MCP connections
+        # and Runner resources — critical on stall/cancel paths.
+        await aiter.aclose()
 
     logger.info("%s completed normally (%d events)", tag, event_count)
     return collected
