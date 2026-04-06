@@ -4,18 +4,17 @@
 """
 Shared model configuration for all ADK agents.
 
-Builds a ``LiteLlm`` instance that correctly forwards vendor-specific
-parameters (e.g. Venice ``venice_parameters``) via ``extra_body``.
-
-LiteLLM's ``:param=value`` model-string syntax does NOT forward
-vendor-specific body parameters — they end up ignored.  By using an
-explicit ``LiteLlm(extra_body=...)`` we guarantee they reach the API.
+For native Gemini models (``gemini-*``), returns a plain string so ADK
+uses its built-in handler.  For LiteLLM-routed models, returns a
+``LiteLlm`` instance with vendor-specific ``extra_body`` forwarding
+(e.g. Venice ``venice_parameters``).
 """
 
 from __future__ import annotations
 
 import json
 import os
+from typing import Union
 
 from google.adk.models import LiteLlm
 
@@ -46,6 +45,21 @@ if VENICE_PARAMS:
     _extra_body["venice_parameters"] = VENICE_PARAMS
 
 
-def build_model() -> LiteLlm:
-    """Return a configured ``LiteLlm`` with vendor params forwarded."""
-    return LiteLlm(model=ADK_MODEL_NAME, extra_body=_extra_body)
+def build_model() -> Union[str, LiteLlm]:
+    """Return the model for ADK Agent(model=...).
+
+    * Native Gemini models (``gemini-*``) → plain string (ADK native path).
+    * Everything else → ``LiteLlm`` with vendor-specific ``extra_body``.
+    """
+    name = ADK_MODEL_NAME
+
+    # Strip the ``litellm/`` prefix — it's an ADK routing convention,
+    # not part of the LiteLLM model identifier.
+    if name.startswith("litellm/"):
+        name = name[len("litellm/"):]
+
+    # Native Gemini models use ADK's built-in handler (no LiteLLM wrapper).
+    if name.startswith("gemini"):
+        return name
+
+    return LiteLlm(model=name, extra_body=_extra_body)
