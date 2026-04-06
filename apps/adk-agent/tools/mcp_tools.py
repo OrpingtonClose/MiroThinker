@@ -45,6 +45,7 @@ TENCENTCLOUD_SECRET_KEY = os.environ.get("TENCENTCLOUD_SECRET_KEY", "")
 BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "")
 FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY", "")
 EXA_API_KEY = os.environ.get("EXA_API_KEY", "")
+KAGI_API_KEY = os.environ.get("KAGI_API_KEY", "")
 
 
 def _full_env(**overrides: str) -> dict:
@@ -114,6 +115,18 @@ _TOOL_CONFIGS = {
                 "require(r+'/exa-mcp-server/.smithery/stdio/index.cjs');",
             ],
             env=_full_env(EXA_API_KEY=EXA_API_KEY),
+        ),
+        timeout=30.0,
+    ),
+    # ── Official Kagi MCP server ──────────────────────────────────────────
+    # npm: kagimcp  (MIT, kagisearch/kagimcp)
+    # Auto-discovered tools: kagi_search, kagi_summarize, kagi_fastgpt,
+    #   kagi_enrich_web, kagi_enrich_news
+    "kagi": lambda: StdioConnectionParams(
+        server_params=StdioServerParameters(
+            command="uvx",
+            args=["kagimcp"],
+            env=_full_env(KAGI_API_KEY=KAGI_API_KEY),
         ),
         timeout=30.0,
     ),
