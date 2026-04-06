@@ -197,13 +197,22 @@ def before_model_callback(
             )
         # Re-inject on every call since contents are rebuilt from session
         # history (the injected message is not persisted to the session)
-        force_end_msg = genai_types.Content(
-            role="user",
-            parts=[genai_types.Part(text=(
+        report_mode = state.get("report_mode", False)
+        if report_mode:
+            wrap_up_text = (
+                "[SYSTEM] Your context window is nearly full. You MUST produce "
+                "your final answer NOW without making any more tool calls. "
+                "Summarize what you have found into a comprehensive report."
+            )
+        else:
+            wrap_up_text = (
                 "[SYSTEM] Your context window is nearly full. You MUST produce "
                 "your final \\boxed{} answer NOW without making any more tool "
                 "calls. Summarize what you have found and give your best answer."
-            ))],
+            )
+        force_end_msg = genai_types.Content(
+            role="user",
+            parts=[genai_types.Part(text=wrap_up_text)],
         )
         contents.append(force_end_msg)
 

@@ -11,17 +11,15 @@ answer.  Has no tools — summary only.  Replaces
 
 from __future__ import annotations
 
-import os
-
 from google.adk import Agent
 
-_MODEL = os.environ.get("ADK_MODEL", "litellm/openai/gpt-4o")
+from agents.model_config import build_model
 
 # The instruction is generic; the actual task-specific summary prompt
 # is injected as the user message at runtime (see main.py).
 summary_agent = Agent(
     name="summary_agent",
-    model=_MODEL,
+    model=build_model(),
     description="Summarizes research findings and produces a final boxed answer.",
     instruction=(
         "You are a summarization agent. You receive a conversation history and "

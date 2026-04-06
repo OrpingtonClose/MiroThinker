@@ -2,8 +2,8 @@
 # This source code is licensed under the Apache 2.0 License.
 
 """
-Before-tool callback implementing Algorithm 2 (Dedup Guard),
-Algorithm 8 (Arg Fix), and Algorithm 9 (Search Diversity Guard).
+Before-tool callback implementing Algorithm 2 (Dedup Guard) and
+Algorithm 8 (Arg Fix).
 
 Algorithm 8 — Arg Fix:
   Correct common parameter-name mistakes the LLM makes when calling tools.
@@ -14,19 +14,12 @@ Algorithm 2 — Dedup Guard:
   return an error string that replaces the tool result, so the LLM naturally
   adjusts.  An escape hatch allows duplicates through after
   MAX_CONSECUTIVE_ERRORS consecutive blocked attempts.
-
-Algorithm 9 — Search Diversity Guard:
-  Track which source categories each brave_web_search query targets.
-  When a category has been searched MAX_PER_CATEGORY times, block further
-  searches in that category and nudge the LLM toward under-explored ones.
-  Categories: forum, vendor, local_language, social_media, news, academic,
-  general.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from google.adk.tools import ToolContext
 
@@ -35,85 +28,9 @@ from utils.query_key import build_query_key
 logger = logging.getLogger(__name__)
 
 MAX_CONSECUTIVE_ERRORS = 5
-MAX_PER_CATEGORY = 3  # max searches per source category before nudging
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
-
-
-# ── Search Diversity Guard (Algorithm 9) ────────────────────────────────────
-
-# Keywords that signal which source category a search query targets.
-_CATEGORY_SIGNALS: Dict[str, List[str]] = {
-    "forum": [
-        "forum", "reddit", "thread", "community", "discussion", "4chan",
-        "imageboard", "telegram", "discord", "eroids", "meso-rx",
-        "bodybuilding.com", "ask", "experience", "review",
-    ],
-    "vendor": [
-        "vendor", "buy", "shop", "store", "sell", "price", "order",
-        "marketplace", "darknet", "peptide", "source", "supplier",
-        "warehouse", "wholesale",
-    ],
-    "local_language": [],  # detected by non-ASCII heuristic
-    "social_media": [
-        "youtube", "twitter", "tiktok", "instagram", "x.com",
-        "video", "vlog", "channel",
-    ],
-    "news": [
-        "news", "article", "investigation", "report", "journalism",
-        "documentary", "expose", "bust",
-    ],
-    "academic": [
-        "study", "research", "regulation", "law", "legal", "pubmed",
-        "journal", "policy", "government", "official",
-    ],
-}
-
-
-def _classify_query(query: str) -> str:
-    """Classify a search query into a source category."""
-    q_lower = query.lower()
-
-    # Non-ASCII chars suggest a foreign-language query
-    non_ascii_ratio = sum(1 for c in query if ord(c) > 127) / max(len(query), 1)
-    if non_ascii_ratio > 0.15:
-        return "local_language"
-
-    # Check each category's signal words
-    best_category = "general"
-    best_score = 0
-    for category, signals in _CATEGORY_SIGNALS.items():
-        score = sum(1 for kw in signals if kw in q_lower)
-        if score > best_score:
-            best_score = score
-            best_category = category
-
-    return best_category
-
-
-def _get_underexplored_categories(category_counts: Dict[str, int]) -> List[str]:
-    """Return categories that haven't been searched yet or have few searches."""
-    all_categories = ["forum", "vendor", "local_language", "social_media", "news", "academic"]
-    underexplored = []
-    for cat in all_categories:
-        count = category_counts.get(cat, 0)
-        if count == 0:
-            underexplored.append(cat)
-    if not underexplored:
-        # All categories touched at least once; return those below max
-        underexplored = [cat for cat in all_categories if category_counts.get(cat, 0) < MAX_PER_CATEGORY]
-    return underexplored
-
-
-_CATEGORY_HINTS = {
-    "forum": "Try searching forums/communities: add 'reddit', 'forum', 'discussion', or 'experience' to your query.",
-    "vendor": "Try searching vendor/marketplace sites: add 'buy', 'vendor', 'shop', 'source', or 'supplier' to your query.",
-    "local_language": "Try searching in the user's LOCAL LANGUAGE (e.g. Polish, German, Spanish) — not English.",
-    "social_media": "Try searching social media: add 'youtube', 'twitter', 'tiktok', or 'video' to your query.",
-    "news": "Try searching news/journalism: add 'news', 'article', 'investigation', or 'report' to your query.",
-    "academic": "Try searching academic/regulatory sources: add 'study', 'regulation', 'law', or 'pubmed' to your query.",
-}
 
 
 def _fix_args(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -212,46 +129,5 @@ def before_tool_callback(
         # Non-tracked tool call — also reset consecutive counter
         # (matches original MiroThinker algorithm which resets after any successful turn)
         state[dedup_counter_key] = 0
-
-    # ── Algorithm 9: Search Diversity Guard ──────────────────────────────
-    if tool_name == "brave_web_search":
-        search_query = args.get("q", "")
-        if search_query:
-            category = _classify_query(search_query)
-            cat_counts_key = "search_category_counts"
-
-            if cat_counts_key not in state:
-                state[cat_counts_key] = {}
-
-            cat_counts: Dict[str, int] = state[cat_counts_key]
-
-            current_count = cat_counts.get(category, 0)
-            if current_count >= MAX_PER_CATEGORY:
-                underexplored = _get_underexplored_categories(cat_counts)
-                if underexplored:
-                    hints = " ".join(
-                        _CATEGORY_HINTS.get(c, "") for c in underexplored[:3]
-                    ).strip()
-                    logger.info(
-                        "Diversity guard: category '%s' saturated (%d/%d). "
-                        "Nudging toward: %s",
-                        category, current_count, MAX_PER_CATEGORY, underexplored,
-                    )
-                    return {
-                        "error": (
-                            f"You have already made {current_count} searches in the "
-                            f"'{category}' category. Search a DIFFERENT category. "
-                            f"Under-explored categories: {', '.join(underexplored)}. "
-                            f"{hints}"
-                        )
-                    }
-
-            # Category count is incremented in after_tool_callback
-            # (only after confirming the search succeeded), matching
-            # how Algorithm 2 records queries post-execution.
-            logger.info(
-                "Search diversity: query '%s' → category '%s' (pre-exec, count so far: %d)",
-                search_query[:60], category, current_count,
-            )
 
     return None  # allow execution; recording happens in after_tool
