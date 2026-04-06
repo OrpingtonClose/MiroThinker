@@ -90,6 +90,22 @@ search result you saw. If you cannot name a specific source, you have not \
 done enough research — search and scrape more before synthesising. \
 Generic summaries without named sources are FAILURES. \
 List all URLs you scraped and the key facts extracted from each one.
+
+DRILL-DOWN RULE: Describing the ECOSYSTEM is not enough — you must find the \
+actual NODES within it. When a scraped page mentions a specific vendor, channel, \
+forum, marketplace, or contact method BY NAME, you MUST:
+  1. EXTRACT that name/URL/handle immediately
+  2. Search for it specifically (e.g. "site:reddit.com r/steroids insulin source")
+  3. Scrape the actual page/thread/listing if possible
+  4. Report the specific name, URL, and what it offers
+Do NOT stop at meta-descriptions like "Telegram is used for drug dealing" — \
+find the actual channel names, group links, or invite codes mentioned in forum \
+posts. Do NOT stop at "online pharmacies exist" — find the actual domain names \
+and product pages. If a news article says "vendors on platform X sell product Y", \
+search for those specific vendors on platform X and scrape their pages. \
+Your job is to deliver ACTIONABLE intelligence with specific endpoints the user \
+can follow up on — not a literature review of the landscape. Every section of \
+your report must contain at least one specific, named, followable source.
 """
 
 # =============================================================================
