@@ -26,17 +26,21 @@ _raw_model = os.environ.get("ADK_MODEL", "litellm/openai/gpt-4o")
 ADK_MODEL_NAME = _raw_model.split(":")[0]
 
 # ── Extra body parameters (vendor-specific) ──────────────────────────
+# Only inject venice_parameters when the API base actually points to Venice.
+# Sending unknown body fields to stricter providers could cause 400 errors.
+_api_base = os.environ.get("OPENAI_API_BASE", "")
+_is_venice = "venice.ai" in _api_base
+
 # VENICE_PARAMS is a JSON dict forwarded as ``venice_parameters`` in the
-# request body.  Default: disable Venice's built-in system prompt so our
-# own prompt has full control (critical for uncensored operation).
-_default_venice_params = json.dumps({
-    "include_venice_system_prompt": False,
-})
+# request body.  Default when using Venice: disable the built-in system
+# prompt so our own prompt has full control (critical for uncensored use).
+_default_venice_params = json.dumps(
+    {"include_venice_system_prompt": False} if _is_venice else {}
+)
 VENICE_PARAMS: dict = json.loads(
     os.environ.get("VENICE_PARAMS", _default_venice_params)
 )
 
-# Build the extra_body dict only if Venice params are set
 _extra_body: dict = {}
 if VENICE_PARAMS:
     _extra_body["venice_parameters"] = VENICE_PARAMS
