@@ -101,13 +101,27 @@ async def _collect_response_text(
     content = genai_types.Content(
         role="user", parts=[genai_types.Part(text=message)]
     )
-    async for event in runner.run_async(
-        user_id=user_id, session_id=session_id, new_message=content
-    ):
-        if event.content and event.content.parts:
-            for part in event.content.parts:
-                if hasattr(part, "text") and part.text:
-                    collected += part.text
+    try:
+        async for event in runner.run_async(
+            user_id=user_id, session_id=session_id, new_message=content
+        ):
+            if event.content and event.content.parts:
+                for part in event.content.parts:
+                    if hasattr(part, "text") and part.text:
+                        collected += part.text
+    finally:
+        # Safety-release the LLM semaphore if held — prevents permanent
+        # slot leak when an LLM call fails between before_model and
+        # after_model callbacks (after_model never fires in that case).
+        from callbacks.before_model import release_llm_semaphore_if_held
+        try:
+            sess = await runner._session_service.get_session(
+                app_name=runner._app_name, user_id=user_id, session_id=session_id
+            )
+            if sess:
+                release_llm_semaphore_if_held(sess.state)
+        except Exception:
+            pass  # best-effort cleanup
     return collected
 
 
@@ -162,7 +176,10 @@ async def _collect_with_heartbeat(
     finally:
         # Always close the async generator to free MCP connections
         # and Runner resources — critical on stall/cancel paths.
-        await aiter.aclose()
+        try:
+            await aiter.aclose()
+        except Exception:
+            logger.warning("Failed to close async iterator for %s", tag, exc_info=True)
         # Safety-release the LLM semaphore if held — prevents permanent
         # slot leak when a worker stalls mid-LLM-call (the after_model
         # callback never fires in that case).
