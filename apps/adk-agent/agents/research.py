@@ -2,11 +2,18 @@
 # This source code is licensed under the Apache 2.0 License.
 
 """
-Main research agent definition.
+Main research agent definition (Tier 3 — fully agentic).
 
-Wires together all four callbacks (Algorithms 2, 4, 5, 7, 8) and
-delegates to the browsing sub-agent via ADK's native ``sub_agents``
-mechanism — no fake tool interception needed.
+The research_agent delegates ALL web data retrieval to ``web_agent``
+(a specialist sub-agent that owns Brave, Firecrawl, and Exa MCP
+toolsets).  This reduces context burn from ~15 tool descriptions to
+just 2 (web_agent + tool-python).
+
+Callbacks wired here:
+  - before_model: Algorithm 5 (context window), Algorithm 7 (intermediate answers)
+  - after_model:  token counting, trace recording
+  - before_tool / after_tool on research_agent itself: only for tool-python
+  - web_agent has its own before/after_tool for Algorithms 2, 4, 8, 9
 """
 
 from __future__ import annotations
@@ -15,7 +22,7 @@ import os
 
 from google.adk import Agent
 
-from agents.browsing import browsing_agent
+from agents.web_agent import web_agent
 from callbacks.after_model import after_model_callback
 from callbacks.after_tool import after_tool_callback
 from callbacks.before_model import before_model_callback
@@ -30,8 +37,8 @@ research_agent = Agent(
     model=_MODEL,
     description="Deep research agent that uses tools and sub-agents to answer questions.",
     instruction=MAIN_AGENT_INSTRUCTION,
-    tools=get_tools(["brave-search", "firecrawl", "tool-python"]),
-    sub_agents=[browsing_agent],  # ADK handles delegation natively
+    tools=get_tools(["tool-python"]),
+    sub_agents=[web_agent],  # Tier 3: web_agent owns all web tools
     before_tool_callback=before_tool_callback,
     after_tool_callback=after_tool_callback,
     before_model_callback=before_model_callback,

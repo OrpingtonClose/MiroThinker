@@ -48,7 +48,7 @@ def _is_bad_result(tool_name: str, result_text: str) -> Optional[str]:
         return text
 
     # Empty / error search results (handles both legacy JSON and MCP text)
-    if tool_name in ("google_search", "brave_web_search", "firecrawl_search"):
+    if tool_name in ("google_search", "brave_web_search", "firecrawl_search", "web_search_exa", "web_search_advanced_exa"):
         # MCP servers return plain-text or multi-part text; legacy tools
         # returned JSON with {"organic": [...]} or {"data": [...]}
         stripped = text.strip()
@@ -77,7 +77,7 @@ def _maybe_truncate_scrape(tool_name: str, result_text: str) -> str:
     """In DEMO_MODE, truncate scrape_website results to 20K chars."""
     if os.environ.get("DEMO_MODE") != "1":
         return result_text
-    if tool_name not in ("scrape", "scrape_website", "firecrawl_scrape"):
+    if tool_name not in ("scrape", "scrape_website", "firecrawl_scrape", "crawling_exa"):
         return result_text
     if not isinstance(result_text, str):
         return result_text
@@ -127,7 +127,7 @@ def after_tool_callback(
         state["seen_queries"][query_key] = state["seen_queries"].get(query_key, 0) + 1
 
     # ── Complete Algorithm 9: record successful search category ──────────
-    if tool_name in ("brave_web_search", "firecrawl_search"):
+    if tool_name in ("brave_web_search", "firecrawl_search", "web_search_exa", "web_search_advanced_exa"):
         search_query = args.get("q", "") or args.get("query", "")
         if search_query:
             category = _classify_query(search_query)

@@ -43,6 +43,7 @@ TENCENTCLOUD_SECRET_ID = os.environ.get("TENCENTCLOUD_SECRET_ID", "")
 TENCENTCLOUD_SECRET_KEY = os.environ.get("TENCENTCLOUD_SECRET_KEY", "")
 BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "")
 FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY", "")
+EXA_API_KEY = os.environ.get("EXA_API_KEY", "")
 
 
 def _full_env(**overrides: str) -> dict:
@@ -82,6 +83,20 @@ _TOOL_CONFIGS = {
         command="npx",
         args=["-y", "firecrawl-mcp"],
         env=_full_env(FIRECRAWL_API_KEY=FIRECRAWL_API_KEY),
+    ),
+    # ── Official Exa MCP server ────────────────────────────────────────────
+    # npm: exa-mcp-server  (MIT, exa-labs/exa-mcp-server)
+    # Uses mcp-remote to bridge to Exa's hosted MCP endpoint.
+    # Auto-discovered tools: web_search_exa, crawling_exa,
+    #   get_code_context_exa, (web_search_advanced_exa if enabled)
+    "exa": lambda: StdioServerParameters(
+        command="npx",
+        args=[
+            "-y", "mcp-remote",
+            f"https://mcp.exa.ai/mcp?exaApiKey={EXA_API_KEY}"
+            "&tools=web_search_exa,crawling_exa,web_search_advanced_exa",
+        ],
+        env=_full_env(),
     ),
     # ── Legacy MiroFlow MCP servers (Python subprocess) ───────────────────
     "tool-google-search": lambda: StdioServerParameters(

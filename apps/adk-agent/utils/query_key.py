@@ -58,4 +58,9 @@ def build_query_key(
         if isinstance(urls, list):
             urls = ",".join(sorted(urls))
         return prefix + tool_name + "_" + str(urls)
+    # Exa MCP tools
+    if tool_name in ("web_search_exa", "web_search_advanced_exa"):
+        return prefix + tool_name + "_" + (args.get("query", "") or args.get("q", ""))
+    if tool_name == "crawling_exa":
+        return prefix + tool_name + "_" + args.get("url", "")
     return None
