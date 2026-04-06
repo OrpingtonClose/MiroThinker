@@ -13,6 +13,10 @@ Supports three execution modes (``--mode``):
   Phase 1 → discover items, Phase 2 → parallel batch evaluation
   (findings persisted to JSONL), Phase 3 → synthesise report.
 
+Batch mode uses ADK's native ``ResumabilityConfig`` with a
+``DatabaseSessionService`` (SQLite) so that stalled workers can be
+resumed from the last event rather than restarted from scratch.
+
 Parallel workers (``--workers N``) run N batch sessions concurrently
 via ``asyncio.gather`` on separate ADK ``Runner`` instances.
 
@@ -56,8 +60,10 @@ _tracer_provider = register(
 )
 GoogleADKInstrumentor().instrument(tracer_provider=_tracer_provider)
 
+from google.adk.apps import App
+from google.adk.apps.app import ResumabilityConfig
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
+from google.adk.sessions import DatabaseSessionService, InMemorySessionService
 from google.genai import types as genai_types
 
 from agents.research import research_agent
@@ -69,12 +75,12 @@ from prompts.templates import (
     FAILURE_SUMMARY_PROMPT,
     build_main_summary_prompt,
 )
-from tools.research_tools import clear_findings, get_findings_file, read_findings, set_findings_file
+from tools.research_tools import clear_findings, read_findings, set_findings_file
 from utils.boxed import extract_boxed_content
 
 logger = logging.getLogger(__name__)
 
-APP_NAME = "mirothinker-adk"
+APP_NAME = "mirothinker_adk"
 USER_ID = "user"
 CONTEXT_COMPRESS_LIMIT = int(os.environ.get("CONTEXT_COMPRESS_LIMIT", "5"))
 
@@ -162,8 +168,18 @@ async def _collect_with_heartbeat(
     return collected
 
 
+# Directory for persistent session DBs (batch resume).
+_FINDINGS_DIR = os.environ.get("FINDINGS_DIR", "/tmp/mirothinker")
+
+
+def _batch_db_url() -> str:
+    """Return the SQLite URL for the persistent batch session store."""
+    os.makedirs(_FINDINGS_DIR, exist_ok=True)
+    return f"sqlite+aiosqlite:///{_FINDINGS_DIR}/batch_sessions.db"
+
+
 async def _new_session(
-    session_service: InMemorySessionService,
+    session_service: InMemorySessionService | DatabaseSessionService,
     keep_k: int | None = None,
     report_mode: bool = False,
 ) -> object:
@@ -301,7 +317,8 @@ async def run_report(task: str) -> str:
 
 
 async def _run_batch_worker(
-    session_service: InMemorySessionService,
+    app: App,
+    session_service: DatabaseSessionService,
     batch_prompt: str,
     batch_id: int,
     keep_k: int,
@@ -309,19 +326,24 @@ async def _run_batch_worker(
 ) -> str:
     """Run a single batch evaluation in its own ADK session.
 
-    Uses event-stream heartbeat detection: the worker can run
-    indefinitely as long as ADK events keep flowing.  If no event
-    arrives for *stall_timeout* seconds it is cancelled.
+    Uses ADK ``App`` with ``ResumabilityConfig`` so that stalled
+    workers can be resumed from the last persisted event.  The
+    ``DatabaseSessionService`` (SQLite) persists session state across
+    crashes — on restart the same ``invocation_id`` replays completed
+    events and continues from where it stopped.
+
+    Health monitoring uses event-stream heartbeat detection: the worker
+    can run indefinitely as long as ADK events keep flowing.  If no
+    event arrives for *stall_timeout* seconds it is cancelled.
     """
     session = await _new_session(session_service, keep_k=keep_k, report_mode=True)
 
     runner = Runner(
-        agent=research_agent,
-        app_name=APP_NAME,
+        app=app,
         session_service=session_service,
     )
 
-    logger.info("Batch worker %d starting", batch_id)
+    logger.info("Batch worker %d starting (session %s)", batch_id, session.id)
     result = await _collect_with_heartbeat(
         runner, USER_ID, session.id, batch_prompt,
         stall_timeout=stall_timeout,
@@ -351,29 +373,21 @@ async def run_batch(
     Phase 3: Summary agent synthesises all accumulated findings into
              a final report — always runs, even if some workers stalled.
 
-    If *resume* is True and a previous JSONL findings file exists,
-    already-evaluated URLs are skipped (checkpoint-aware restart).
+    Checkpoint / resume uses ADK-native ``ResumabilityConfig`` backed
+    by ``DatabaseSessionService`` (SQLite).  On restart, stalled
+    workers are replayed from the last persisted event — no custom
+    JSONL checkpoint scanning required.
     """
-    session_service = InMemorySessionService()
+    # ── ADK-native resumable App ──────────────────────────────────────
+    batch_app = App(
+        name=APP_NAME,
+        root_agent=research_agent,
+        resumability_config=ResumabilityConfig(is_resumable=True),
+    )
+    session_service = DatabaseSessionService(db_url=_batch_db_url())
     set_findings_file("batch_findings.jsonl")
 
-    # ── Checkpoint awareness ──────────────────────────────────────────
-    # If resuming, load previously evaluated URLs so we can skip them.
-    already_evaluated: set[str] = set()
-    if resume and get_findings_file().exists():
-        for line in get_findings_file().read_text().strip().splitlines():
-            try:
-                obj = json.loads(line)
-                if obj.get("url"):
-                    already_evaluated.add(obj["url"])
-            except json.JSONDecodeError:
-                pass
-        if already_evaluated:
-            logger.info(
-                "Resuming: %d previously evaluated URLs loaded from checkpoint",
-                len(already_evaluated),
-            )
-    else:
+    if not resume:
         clear_findings()
 
     # ── Phase 1: Discovery ──────────────────────────────────────────
@@ -389,8 +403,7 @@ async def run_batch(
 
     session = await _new_session(session_service, report_mode=True)
     runner = Runner(
-        agent=research_agent,
-        app_name=APP_NAME,
+        app=batch_app,
         session_service=session_service,
     )
 
@@ -426,19 +439,6 @@ async def run_batch(
 
     logger.info("Phase 1 discovered %d items", len(items))
 
-    # Filter out already-evaluated items (checkpoint resume)
-    if already_evaluated:
-        before = len(items)
-        items = [it for it in items if it.get("url") not in already_evaluated]
-        skipped = before - len(items)
-        if skipped:
-            logger.info(
-                "Checkpoint: skipped %d already-evaluated items, %d remaining",
-                skipped, len(items),
-            )
-    if not items:
-        logger.info("All items already evaluated; skipping to Phase 3")
-
     # ── Phase 2: Parallel batch evaluation ──────────────────────────
     results: list[str | BaseException] = []
 
@@ -463,7 +463,7 @@ async def run_batch(
                 )
                 try:
                     return await _run_batch_worker(
-                        session_service, prompt, bid, keep_k,
+                        batch_app, session_service, prompt, bid, keep_k,
                         stall_timeout=stall_timeout,
                     )
                 except asyncio.TimeoutError:
@@ -513,13 +513,11 @@ async def run_batch(
         )
         all_findings = worker_prose if worker_prose else "(no data collected)"
 
-    total_items = len(items) + len(already_evaluated)
     synthesis_prompt = (
         f"Original task: {task}\n\n"
         f"PHASE 3 INSTRUCTIONS: Below are ALL findings accumulated from "
-        f"evaluating {total_items} discovered sources "
-        f"({completed} batches completed, {stalled} stalled, "
-        f"{len(already_evaluated)} from checkpoint). "
+        f"evaluating {len(items)} discovered sources "
+        f"({completed} batches completed, {stalled} stalled). "
         "Synthesise them into a comprehensive, well-structured final report. "
         "Include ratings, categories, and specific URLs.\n\n"
         f"Accumulated findings:\n{all_findings}"
