@@ -106,6 +106,28 @@ async def before_model_callback(
     state = callback_context.state
     keep_k = state.get("keep_k", DEFAULT_KEEP_K)
 
+    # ── Adaptive Keep-K ─────────────────────────────────────────────────
+    # Dynamically adjust K based on context utilisation so we retain
+    # maximum context when there's headroom and aggressively trim when
+    # approaching the limit.  Only activates when not explicitly overridden.
+    if not state.get("keep_k_locked"):
+        contents_for_estimate: list = getattr(llm_request, "contents", None) or []
+        if contents_for_estimate:
+            est_tokens = _estimate_tokens(contents_for_estimate)
+            utilisation = est_tokens / MAX_CONTEXT_TOKENS if MAX_CONTEXT_TOKENS > 0 else 0
+            if utilisation > 0.70:
+                keep_k = min(keep_k, 2)
+            elif utilisation > 0.50:
+                keep_k = min(keep_k, 3)
+            elif utilisation < 0.30:
+                keep_k = max(keep_k, 8)
+            state["_adaptive_keep_k"] = keep_k
+            if keep_k != state.get("keep_k", DEFAULT_KEEP_K):
+                logger.info(
+                    "Adaptive Keep-K: utilisation=%.0f%%, K adjusted to %d",
+                    utilisation * 100, keep_k,
+                )
+
     # Access the contents list from the LLM request
     contents: Optional[List[genai_types.Content]] = getattr(
         llm_request, "contents", None
