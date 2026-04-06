@@ -8,9 +8,9 @@ Wraps ALL web data-source MCPToolsets (Brave Search, Firecrawl, Exa) behind
 a single ADK Agent.  The parent research_agent sees ONE tool (this agent)
 instead of ~15 individual MCP tools, dramatically reducing context burn.
 
-Callbacks for dedup (Algorithm 2), diversity guard (Algorithm 9), arg-fix
-(Algorithm 8), and bad-result detection (Algorithm 4) are attached here so
-they run at the tool-call level inside this agent.
+Callbacks for dedup (Algorithm 2), arg-fix (Algorithm 8), and bad-result
+detection (Algorithm 4) are attached here so they run at the tool-call
+level inside this agent.
 """
 
 from __future__ import annotations
