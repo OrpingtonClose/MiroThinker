@@ -394,9 +394,17 @@ async def run_batch(
         session_service=session_service,
     )
 
-    discovery_result = await _collect_response_text(
-        runner, USER_ID, session.id, discovery_prompt
-    )
+    try:
+        discovery_result = await _collect_with_heartbeat(
+            runner, USER_ID, session.id, discovery_prompt,
+            stall_timeout=stall_timeout,
+        )
+    except (asyncio.TimeoutError, Exception) as exc:
+        logger.warning(
+            "Phase 1 discovery failed (%s: %s); falling back to report mode",
+            type(exc).__name__, exc,
+        )
+        return await run_report(task)
 
     # Parse discovered items from the agent's response
     items: list[dict] = []
@@ -464,15 +472,21 @@ async def run_batch(
                         bid, stall_timeout,
                     )
                     return "(stalled)"
+                except Exception as exc:
+                    logger.warning(
+                        "Batch worker %d failed (%s: %s) — moving on",
+                        bid, type(exc).__name__, exc,
+                    )
+                    return "(error)"
 
         batch_tasks = [
             _guarded_worker(batch, i) for i, batch in enumerate(batches)
         ]
         results = await asyncio.gather(*batch_tasks, return_exceptions=True)
 
-    completed = sum(1 for r in results if isinstance(r, str) and r not in ("(stalled)",))
+    completed = sum(1 for r in results if isinstance(r, str) and r not in ("(stalled)", "(error)"))
     stalled = sum(1 for r in results if r == "(stalled)")
-    errored = sum(1 for r in results if isinstance(r, BaseException))
+    errored = sum(1 for r in results if r == "(error)" or isinstance(r, BaseException))
     for i, r in enumerate(results):
         if isinstance(r, BaseException):
             logger.error("Batch worker %d raised %s: %s", i, type(r).__name__, r)
@@ -495,7 +509,7 @@ async def run_batch(
         # Fall back to concatenating whatever prose the workers returned
         worker_prose = "\n\n---\n\n".join(
             r for r in results
-            if isinstance(r, str) and r not in ("", "(stalled)")
+            if isinstance(r, str) and r not in ("", "(stalled)", "(error)")
         )
         all_findings = worker_prose if worker_prose else "(no data collected)"
 
