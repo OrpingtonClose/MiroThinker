@@ -22,6 +22,7 @@ from typing import List
 from dotenv import load_dotenv
 from google.adk.tools import FunctionTool
 from google.adk.tools.mcp_tool import MCPToolset
+from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
 from mcp import StdioServerParameters
 
 load_dotenv()
@@ -69,20 +70,26 @@ _TOOL_CONFIGS = {
     # Auto-discovered tools: brave_web_search, brave_local_search,
     #   brave_image_search, brave_video_search, brave_news_search,
     #   brave_summarizer
-    "brave-search": lambda: StdioServerParameters(
-        command="npx",
-        args=["-y", "@brave/brave-search-mcp-server"],
-        env=_full_env(BRAVE_API_KEY=BRAVE_API_KEY),
+    "brave-search": lambda: StdioConnectionParams(
+        server_params=StdioServerParameters(
+            command="npx",
+            args=["-y", "@brave/brave-search-mcp-server"],
+            env=_full_env(BRAVE_API_KEY=BRAVE_API_KEY),
+        ),
+        timeout=30.0,
     ),
     # ── Official Firecrawl MCP server ─────────────────────────────────────
     # npm: firecrawl-mcp  (MIT, firecrawl/firecrawl-mcp-server)
     # Auto-discovered tools: firecrawl_scrape, firecrawl_crawl,
     #   firecrawl_map, firecrawl_search, firecrawl_extract,
     #   firecrawl_batch_scrape, firecrawl_deep_research, plus more
-    "firecrawl": lambda: StdioServerParameters(
-        command="npx",
-        args=["-y", "firecrawl-mcp"],
-        env=_full_env(FIRECRAWL_API_KEY=FIRECRAWL_API_KEY),
+    "firecrawl": lambda: StdioConnectionParams(
+        server_params=StdioServerParameters(
+            command="npx",
+            args=["-y", "firecrawl-mcp"],
+            env=_full_env(FIRECRAWL_API_KEY=FIRECRAWL_API_KEY),
+        ),
+        timeout=30.0,
     ),
     # ── Official Exa MCP server ────────────────────────────────────────────
     # npm: exa-mcp-server  (MIT, exa-labs/exa-mcp-server)
@@ -91,14 +98,17 @@ _TOOL_CONFIGS = {
     # Requires: npm install -g exa-mcp-server
     # Auto-discovered tools: web_search_exa, crawling_exa,
     #   web_search_advanced_exa, get_code_context_exa, …
-    "exa": lambda: StdioServerParameters(
-        command="node",
-        args=[
-            "-e",
-            "const r=require('child_process').execSync('npm root -g',{encoding:'utf8'}).trim();"
-            "require(r+'/exa-mcp-server/.smithery/stdio/index.cjs');",
-        ],
-        env=_full_env(EXA_API_KEY=EXA_API_KEY),
+    "exa": lambda: StdioConnectionParams(
+        server_params=StdioServerParameters(
+            command="node",
+            args=[
+                "-e",
+                "const r=require('child_process').execSync('npm root -g',{encoding:'utf8'}).trim();"
+                "require(r+'/exa-mcp-server/.smithery/stdio/index.cjs');",
+            ],
+            env=_full_env(EXA_API_KEY=EXA_API_KEY),
+        ),
+        timeout=30.0,
     ),
     # ── Legacy MiroFlow MCP servers (Python subprocess) ───────────────────
     "tool-google-search": lambda: StdioServerParameters(
