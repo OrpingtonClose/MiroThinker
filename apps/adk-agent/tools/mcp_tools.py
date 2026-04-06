@@ -86,17 +86,19 @@ _TOOL_CONFIGS = {
     ),
     # ── Official Exa MCP server ────────────────────────────────────────────
     # npm: exa-mcp-server  (MIT, exa-labs/exa-mcp-server)
-    # Uses mcp-remote to bridge to Exa's hosted MCP endpoint.
+    # Runs the local Smithery stdio entry-point so the API key stays in
+    # an env-var (not leaked on the command line like mcp-remote would).
+    # Requires: npm install -g exa-mcp-server
     # Auto-discovered tools: web_search_exa, crawling_exa,
-    #   get_code_context_exa, (web_search_advanced_exa if enabled)
+    #   web_search_advanced_exa, get_code_context_exa, …
     "exa": lambda: StdioServerParameters(
-        command="npx",
+        command="node",
         args=[
-            "-y", "mcp-remote",
-            f"https://mcp.exa.ai/mcp?exaApiKey={EXA_API_KEY}"
-            "&tools=web_search_exa,crawling_exa,web_search_advanced_exa",
+            "-e",
+            "const r=require('child_process').execSync('npm root -g',{encoding:'utf8'}).trim();"
+            "require(r+'/exa-mcp-server/.smithery/stdio/index.cjs');",
         ],
-        env=_full_env(),
+        env=_full_env(EXA_API_KEY=EXA_API_KEY),
     ),
     # ── Legacy MiroFlow MCP servers (Python subprocess) ───────────────────
     "tool-google-search": lambda: StdioServerParameters(
