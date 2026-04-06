@@ -54,5 +54,8 @@ def build_query_key(
     if tool_name == "firecrawl_crawl":
         return prefix + tool_name + "_" + args.get("url", "")
     if tool_name == "firecrawl_extract":
-        return prefix + tool_name + "_" + args.get("urls", "")
+        urls = args.get("urls", "")
+        if isinstance(urls, list):
+            urls = ",".join(sorted(urls))
+        return prefix + tool_name + "_" + str(urls)
     return None
