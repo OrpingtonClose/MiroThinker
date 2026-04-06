@@ -66,8 +66,8 @@ ANTI-REPETITION RULE: Never restate findings you have already written. State \
 each fact ONCE. If you catch yourself writing the same conclusion again, STOP \
 and search a new angle instead.
 
-SCRAPE PRIORITY: When choosing what to scrape with firecrawl_scrape, prioritise \
-in this order:
+SCRAPE PRIORITY: When telling web_agent what URLs to scrape, prioritise in \
+this order:
   1. Forum threads and community discussions (real user experiences)
   2. Vendor/marketplace product pages (actual availability and pricing)
   3. News articles and investigations
