@@ -56,10 +56,16 @@ if VENICE_PARAMS:
 _synthesis_api_base = os.environ.get("SYNTHESIS_API_BASE", "")
 _synthesis_api_key = os.environ.get("SYNTHESIS_API_KEY", "")
 _synthesis_is_venice = "venice.ai" in _synthesis_api_base
-_synthesis_venice_params: dict = json.loads(
-    os.environ.get("VENICE_PARAMS", json.dumps(
-        {"include_venice_system_prompt": False} if _synthesis_is_venice else {}
+# Only apply Venice params when synthesis actually points to Venice.
+# Reading from the shared VENICE_PARAMS env var when synthesis is NOT Venice
+# would leak unknown body fields and cause 400 errors from non-Venice providers.
+_synthesis_venice_params: dict = (
+    json.loads(os.environ.get(
+        "VENICE_PARAMS",
+        json.dumps({"include_venice_system_prompt": False}),
     ))
+    if _synthesis_is_venice
+    else {}
 )
 _synthesis_extra_body: dict = {}
 if _synthesis_venice_params:
