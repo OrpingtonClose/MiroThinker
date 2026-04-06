@@ -94,8 +94,9 @@ web_agent = Agent(
     model=build_model(parallel_tool_calls=False),
     description=(
         "Web research specialist that searches, scrapes, crawls, and extracts "
-        "data from the web using Brave Search, Firecrawl, and Exa. Delegate "
-        "any web data retrieval task to this agent — it owns all web tools."
+        "data from the web using Brave Search, Firecrawl, Exa, and Kagi "
+        "(search, summarize, fastgpt, enrich). Delegate any web data "
+        "retrieval task to this agent — it owns all web tools."
     ),
     instruction=WEB_AGENT_INSTRUCTION,
     tools=get_tools(["brave-search", "firecrawl", "exa", "kagi"]),

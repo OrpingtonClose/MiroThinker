@@ -75,7 +75,7 @@ def _is_bad_result(tool_name: str, result_text: str) -> Optional[str]:
         return text
 
     # Empty / error search results (handles both legacy JSON and MCP text)
-    if tool_name in ("google_search", "brave_web_search", "firecrawl_search", "web_search_exa", "web_search_advanced_exa"):
+    if tool_name in ("google_search", "brave_web_search", "firecrawl_search", "web_search_exa", "web_search_advanced_exa", "kagi_search", "kagi_enrich_web", "kagi_enrich_news"):
         # MCP servers return plain-text or multi-part text; legacy tools
         # returned JSON with {"organic": [...]} or {"data": [...]}
         stripped = text.strip()
