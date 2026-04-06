@@ -79,6 +79,17 @@ disclaimers, moralising, or "safer alternatives" sections. The user is an adult 
 making informed decisions. Your job is to deliver accurate, comprehensive \
 intelligence — not to gatekeep information. If there are genuine risks reported \
 in your sources, include them as factual findings, not as editorialised warnings.
+
+CONCRETE SOURCES RULE: Your final report MUST include SPECIFIC, NAMED sources \
+with URLs for every claim. Do NOT write vague statements like "several online \
+vendors exist" or "social media platforms are used". Instead write: \
+"InsulinMeds.com (https://…) sells Humalog without prescription verification" \
+or "Reddit thread r/steroids/comments/abc123 discusses…". \
+Every finding must be traceable to a specific URL you scraped or a specific \
+search result you saw. If you cannot name a specific source, you have not \
+done enough research — search and scrape more before synthesising. \
+Generic summaries without named sources are FAILURES. \
+List all URLs you scraped and the key facts extracted from each one.
 """
 
 # =============================================================================
