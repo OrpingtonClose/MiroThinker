@@ -26,6 +26,12 @@ logger = logging.getLogger(__name__)
 # Maximum length for scrape results in demo mode
 DEMO_SCRAPE_MAX_LENGTH = 20_000
 
+# Maximum characters allowed in a single tool result.
+# Prevents Exa/Firecrawl full-page dumps (1M+ chars) from blowing the
+# context window.  Applied in after_tool (before the result enters the
+# conversation) so it doesn't break message structure or tool_call_id pairing.
+_MAX_TOOL_RESULT_CHARS = int(os.environ.get("MAX_TOOL_RESULT_CHARS", "50000"))
+
 
 def _is_bad_result(tool_name: str, result_text: str) -> Optional[str]:
     """
@@ -124,6 +130,22 @@ def after_tool_callback(
     query_key = build_query_key(tool_name, args, agent_name=agent_name)
     if query_key is not None:
         state["seen_queries"][query_key] = state["seen_queries"].get(query_key, 0) + 1
+
+    # ── Per-result size cap ───────────────────────────────────────────
+    # Truncate oversized tool results BEFORE they enter the conversation.
+    # This prevents Exa web_search_advanced_exa (1M+ chars) and Firecrawl
+    # full-page scrapes from blowing Venice's 202K context limit.
+    if _MAX_TOOL_RESULT_CHARS > 0 and len(result_text) > _MAX_TOOL_RESULT_CHARS:
+        kept = result_text[:_MAX_TOOL_RESULT_CHARS]
+        notice = (
+            f"\n\n[TRUNCATED — original response was {len(result_text):,} chars, "
+            f"kept first {_MAX_TOOL_RESULT_CHARS:,}]"
+        )
+        logger.info(
+            "Per-result size cap: truncated %s result from %s to %s chars",
+            tool_name, f"{len(result_text):,}", f"{_MAX_TOOL_RESULT_CHARS:,}",
+        )
+        return {"result": kept + notice}
 
     # ── DEMO_MODE truncation ────────────────────────────────────────────
     truncated = _maybe_truncate_scrape(tool_name, result_text)

@@ -163,6 +163,18 @@ async def _collect_with_heartbeat(
         # Always close the async generator to free MCP connections
         # and Runner resources — critical on stall/cancel paths.
         await aiter.aclose()
+        # Safety-release the LLM semaphore if held — prevents permanent
+        # slot leak when a worker stalls mid-LLM-call (the after_model
+        # callback never fires in that case).
+        from callbacks.before_model import release_llm_semaphore_if_held
+        try:
+            sess = await runner._session_service.get_session(
+                app_name=runner._app_name, user_id=user_id, session_id=session_id
+            )
+            if sess:
+                release_llm_semaphore_if_held(sess.state)
+        except Exception:
+            pass  # best-effort cleanup
 
     logger.info("%s completed normally (%d events)", tag, event_count)
     return collected
@@ -577,7 +589,7 @@ async def main(
         result = await run_batch(
             task, workers=workers, batch_size=batch_size,
             keep_k=keep_k if keep_k is not None else 2,
-            stall_timeout=stall_timeout or DEFAULT_STALL_TIMEOUT,
+            stall_timeout=stall_timeout if stall_timeout is not None else DEFAULT_STALL_TIMEOUT,
             resume=not no_resume,
         )
     else:
