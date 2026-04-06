@@ -45,11 +45,17 @@ if VENICE_PARAMS:
     _extra_body["venice_parameters"] = VENICE_PARAMS
 
 
-def build_model() -> Union[str, LiteLlm]:
+def build_model(*, parallel_tool_calls: bool = True) -> Union[str, LiteLlm]:
     """Return the model for ADK Agent(model=...).
 
     * Native Gemini models (``gemini-*``) → plain string (ADK native path).
     * Everything else → ``LiteLlm`` with vendor-specific ``extra_body``.
+
+    Args:
+        parallel_tool_calls: Whether the model may emit multiple tool calls
+            in a single response.  Set to ``False`` for sub-agents that need
+            sequential tool execution (e.g. web_agent) so each result is
+            processed before the next search is issued.
     """
     name = ADK_MODEL_NAME
 
@@ -62,4 +68,8 @@ def build_model() -> Union[str, LiteLlm]:
     if name.startswith("gemini"):
         return name
 
-    return LiteLlm(model=name, extra_body=_extra_body)
+    kwargs: dict = {"extra_body": _extra_body}
+    if not parallel_tool_calls:
+        kwargs["parallel_tool_calls"] = False
+
+    return LiteLlm(model=name, **kwargs)

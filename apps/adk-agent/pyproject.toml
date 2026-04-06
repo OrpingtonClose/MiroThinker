@@ -10,6 +10,7 @@ dependencies = [
     "arize-phoenix",
     "arize-phoenix-otel",
     "openinference-instrumentation-google-adk",
+    "aiosqlite",
 ]
 
 [tool.uv.sources]

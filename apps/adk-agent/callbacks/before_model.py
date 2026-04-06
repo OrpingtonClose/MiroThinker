@@ -15,6 +15,7 @@ state so the agent instruction can trigger a final answer.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any, List, Optional
@@ -23,6 +24,20 @@ from google.adk.agents.callback_context import CallbackContext
 from google.genai import types as genai_types
 
 logger = logging.getLogger(__name__)
+
+# ── LLM concurrency gate ────────────────────────────────────────────
+# Limits how many concurrent LLM calls can be in-flight at once.
+# Prevents Venice/provider rate limiting when running parallel workers.
+# ADK-native: this is just an asyncio.Semaphore inside a callback.
+_MAX_CONCURRENT_LLM = int(os.environ.get("MAX_CONCURRENT_LLM", "2"))
+_llm_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_LLM)
+
+
+def release_llm_semaphore_if_held(state: dict) -> None:
+    """Safety release — call from after_model or any error-cleanup path."""
+    if state.get("_llm_sem_held"):
+        _llm_semaphore.release()
+        state["_llm_sem_held"] = False
 
 # Default number of recent tool results to keep (matches keep_tool_result=5)
 DEFAULT_KEEP_K = int(os.environ.get("KEEP_TOOL_RESULT", "5"))
@@ -64,20 +79,54 @@ def _estimate_tokens(contents: List[genai_types.Content]) -> int:
     return total_chars // _CHARS_PER_TOKEN
 
 
-def before_model_callback(
+async def before_model_callback(
     callback_context: CallbackContext, llm_request: Any
 ) -> Optional[genai_types.Content]:
     """
-    ADK before_model_callback.
+    ADK before_model_callback (async).
 
-    Modifies the LLM request in-place to trim old tool results and
-    optionally signals the agent to produce a final answer when context
-    is too large.
+    1. Acquires the LLM concurrency semaphore — limits parallel LLM
+       calls to ``MAX_CONCURRENT_LLM`` (default 2) so providers like
+       Venice don't get rate-limited when running batch workers.
+    2. Trims old tool results via Keep-K-Recent (Algorithm 5).
+    3. Checks context length and signals force_end if too large.
 
     Returns None (ADK proceeds with the — possibly modified — request).
     """
+    # Acquire semaphore — blocks if too many LLM calls in flight.
+    # ADK will await this coroutine, so other workers can proceed
+    # while we wait for a slot.
+    await _llm_semaphore.acquire()
+    # Release happens in after_model_callback via _llm_semaphore.release().
+    # Store on callback_context state so after_model can find it.
+    callback_context.state["_llm_sem_held"] = True
+    logger.debug("LLM semaphore acquired (%d/%d slots used)",
+                 _MAX_CONCURRENT_LLM - _llm_semaphore._value,
+                 _MAX_CONCURRENT_LLM)
     state = callback_context.state
     keep_k = state.get("keep_k", DEFAULT_KEEP_K)
+
+    # ── Adaptive Keep-K ─────────────────────────────────────────────────
+    # Dynamically adjust K based on context utilisation so we retain
+    # maximum context when there's headroom and aggressively trim when
+    # approaching the limit.  Only activates when not explicitly overridden.
+    if not state.get("keep_k_locked"):
+        contents_for_estimate: list = getattr(llm_request, "contents", None) or []
+        if contents_for_estimate:
+            est_tokens = _estimate_tokens(contents_for_estimate)
+            utilisation = est_tokens / MAX_CONTEXT_TOKENS if MAX_CONTEXT_TOKENS > 0 else 0
+            if utilisation > 0.70:
+                keep_k = min(keep_k, 2)
+            elif utilisation > 0.50:
+                keep_k = min(keep_k, 3)
+            elif utilisation < 0.30:
+                keep_k = max(keep_k, 8)
+            state["_adaptive_keep_k"] = keep_k
+            if keep_k != state.get("keep_k", DEFAULT_KEEP_K):
+                logger.info(
+                    "Adaptive Keep-K: utilisation=%.0f%%, K adjusted to %d",
+                    utilisation * 100, keep_k,
+                )
 
     # Access the contents list from the LLM request
     contents: Optional[List[genai_types.Content]] = getattr(

@@ -19,6 +19,7 @@ from typing import Any, Optional
 from google.adk.agents.callback_context import CallbackContext
 from google.genai import types as genai_types
 
+from callbacks.before_model import release_llm_semaphore_if_held
 from utils.boxed import extract_boxed_content
 
 logger = logging.getLogger(__name__)
@@ -30,12 +31,17 @@ def after_model_callback(
     """
     ADK after_model_callback.
 
-    Scans the model response for \\boxed{} content and stores it in
-    session state as a fallback answer.
+    1. Releases the LLM concurrency semaphore acquired in
+       ``before_model_callback`` so the next worker can proceed.
+    2. Scans the model response for \\boxed{} content and stores it in
+       session state as a fallback answer.
 
     Returns None to keep the original response unchanged.
     """
     state = callback_context.state
+
+    # Release LLM concurrency semaphore (acquired in before_model_callback)
+    release_llm_semaphore_if_held(state)
 
     if "intermediate_boxed_answers" not in state:
         state["intermediate_boxed_answers"] = []
