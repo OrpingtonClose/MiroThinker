@@ -20,7 +20,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 import httpx
 from google.adk.tools import FunctionTool
@@ -198,7 +198,6 @@ async def exa_multi_search(
 
     # Build unified compressed output
     all_sources: list = []
-    all_facts: list = []
     total_results = 0
 
     for batch in raw_results:
@@ -207,13 +206,7 @@ async def exa_multi_search(
         for r in batch.get("results", []):
             url = r.get("url", "")
             title = r.get("title", "")
-            # Extract highlights or first 300 chars of text
-            highlights = r.get("highlights", [])
-            text = r.get("text", "")
-            snippet = " ".join(highlights) if highlights else text[:300]
             all_sources.append({"url": url, "title": title, "query": query})
-            if snippet.strip():
-                all_facts.append(f"[{query}] {snippet[:300]}")
 
     output = {
         "queries_executed": len(queries),
