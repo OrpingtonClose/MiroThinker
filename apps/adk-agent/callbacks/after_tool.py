@@ -49,6 +49,8 @@ _COMPRESSIBLE_TOOLS = frozenset({
     "firecrawl_extract",
     # Brave
     "brave_web_search",
+    # Kagi
+    "kagi_search", "kagi_enrich_web", "kagi_enrich_news",
 })
 
 
