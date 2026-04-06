@@ -18,10 +18,9 @@ Callbacks wired here:
 
 from __future__ import annotations
 
-import os
-
 from google.adk import Agent
 
+from agents.model_config import build_model
 from agents.web_agent import web_agent
 from callbacks.after_model import after_model_callback
 from callbacks.after_tool import after_tool_callback
@@ -30,11 +29,9 @@ from callbacks.before_tool import before_tool_callback
 from prompts.templates import MAIN_AGENT_INSTRUCTION
 from tools.mcp_tools import get_tools
 
-_MODEL = os.environ.get("ADK_MODEL", "litellm/openai/gpt-4o")
-
 research_agent = Agent(
     name="research_agent",
-    model=_MODEL,
+    model=build_model(),
     description="Deep research agent that uses tools and sub-agents to answer questions.",
     instruction=MAIN_AGENT_INSTRUCTION,
     tools=get_tools(["tool-python"]),

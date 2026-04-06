@@ -16,20 +16,17 @@ logic.
 
 from __future__ import annotations
 
-import os
-
 from google.adk import Agent
 
+from agents.model_config import build_model
 from agents.web_agent import web_agent
 from callbacks.after_tool import after_tool_callback
 from callbacks.before_tool import before_tool_callback
 from prompts.templates import BROWSING_AGENT_INSTRUCTION
 
-_MODEL = os.environ.get("ADK_MODEL", "litellm/openai/gpt-4o")
-
 browsing_agent = Agent(
     name="browsing_agent",
-    model=_MODEL,
+    model=build_model(),
     description=(
         "Performs the subtask of searching and browsing the web for specific "
         "missing information. The subtask should be clearly defined, include "

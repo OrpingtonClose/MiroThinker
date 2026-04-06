@@ -15,15 +15,12 @@ level inside this agent.
 
 from __future__ import annotations
 
-import os
-
 from google.adk import Agent
 
+from agents.model_config import build_model
 from callbacks.after_tool import after_tool_callback
 from callbacks.before_tool import before_tool_callback
 from tools.mcp_tools import get_tools
-
-_MODEL = os.environ.get("ADK_MODEL", "litellm/openai/gpt-4o")
 
 WEB_AGENT_INSTRUCTION = """\
 You are a web research specialist. Your ONLY job is to search, scrape, crawl, \
@@ -59,7 +56,7 @@ RULES:
 
 web_agent = Agent(
     name="web_agent",
-    model=_MODEL,
+    model=build_model(),
     description=(
         "Web research specialist that searches, scrapes, crawls, and extracts "
         "data from the web using Brave Search, Firecrawl, and Exa. Delegate "
