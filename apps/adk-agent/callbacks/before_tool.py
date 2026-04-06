@@ -37,9 +37,13 @@ MAX_CONSECUTIVE_ERRORS = 5
 # Source-level context budget defaults for Exa tools.
 # These cap how much TEXT the Exa API returns per result — not truncation,
 # just telling the API to send less, like numResults caps how many results.
-EXA_DEFAULT_TEXT_MAX_CHARS = 3000  # per-result text cap (chars)
-EXA_DEFAULT_NUM_RESULTS = 8       # max results per search
-EXA_CRAWL_TEXT_MAX_CHARS = 10000  # crawling a specific URL gets more
+# With dynamic compression in after_tool, raw results are summarised into
+# structured memory (~500-800 tokens) so we can afford larger per-result
+# text from the API.  The cap is an emergency safety rail for pathological
+# results (PDF dumps, endless boilerplate) — not the primary constraint.
+EXA_DEFAULT_TEXT_MAX_CHARS = 10_000  # emergency cap per-result (chars)
+EXA_DEFAULT_NUM_RESULTS = 8          # max results per search
+EXA_CRAWL_TEXT_MAX_CHARS = 15_000    # crawling a specific URL gets more
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────

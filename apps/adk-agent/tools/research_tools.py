@@ -14,12 +14,15 @@ instead of a custom implementation — it does the same thing natively.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import time
 from pathlib import Path
+from typing import List, Optional
 
+import httpx
 from google.adk.tools import FunctionTool
 
 logger = logging.getLogger(__name__)
@@ -120,9 +123,128 @@ async def read_findings(category: str = "") -> str:
     return json.dumps(findings, ensure_ascii=False)
 
 
+# ── exa_multi_search ───────────────────────────────────────────────
+
+_EXA_API_BASE = "https://api.exa.ai"
+_EXA_API_KEY = os.environ.get("EXA_API_KEY", "")
+
+
+async def _exa_search_one(
+    client: httpx.AsyncClient,
+    query: str,
+    num_results: int,
+    text_max_chars: int,
+) -> dict:
+    """Execute a single Exa search and return the parsed response."""
+    payload = {
+        "query": query,
+        "numResults": num_results,
+        "type": "auto",
+        "contents": {
+            "text": {"maxCharacters": text_max_chars},
+            "highlights": {"query": query},
+        },
+    }
+    try:
+        resp = await client.post(
+            f"{_EXA_API_BASE}/search",
+            json=payload,
+            headers={"x-api-key": _EXA_API_KEY, "Content-Type": "application/json"},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("results", [])
+        return {"query": query, "count": len(results), "results": results}
+    except Exception as exc:
+        logger.warning("exa_multi_search query failed: %s — %s", query, exc)
+        return {"query": query, "count": 0, "results": [], "error": str(exc)}
+
+
+async def exa_multi_search(
+    queries: List[str],
+    num_results_per_query: int = 5,
+    text_max_chars: int = 5000,
+) -> str:
+    """Run multiple Exa searches in parallel and return a single unified result.
+
+    Use this when you need to compare multiple topics simultaneously
+    (e.g. "compare these 6 companies") or gather data on several
+    entities at once.  All queries run in parallel internally but
+    return one combined result to keep the agent loop sequential.
+
+    Args:
+        queries: List of search queries to run (max 10).
+        num_results_per_query: Number of results per query (default 5, max 8).
+        text_max_chars: Max characters of text per result (default 5000).
+
+    Returns:
+        JSON object with per-query results and a unified summary.
+    """
+    if not _EXA_API_KEY:
+        return json.dumps({"error": "EXA_API_KEY not set"})
+
+    # Safety bounds
+    queries = queries[:10]
+    num_results_per_query = min(num_results_per_query, 8)
+    text_max_chars = min(text_max_chars, 10_000)
+
+    async with httpx.AsyncClient() as client:
+        tasks = [
+            _exa_search_one(client, q, num_results_per_query, text_max_chars)
+            for q in queries
+        ]
+        raw_results = await asyncio.gather(*tasks)
+
+    # Build unified compressed output
+    all_sources: list = []
+    all_facts: list = []
+    total_results = 0
+
+    for batch in raw_results:
+        query = batch["query"]
+        total_results += batch["count"]
+        for r in batch.get("results", []):
+            url = r.get("url", "")
+            title = r.get("title", "")
+            # Extract highlights or first 300 chars of text
+            highlights = r.get("highlights", [])
+            text = r.get("text", "")
+            snippet = " ".join(highlights) if highlights else text[:300]
+            all_sources.append({"url": url, "title": title, "query": query})
+            if snippet.strip():
+                all_facts.append(f"[{query}] {snippet[:300]}")
+
+    output = {
+        "queries_executed": len(queries),
+        "total_results": total_results,
+        "per_query": [
+            {
+                "query": b["query"],
+                "count": b["count"],
+                "error": b.get("error"),
+                "top_results": [
+                    {
+                        "title": r.get("title", ""),
+                        "url": r.get("url", ""),
+                        "snippet": " ".join(r.get("highlights", []))[:200]
+                        or r.get("text", "")[:200],
+                    }
+                    for r in b.get("results", [])[:5]
+                ],
+            }
+            for b in raw_results
+        ],
+        "all_sources": all_sources[:30],  # cap to avoid bloat
+    }
+
+    return json.dumps(output, ensure_ascii=False)
+
+
 # ── Public FunctionTool instances ───────────────────────────────────
 
 store_finding_tool = FunctionTool(store_finding)
 read_findings_tool = FunctionTool(read_findings)
+exa_multi_search_tool = FunctionTool(exa_multi_search)
 
-RESEARCH_TOOLS = [store_finding_tool, read_findings_tool]
+RESEARCH_TOOLS = [store_finding_tool, read_findings_tool, exa_multi_search_tool]
