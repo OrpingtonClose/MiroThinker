@@ -48,7 +48,7 @@ def _is_bad_result(tool_name: str, result_text: str) -> Optional[str]:
         return text
 
     # Empty Google search results
-    if tool_name in ("google_search", "brave_web_search"):
+    if tool_name in ("google_search", "brave_web_search", "firecrawl_search"):
         try:
             parsed = json.loads(text)
             if isinstance(parsed, dict):
@@ -116,8 +116,8 @@ def after_tool_callback(
         state["seen_queries"][query_key] = state["seen_queries"].get(query_key, 0) + 1
 
     # ── Complete Algorithm 9: record successful search category ──────────
-    if tool_name == "brave_web_search":
-        search_query = args.get("q", "")
+    if tool_name in ("brave_web_search", "firecrawl_search"):
+        search_query = args.get("q", "") or args.get("query", "")
         if search_query:
             category = _classify_query(search_query)
             cat_counts_key = "search_category_counts"

@@ -44,7 +44,15 @@ def build_query_key(
     if tool_name == "search_and_browse":
         return prefix + tool_name + "_" + args.get("subtask", "")
     if tool_name == "brave_web_search":
-        return prefix + tool_name + "_" + args.get("q", "")
+        return prefix + tool_name + "_" + (args.get("q", "") or args.get("query", ""))
     if tool_name == "firecrawl_scrape":
         return prefix + tool_name + "_" + args.get("url", "")
+    if tool_name == "firecrawl_search":
+        return prefix + tool_name + "_" + (args.get("query", "") or args.get("q", ""))
+    if tool_name == "firecrawl_map":
+        return prefix + tool_name + "_" + args.get("url", "")
+    if tool_name == "firecrawl_crawl":
+        return prefix + tool_name + "_" + args.get("url", "")
+    if tool_name == "firecrawl_extract":
+        return prefix + tool_name + "_" + args.get("urls", "")
     return None

@@ -214,8 +214,8 @@ def before_tool_callback(
         state[dedup_counter_key] = 0
 
     # ── Algorithm 9: Search Diversity Guard ──────────────────────────────
-    if tool_name == "brave_web_search":
-        search_query = args.get("q", "")
+    if tool_name in ("brave_web_search", "firecrawl_search"):
+        search_query = args.get("q", "") or args.get("query", "")
         if search_query:
             category = _classify_query(search_query)
             cat_counts_key = "search_category_counts"
