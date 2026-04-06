@@ -26,6 +26,7 @@ _raw_model = os.environ.get("ADK_MODEL", "litellm/openai/gpt-4o")
 ADK_MODEL_NAME = _raw_model.split(":")[0]
 
 _raw_synthesis = os.environ.get("ADK_SYNTHESIS_MODEL", "")
+_has_separate_synthesis = bool(_raw_synthesis)
 ADK_SYNTHESIS_MODEL_NAME = _raw_synthesis.split(":")[0] if _raw_synthesis else ADK_MODEL_NAME
 
 # ── Extra body parameters (vendor-specific) ──────────────────────────
@@ -93,7 +94,12 @@ def build_model(
             research agents use RunPod/Qwen.
     """
     name = ADK_SYNTHESIS_MODEL_NAME if synthesis else ADK_MODEL_NAME
-    extra = _synthesis_extra_body if synthesis else _extra_body
+    # When no separate synthesis model is configured, inherit the primary
+    # model's extra_body so Venice params aren't silently dropped.
+    extra = (
+        _synthesis_extra_body if (synthesis and _has_separate_synthesis)
+        else _extra_body
+    )
 
     # Strip the ``litellm/`` prefix — it's an ADK routing convention,
     # not part of the LiteLLM model identifier.
