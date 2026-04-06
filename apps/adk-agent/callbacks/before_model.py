@@ -37,13 +37,30 @@ _PLACEHOLDER = "Tool result is omitted to save tokens."
 
 
 def _estimate_tokens(contents: List[genai_types.Content]) -> int:
-    """Rough token estimate based on total character count."""
+    """Rough token estimate based on total character count.
+
+    Counts text, function_call (name + args), and function_response
+    (name + response) parts so that tool-heavy conversations are not
+    under-counted.
+    """
     total_chars = 0
     for content in contents:
         if content.parts:
             for part in content.parts:
                 if hasattr(part, "text") and part.text:
                     total_chars += len(part.text)
+                if hasattr(part, "function_call") and part.function_call:
+                    fc = part.function_call
+                    total_chars += len(getattr(fc, "name", "") or "")
+                    args = getattr(fc, "args", None)
+                    if args:
+                        total_chars += len(str(args))
+                if hasattr(part, "function_response") and part.function_response:
+                    fr = part.function_response
+                    total_chars += len(getattr(fr, "name", "") or "")
+                    resp = getattr(fr, "response", None)
+                    if resp:
+                        total_chars += len(str(resp))
     return total_chars // _CHARS_PER_TOKEN
 
 
