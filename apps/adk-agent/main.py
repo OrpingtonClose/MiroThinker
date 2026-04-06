@@ -1,8 +1,7 @@
 # Copyright (c) 2025 MiroMind
 # This source code is licensed under the Apache 2.0 License.
 
-"""
-Entry point for the MiroThinker ADK agent.
+"""Entry point for the MiroThinker ADK agent.
 
 Supports three execution modes (``--mode``):
 
@@ -19,6 +18,13 @@ via ``asyncio.gather`` on separate ADK ``Runner`` instances.
 
 Keep-K (``--keep-k K``) overrides KEEP_TOOL_RESULT for bulk mode,
 reducing context burn per batch session.
+
+Health monitoring uses an **event-stream stall detector**: each ADK
+event from ``runner.run_async()`` acts as a natural heartbeat.  Workers
+that stop producing events for ``--stall-timeout`` seconds (default 45)
+are cancelled — but workers actively making tool calls can run
+indefinitely.  This is fundamentally different from a hard timeout:
+"run as long as you keep making progress; die if you go silent."
 """
 
 from __future__ import annotations
@@ -63,7 +69,7 @@ from prompts.templates import (
     FAILURE_SUMMARY_PROMPT,
     build_main_summary_prompt,
 )
-from tools.research_tools import clear_findings, read_findings, set_findings_file
+from tools.research_tools import clear_findings, get_findings_file, read_findings, set_findings_file
 from utils.boxed import extract_boxed_content
 
 logger = logging.getLogger(__name__)
@@ -75,11 +81,16 @@ CONTEXT_COMPRESS_LIMIT = int(os.environ.get("CONTEXT_COMPRESS_LIMIT", "5"))
 
 # ── Shared helpers ──────────────────────────────────────────────────
 
+# Default stall timeout: cancel a worker if no ADK event arrives for
+# this many seconds.  Each event (LLM chunk, tool call, tool result,
+# delegation) resets the timer, so active workers run indefinitely.
+DEFAULT_STALL_TIMEOUT = float(os.environ.get("STALL_TIMEOUT", "45"))
+
 
 async def _collect_response_text(
     runner: Runner, user_id: str, session_id: str, message: str
 ) -> str:
-    """Run an agent and collect the full response text."""
+    """Run an agent and collect the full response text (no stall detection)."""
     collected = ""
     content = genai_types.Content(
         role="user", parts=[genai_types.Part(text=message)]
@@ -91,6 +102,58 @@ async def _collect_response_text(
             for part in event.content.parts:
                 if hasattr(part, "text") and part.text:
                     collected += part.text
+    return collected
+
+
+async def _collect_with_heartbeat(
+    runner: Runner,
+    user_id: str,
+    session_id: str,
+    message: str,
+    stall_timeout: float = DEFAULT_STALL_TIMEOUT,
+    worker_id: int | None = None,
+) -> str:
+    """Run an agent with event-stream stall detection.
+
+    Each event yielded by ``runner.run_async()`` acts as a heartbeat.
+    If no event arrives for *stall_timeout* seconds the worker is
+    considered stalled and ``asyncio.TimeoutError`` is raised.
+
+    A worker actively making tool calls can run for hours — it stays
+    alive as long as events keep flowing.
+    """
+    collected = ""
+    content = genai_types.Content(
+        role="user", parts=[genai_types.Part(text=message)]
+    )
+    tag = f"worker {worker_id}" if worker_id is not None else "agent"
+    event_count = 0
+
+    aiter = runner.run_async(
+        user_id=user_id, session_id=session_id, new_message=content
+    ).__aiter__()
+
+    while True:
+        try:
+            event = await asyncio.wait_for(
+                aiter.__anext__(), timeout=stall_timeout
+            )
+        except StopAsyncIteration:
+            break
+        except asyncio.TimeoutError:
+            logger.warning(
+                "%s stalled — no event for %.0fs after %d events",
+                tag, stall_timeout, event_count,
+            )
+            raise
+
+        event_count += 1
+        if event.content and event.content.parts:
+            for part in event.content.parts:
+                if hasattr(part, "text") and part.text:
+                    collected += part.text
+
+    logger.info("%s completed normally (%d events)", tag, event_count)
     return collected
 
 
@@ -237,8 +300,14 @@ async def _run_batch_worker(
     batch_prompt: str,
     batch_id: int,
     keep_k: int,
+    stall_timeout: float = DEFAULT_STALL_TIMEOUT,
 ) -> str:
-    """Run a single batch evaluation in its own ADK session."""
+    """Run a single batch evaluation in its own ADK session.
+
+    Uses event-stream heartbeat detection: the worker can run
+    indefinitely as long as ADK events keep flowing.  If no event
+    arrives for *stall_timeout* seconds it is cancelled.
+    """
     session = await _new_session(session_service, keep_k=keep_k, report_mode=True)
 
     runner = Runner(
@@ -248,8 +317,10 @@ async def _run_batch_worker(
     )
 
     logger.info("Batch worker %d starting", batch_id)
-    result = await _collect_response_text(
-        runner, USER_ID, session.id, batch_prompt
+    result = await _collect_with_heartbeat(
+        runner, USER_ID, session.id, batch_prompt,
+        stall_timeout=stall_timeout,
+        worker_id=batch_id,
     )
     logger.info("Batch worker %d finished (%d chars)", batch_id, len(result))
     return result
@@ -260,19 +331,45 @@ async def run_batch(
     workers: int = 3,
     batch_size: int = 5,
     keep_k: int = 2,
+    stall_timeout: float = DEFAULT_STALL_TIMEOUT,
+    resume: bool = True,
 ) -> str:
-    """Multi-phase batch orchestration.
+    """Multi-phase batch orchestration with heartbeat-based health monitoring.
 
     Phase 1: Research agent discovers items/URLs to evaluate.
     Phase 2: Items split into batches, run in parallel via
              ``asyncio.gather`` on separate ADK ``Runner`` instances.
              Each batch worker stores findings via ``store_finding``.
+             Workers are monitored via event-stream heartbeats —
+             they can run indefinitely while making progress, but are
+             cancelled after *stall_timeout* seconds of silence.
     Phase 3: Summary agent synthesises all accumulated findings into
-             a final report.
+             a final report — always runs, even if some workers stalled.
+
+    If *resume* is True and a previous JSONL findings file exists,
+    already-evaluated URLs are skipped (checkpoint-aware restart).
     """
     session_service = InMemorySessionService()
     set_findings_file("batch_findings.jsonl")
-    clear_findings()
+
+    # ── Checkpoint awareness ──────────────────────────────────────────
+    # If resuming, load previously evaluated URLs so we can skip them.
+    already_evaluated: set[str] = set()
+    if resume and get_findings_file().exists():
+        for line in get_findings_file().read_text().strip().splitlines():
+            try:
+                obj = json.loads(line)
+                if obj.get("url"):
+                    already_evaluated.add(obj["url"])
+            except json.JSONDecodeError:
+                pass
+        if already_evaluated:
+            logger.info(
+                "Resuming: %d previously evaluated URLs loaded from checkpoint",
+                len(already_evaluated),
+            )
+    else:
+        clear_findings()
 
     # ── Phase 1: Discovery ──────────────────────────────────────────
     logger.info("=== Phase 1: Discovery ===")
@@ -316,44 +413,96 @@ async def run_batch(
 
     logger.info("Phase 1 discovered %d items", len(items))
 
+    # Filter out already-evaluated items (checkpoint resume)
+    if already_evaluated:
+        before = len(items)
+        items = [it for it in items if it.get("url") not in already_evaluated]
+        skipped = before - len(items)
+        if skipped:
+            logger.info(
+                "Checkpoint: skipped %d already-evaluated items, %d remaining",
+                skipped, len(items),
+            )
+    if not items:
+        logger.info("All items already evaluated; skipping to Phase 3")
+
     # ── Phase 2: Parallel batch evaluation ──────────────────────────
-    logger.info("=== Phase 2: Parallel batch evaluation (%d workers) ===", workers)
+    results: list[str | BaseException] = []
 
-    batches = [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
-    sem = asyncio.Semaphore(workers)
+    if items:  # skip if checkpoint already covered everything
+        logger.info("=== Phase 2: Parallel batch evaluation (%d workers) ===", workers)
 
-    async def _guarded_worker(batch: list[dict], bid: int) -> str:
-        async with sem:
-            batch_desc = "\n".join(
-                f"- {item.get('name', 'unknown')}: {item.get('url', 'N/A')}"
-                for item in batch
-            )
-            prompt = (
-                f"Original task: {task}\n\n"
-                f"PHASE 2 INSTRUCTIONS: Evaluate these {len(batch)} items. "
-                "For each item, scrape it and call store_finding with your "
-                "evaluation (name, url, category, summary, rating 1-10).\n\n"
-                f"Items to evaluate:\n{batch_desc}"
-            )
-            return await _run_batch_worker(session_service, prompt, bid, keep_k)
+        batches = [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
+        sem = asyncio.Semaphore(workers)
 
-    batch_tasks = [
-        _guarded_worker(batch, i) for i, batch in enumerate(batches)
-    ]
-    await asyncio.gather(*batch_tasks)
+        async def _guarded_worker(batch: list[dict], bid: int) -> str:
+            async with sem:
+                batch_desc = "\n".join(
+                    f"- {item.get('name', 'unknown')}: {item.get('url', 'N/A')}"
+                    for item in batch
+                )
+                prompt = (
+                    f"Original task: {task}\n\n"
+                    f"PHASE 2 INSTRUCTIONS: Evaluate these {len(batch)} items. "
+                    "For each item, scrape it and call store_finding with your "
+                    "evaluation (name, url, category, summary, rating 1-10).\n\n"
+                    f"Items to evaluate:\n{batch_desc}"
+                )
+                try:
+                    return await _run_batch_worker(
+                        session_service, prompt, bid, keep_k,
+                        stall_timeout=stall_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Batch worker %d stalled (no event for %.0fs) — moving on",
+                        bid, stall_timeout,
+                    )
+                    return "(stalled)"
 
-    logger.info("Phase 2 complete: all %d batches finished", len(batches))
+        batch_tasks = [
+            _guarded_worker(batch, i) for i, batch in enumerate(batches)
+        ]
+        results = await asyncio.gather(*batch_tasks, return_exceptions=True)
 
-    # ── Phase 3: Synthesis ──────────────────────────────────────────
+    completed = sum(1 for r in results if isinstance(r, str) and r not in ("(stalled)",))
+    stalled = sum(1 for r in results if r == "(stalled)")
+    errored = sum(1 for r in results if isinstance(r, BaseException))
+    for i, r in enumerate(results):
+        if isinstance(r, BaseException):
+            logger.error("Batch worker %d raised %s: %s", i, type(r).__name__, r)
+
+    logger.info(
+        "Phase 2 complete: %d/%d batches OK, %d stalled, %d errored",
+        completed, len(results) if results else 0, stalled, errored,
+    )
+
+    # ── Phase 3: Synthesis (always runs) ─────────────────────────────
     logger.info("=== Phase 3: Synthesis ===")
     all_findings = await read_findings()
 
+    findings_empty = (
+        not all_findings
+        or all_findings.strip() in ("", "[]", "No findings recorded yet.")
+    )
+    if findings_empty:
+        logger.warning("No findings accumulated; synthesising from worker prose")
+        # Fall back to concatenating whatever prose the workers returned
+        worker_prose = "\n\n---\n\n".join(
+            r for r in results
+            if isinstance(r, str) and r not in ("", "(stalled)")
+        )
+        all_findings = worker_prose if worker_prose else "(no data collected)"
+
+    total_items = len(items) + len(already_evaluated)
     synthesis_prompt = (
         f"Original task: {task}\n\n"
-        "PHASE 3 INSTRUCTIONS: Below are ALL findings accumulated from "
-        "evaluating every discovered source. Synthesise them into a "
-        "comprehensive, well-structured final report. Include ratings, "
-        "categories, and specific URLs.\n\n"
+        f"PHASE 3 INSTRUCTIONS: Below are ALL findings accumulated from "
+        f"evaluating {total_items} discovered sources "
+        f"({completed} batches completed, {stalled} stalled, "
+        f"{len(already_evaluated)} from checkpoint). "
+        "Synthesise them into a comprehensive, well-structured final report. "
+        "Include ratings, categories, and specific URLs.\n\n"
         f"Accumulated findings:\n{all_findings}"
     )
 
@@ -382,6 +531,8 @@ async def main(
     workers: int = 3,
     batch_size: int = 5,
     keep_k: int | None = None,
+    stall_timeout: float | None = None,
+    no_resume: bool = False,
 ) -> str:
     """Run MiroThinker in the specified mode.
 
@@ -391,6 +542,8 @@ async def main(
         workers: Number of parallel batch workers (batch mode only).
         batch_size: Items per batch (batch mode only).
         keep_k: Override KEEP_TOOL_RESULT for this run.
+        stall_timeout: Per-event stall timeout in seconds (batch mode).
+        no_resume: If True, clear previous findings instead of resuming.
     """
     if task is None:
         task = "What is the title of today's arxiv paper in computer science?"
@@ -408,6 +561,8 @@ async def main(
         result = await run_batch(
             task, workers=workers, batch_size=batch_size,
             keep_k=keep_k if keep_k is not None else 2,
+            stall_timeout=stall_timeout or DEFAULT_STALL_TIMEOUT,
+            resume=not no_resume,
         )
     else:
         raise ValueError(f"Unknown mode: {mode!r}. Use 'factoid', 'report', or 'batch'.")
@@ -440,6 +595,15 @@ def _parse_args() -> argparse.Namespace:
         "--keep-k", type=int, default=None,
         help="Override KEEP_TOOL_RESULT for this run",
     )
+    parser.add_argument(
+        "--stall-timeout", type=float, default=None,
+        help="Per-event stall timeout in seconds (batch mode, default: 45). "
+             "Workers can run indefinitely as long as events keep flowing.",
+    )
+    parser.add_argument(
+        "--no-resume", action="store_true", default=False,
+        help="Clear previous findings instead of resuming from checkpoint",
+    )
     return parser.parse_args()
 
 
@@ -453,5 +617,7 @@ if __name__ == "__main__":
             workers=args.workers,
             batch_size=args.batch_size,
             keep_k=args.keep_k,
+            stall_timeout=args.stall_timeout,
+            no_resume=args.no_resume,
         )
     )
