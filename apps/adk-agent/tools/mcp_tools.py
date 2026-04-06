@@ -96,13 +96,20 @@ _TOOL_CONFIGS = {
     # Runs the local Smithery stdio entry-point so the API key stays in
     # an env-var (not leaked on the command line like mcp-remote would).
     # Requires: npm install -g exa-mcp-server
-    # Auto-discovered tools: web_search_exa, crawling_exa,
-    #   web_search_advanced_exa, get_code_context_exa, …
+    # All non-deprecated tools enabled: web_search_exa, crawling_exa,
+    #   web_search_advanced_exa, get_code_context_exa
     "exa": lambda: StdioConnectionParams(
         server_params=StdioServerParameters(
             command="node",
             args=[
                 "-e",
+                # Bootstrap Smithery entry-point with config that enables
+                # ALL non-deprecated Exa tools (web_search_advanced_exa is
+                # disabled by default but is the most powerful tool).
+                # Smithery reads config from process.argv.slice(2) as
+                # key=value pairs; with node -e argv has only 1 element,
+                # so we inject at index 2+.
+                "process.argv[2]='enabledTools=web_search_exa,web_search_advanced_exa,crawling_exa,get_code_context_exa';"
                 "const r=require('child_process').execSync('npm root -g',{encoding:'utf8'}).trim();"
                 "require(r+'/exa-mcp-server/.smithery/stdio/index.cjs');",
             ],
