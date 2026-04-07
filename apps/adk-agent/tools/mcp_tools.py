@@ -130,6 +130,19 @@ _TOOL_CONFIGS = {
         ),
         timeout=30.0,
     ),
+    # ── Qualitative Research MCP server ─────────────────────────────────────
+    # GitHub: tejpalvirk/qualitativeresearch  (TypeScript, knowledge-graph MCP)
+    # Tools: startsession, loadcontext, endsession, buildcontext,
+    #   deletecontext, advancedcontext + domain functions
+    # (getProjectOverview, getThematicAnalysis, getCodedData, etc.)
+    "qualitative-research": lambda: StdioConnectionParams(
+        server_params=StdioServerParameters(
+            command="node",
+            args=["/home/ubuntu/qualitativeresearch/index.js"],
+            env=_full_env(),
+        ),
+        timeout=30.0,
+    ),
     # ── Legacy MiroFlow MCP servers (Python subprocess) ───────────────────
     "tool-google-search": lambda: StdioServerParameters(
         command=sys.executable,

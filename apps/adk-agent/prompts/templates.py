@@ -35,6 +35,15 @@ Specifically ask web_agent to use:
 - **Brave** for broad web search
 - **Firecrawl** for deep scraping and extraction
 
+You also have direct access to **Qualitative Research** knowledge-graph tools \
+for structuring and managing research context:
+- **startsession / endsession** to manage research sessions
+- **buildcontext / loadcontext / advancedcontext** to build, load, and query \
+structured knowledge graphs of projects, participants, codes, themes, findings
+- **deletecontext** to remove outdated context
+Use these when you need to organise complex multi-source research into a \
+structured knowledge graph — especially for qualitative analysis tasks.
+
 Only after you have accumulated substantial verified evidence across multiple \
 searches should you synthesize a response.
 
