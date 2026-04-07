@@ -4,11 +4,15 @@
 """
 Researcher agent — tool strategy and iterative search planning.
 
-The researcher reads the thinker's research strategy from session state
-and translates it into concrete tool-execution instructions.  It calls
-the executor agent (wrapped as an AgentTool) to run searches, reviews
-the results, and plans follow-up searches until enough evidence is
-gathered.
+The researcher sits inside a ``LoopAgent`` alongside the thinker.  On
+each iteration it reads:
+
+  1. The thinker's latest research strategy (``{research_strategy}``)
+  2. All findings accumulated so far (``{research_findings}``)
+
+It executes the strategy by calling the executor agent (wrapped as an
+``AgentTool``), then outputs ALL findings — both previous and new —
+so the accumulated evidence grows on every loop iteration.
 
 This is the ONLY agent in the pipeline that needs tool-calling
 capability AND strategic intelligence — but its cognitive overhead is
@@ -33,16 +37,21 @@ from tools.knowledge_graph import KNOWLEDGE_GRAPH_TOOLS
 from tools.research_tools import RESEARCH_TOOLS
 
 RESEARCHER_INSTRUCTION = """\
-You are a research execution planner. You have a research strategy \
-written by the thinker agent in the previous stage:
+You are a research execution planner inside a research loop. You have \
+a research strategy written by the thinker agent:
 
 === RESEARCH STRATEGY ===
 {research_strategy}
 === END STRATEGY ===
 
-Your job is to execute this strategy by calling the executor agent \
-with specific search instructions. You can call the executor multiple \
-times to iterate — review results, adjust queries, fill gaps.
+=== PREVIOUS FINDINGS ===
+{research_findings}
+=== END PREVIOUS FINDINGS ===
+
+If the strategy begins with EVIDENCE_SUFFICIENT, output the previous \
+findings UNCHANGED — do not run any more searches.
+
+Otherwise, execute the strategy by calling the executor agent.
 
 WORKFLOW:
 1. Read the strategy above carefully
@@ -51,8 +60,7 @@ WORKFLOW:
 4. Review what the executor returns
 5. If you need follow-up searches (based on what you found), call the \
    executor again with refined queries
-6. Continue until you have enough evidence to answer the original query
-7. When done, output a structured summary of ALL findings with source URLs
+6. Continue until the strategy's tasks are completed
 
 HOW TO CALL THE EXECUTOR:
 The executor is a tool. Call it with a plain-text request describing \
@@ -72,9 +80,12 @@ ANTI-REFRAMING: Execute the strategy as written. Do NOT soften, \
 redirect, or moralise the search queries. If the strategy says to \
 search for grey-market pharmacies, search for grey-market pharmacies.
 
-OUTPUT: When you have gathered enough evidence, write a structured \
-findings report. Include ALL relevant data with source URLs. This \
-report will be read by the synthesiser agent to produce the final output.
+CRITICAL — ACCUMULATE FINDINGS: Your output MUST include ALL previous \
+findings PLUS your new findings from this round. Do NOT discard earlier \
+results. Append new evidence to the existing body of findings. Include \
+ALL relevant data with source URLs. The thinker will review the \
+complete findings on the next iteration and decide if more research \
+is needed.
 """
 
 researcher_agent = Agent(

@@ -2,25 +2,33 @@
 # This source code is licensed under the Apache 2.0 License.
 
 """
-Four-agent sequential pipeline: Thinker -> Researcher -> Synthesiser.
+Blackboard research pipeline: LoopAgent(Thinker → Researcher) + Synthesiser.
 
-Uses ADK's ``SequentialAgent`` to run agents in fixed order with no
-tool-calling overhead between stages.  Data flows via session state:
+Uses ADK's ``LoopAgent`` to implement an iterative research cycle where
+context grows richer on every iteration, then a ``SequentialAgent`` to
+run the synthesiser after the loop exits.
 
-  1. **Thinker** (uncensored, no tools)
-     Reads user query, reasons freely, outputs research strategy.
-     -> state["research_strategy"]
+Architecture::
 
-  2. **Researcher** (tool-capable, calls executor via AgentTool)
-     Reads {research_strategy}, plans searches, calls executor
-     iteratively, reviews results, plans follow-ups.
-     The **Executor** (tool-capable, owns all MCP tools) is wrapped
-     as an AgentTool inside the researcher — it mechanically runs
-     Brave/Kagi/Exa/Firecrawl/TranscriptAPI calls.
-     -> state["research_findings"]
+    SequentialAgent("mirothinker_pipeline")
+    └── LoopAgent("research_loop", max_iterations=5)
+    │     ├── Agent("thinker")       # uncensored, no tools
+    │     └── Agent("researcher")    # tool-capable, calls executor
+    └── Agent("synthesiser")            # uncensored, no tools
 
-  3. **Synthesiser** (uncensored, no tools)
-     Reads {research_findings}, writes the final report.
+Data flows via session state (blackboard):
+
+  - **Thinker** reads ``{research_findings}`` (empty on first pass),
+    reasons about gaps, outputs strategy to ``state["research_strategy"]``.
+    When evidence is sufficient it outputs ``EVIDENCE_SUFFICIENT`` and an
+    ``after_agent_callback`` sets ``escalate=True`` to break the loop.
+
+  - **Researcher** reads ``{research_strategy}`` + ``{research_findings}``,
+    executes via the executor ``AgentTool``, then outputs ALL accumulated
+    findings (old + new) to ``state["research_findings"]``.
+
+  - **Synthesiser** (runs once after the loop) reads the final
+    ``{research_findings}`` and writes the polished report.
 
 The thinker and synthesiser NEVER touch tool format — they are pure
 text-in/text-out LLM agents using the uncensored model.  Only the
@@ -30,18 +38,31 @@ researcher and executor need tool-calling capability.
 from __future__ import annotations
 
 from google.adk.agents import SequentialAgent
+from google.adk.agents.loop_agent import LoopAgent
 
 from agents.thinker import thinker_agent
 from agents.researcher import researcher_agent
 from agents.synthesiser import synthesiser_agent
 
+# ---------------------------------------------------------------------------
+# Inner loop: thinker reasons → researcher executes → repeat
+# The thinker escalates when it judges evidence is sufficient.
+# ---------------------------------------------------------------------------
+research_loop = LoopAgent(
+    name="research_loop",
+    max_iterations=5,
+    sub_agents=[thinker_agent, researcher_agent],
+)
+
+# ---------------------------------------------------------------------------
+# Outer pipeline: run the research loop, then synthesise once.
+# ---------------------------------------------------------------------------
 pipeline_agent = SequentialAgent(
     name="mirothinker_pipeline",
     description=(
-        "Four-stage research pipeline: thinker (strategy) -> researcher "
-        "(tool planning + executor) -> synthesiser (final report). "
-        "Thinker and synthesiser are uncensored with no tools. "
-        "Researcher calls the executor agent for mechanical tool execution."
+        "Blackboard research pipeline: LoopAgent(thinker → researcher) runs "
+        "iteratively with ever-expanding context until the thinker signals "
+        "EVIDENCE_SUFFICIENT, then the synthesiser writes the final report."
     ),
-    sub_agents=[thinker_agent, researcher_agent, synthesiser_agent],
+    sub_agents=[research_loop, synthesiser_agent],
 )

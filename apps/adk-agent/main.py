@@ -368,10 +368,14 @@ async def run_pipeline(task: str) -> str:
         session_service=session_service,
     )
 
-    result = await _collect_with_heartbeat(
-        runner, USER_ID, session.id, task,
-        stall_timeout=120.0,  # longer timeout — pipeline has 3 stages
-    )
+    try:
+        result = await _collect_with_heartbeat(
+            runner, USER_ID, session.id, task,
+            stall_timeout=120.0,  # longer timeout — pipeline has 3 stages
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Pipeline stalled — no event for 120s; returning partial results")
+        result = "(Pipeline stalled before completion — no output produced)"
     return result
 
 

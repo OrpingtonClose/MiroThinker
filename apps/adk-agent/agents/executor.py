@@ -4,10 +4,10 @@
 """
 Executor agent — mechanical tool execution, no strategic thinking.
 
-The executor owns ALL MCP toolsets (Brave, Firecrawl, Exa, Kagi,
-TranscriptAPI) and the code-execution sandbox.  It receives specific
-search/scrape instructions from the researcher agent and executes
-them mechanically — one tool call at a time.
+The executor owns ALL MCP toolsets (Brave, Firecrawl, Exa) and the
+code-execution sandbox (E2B).  It receives specific search/scrape
+instructions from the researcher agent and executes them mechanically
+— one tool call at a time.
 
 This agent does NOT decide what to search for or why.  It translates
 instructions like "search Brave for X" into the correct tool call
