@@ -19,15 +19,21 @@ from typing import Union
 from google.adk.models import LiteLlm
 
 # ── Model names ──────────────────────────────────────────────────────
-# ADK_MODEL: primary model for research/web/browsing agents.
-# ADK_SYNTHESIS_MODEL: model for synthesis/summary agents (defaults to
+# ADK_MODEL: primary model for research/executor agents (tool-capable).
+# ADK_SYNTHESIS_MODEL: model for synthesis/thinker agents (defaults to
 # ADK_MODEL when not set, so everything uses one model by default).
+# ADK_THINKER_MODEL: model for the thinker agent (defaults to
+# ADK_SYNTHESIS_MODEL, which defaults to ADK_MODEL).
 _raw_model = os.environ.get("ADK_MODEL", "litellm/openai/gpt-4o")
 ADK_MODEL_NAME = _raw_model.split(":")[0]
 
 _raw_synthesis = os.environ.get("ADK_SYNTHESIS_MODEL", "")
 _has_separate_synthesis = bool(_raw_synthesis)
 ADK_SYNTHESIS_MODEL_NAME = _raw_synthesis.split(":")[0] if _raw_synthesis else ADK_MODEL_NAME
+
+_raw_thinker = os.environ.get("ADK_THINKER_MODEL", "")
+_has_separate_thinker = bool(_raw_thinker)
+ADK_THINKER_MODEL_NAME = _raw_thinker.split(":")[0] if _raw_thinker else ADK_SYNTHESIS_MODEL_NAME
 
 # ── Extra body parameters (vendor-specific) ──────────────────────────
 # Only inject venice_parameters when the API base actually points to Venice.
@@ -49,17 +55,13 @@ _extra_body: dict = {}
 if VENICE_PARAMS:
     _extra_body["venice_parameters"] = VENICE_PARAMS
 
-
 # ── Synthesis model config ────────────────────────────────────────────
-# When synthesis model uses a different provider (e.g. Venice for
-# synthesis vs RunPod for research), we need separate api_key, api_base,
-# and extra_body per model.
+# When synthesis model uses a different provider (e.g. abliteration.ai
+# for synthesis vs Venice for research), we need separate api_key,
+# api_base, and extra_body per model.
 _synthesis_api_base = os.environ.get("SYNTHESIS_API_BASE", "")
 _synthesis_api_key = os.environ.get("SYNTHESIS_API_KEY", "")
 _synthesis_is_venice = "venice.ai" in _synthesis_api_base
-# Only apply Venice params when synthesis actually points to Venice.
-# Reading from the shared VENICE_PARAMS env var when synthesis is NOT Venice
-# would leak unknown body fields and cause 400 errors from non-Venice providers.
 _synthesis_venice_params: dict = (
     json.loads(os.environ.get(
         "VENICE_PARAMS",
@@ -72,34 +74,63 @@ _synthesis_extra_body: dict = {}
 if _synthesis_venice_params:
     _synthesis_extra_body["venice_parameters"] = _synthesis_venice_params
 
+# ── Thinker model config ─────────────────────────────────────────────
+# When the thinker uses a different provider (e.g. abliteration.ai),
+# we need separate api_key, api_base, and extra_body.
+_thinker_api_base = os.environ.get("THINKER_API_BASE", _synthesis_api_base)
+_thinker_api_key = os.environ.get("THINKER_API_KEY", _synthesis_api_key)
+_thinker_is_venice = "venice.ai" in _thinker_api_base
+_thinker_venice_params: dict = (
+    json.loads(os.environ.get(
+        "VENICE_PARAMS",
+        json.dumps({"include_venice_system_prompt": False}),
+    ))
+    if _thinker_is_venice
+    else {}
+)
+_thinker_extra_body: dict = {}
+if _thinker_venice_params:
+    _thinker_extra_body["venice_parameters"] = _thinker_venice_params
+
 
 def build_model(
     *,
     parallel_tool_calls: bool = True,
     synthesis: bool = False,
+    thinker: bool = False,
 ) -> Union[str, LiteLlm]:
     """Return the model for ADK Agent(model=...).
 
-    * Native Gemini models (``gemini-*``) → plain string (ADK native path).
-    * Everything else → ``LiteLlm`` with vendor-specific ``extra_body``.
+    * Native Gemini models (``gemini-*``) -> plain string (ADK native path).
+    * Everything else -> ``LiteLlm`` with vendor-specific ``extra_body``.
 
     Args:
         parallel_tool_calls: Whether the model may emit multiple tool calls
             in a single response.  Set to ``False`` for sub-agents that need
-            sequential tool execution (e.g. web_agent) so each result is
+            sequential tool execution (e.g. executor) so each result is
             processed before the next search is issued.
         synthesis: If True, use the synthesis model (ADK_SYNTHESIS_MODEL)
-            instead of the primary research model.  Synthesis agents (summary,
-            final-answer) can use a different provider (e.g. Venice) while
-            research agents use RunPod/Qwen.
+            instead of the primary research model.  Synthesis agents (final
+            report) can use a different provider (e.g. abliteration.ai)
+            while research agents use Venice GLM-4.7.
+        thinker: If True, use the thinker model (ADK_THINKER_MODEL).
+            Defaults to the synthesis model if not separately configured.
     """
-    name = ADK_SYNTHESIS_MODEL_NAME if synthesis else ADK_MODEL_NAME
-    # When no separate synthesis model is configured, inherit the primary
-    # model's extra_body so Venice params aren't silently dropped.
-    extra = (
-        _synthesis_extra_body if (synthesis and _has_separate_synthesis and _synthesis_api_base)
-        else _extra_body
-    )
+    if thinker:
+        name = ADK_THINKER_MODEL_NAME
+    elif synthesis:
+        name = ADK_SYNTHESIS_MODEL_NAME
+    else:
+        name = ADK_MODEL_NAME
+
+    # When no separate synthesis/thinker model is configured, inherit the
+    # primary model's extra_body so Venice params aren't silently dropped.
+    if thinker and _has_separate_thinker and _thinker_api_base:
+        extra = _thinker_extra_body
+    elif (synthesis or thinker) and _has_separate_synthesis and _synthesis_api_base:
+        extra = _synthesis_extra_body
+    else:
+        extra = _extra_body
 
     # Strip the ``litellm/`` prefix — it's an ADK routing convention,
     # not part of the LiteLLM model identifier.
@@ -114,12 +145,15 @@ def build_model(
     if not parallel_tool_calls:
         kwargs["parallel_tool_calls"] = False
 
-    # When synthesis model uses a different provider, pass per-model
-    # api_key and api_base so LiteLLM routes to the correct endpoint
-    # instead of using the global OPENAI_API_KEY / OPENAI_API_BASE.
-    if synthesis and _synthesis_api_key:
+    # When synthesis/thinker model uses a different provider, pass
+    # per-model api_key and api_base so LiteLLM routes correctly.
+    if thinker and _thinker_api_key:
+        kwargs["api_key"] = _thinker_api_key
+    elif (synthesis or thinker) and _synthesis_api_key:
         kwargs["api_key"] = _synthesis_api_key
-    if synthesis and _synthesis_api_base:
+    if thinker and _thinker_api_base:
+        kwargs["api_base"] = _thinker_api_base
+    elif (synthesis or thinker) and _synthesis_api_base:
         kwargs["api_base"] = _synthesis_api_base
 
     return LiteLlm(model=name, **kwargs)

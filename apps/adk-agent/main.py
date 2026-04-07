@@ -52,6 +52,9 @@ from google.genai import types as genai_types
 
 from agents.research import research_agent
 from agents.summary import summary_agent
+from agents.pipeline import pipeline_agent
+from callbacks.condition_manager import cleanup_corpus, reset_corpus
+from tools.mcp_tools import close_all_mcp_toolsets
 from prompts.templates import (
     FAILURE_EXPERIENCE_FOOTER,
     FAILURE_EXPERIENCE_HEADER,
@@ -322,6 +325,51 @@ async def run_report(task: str) -> str:
     )
 
     result = await _collect_response_text(runner, USER_ID, session.id, task)
+    return result
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Mode: pipeline — 4-agent sequential: thinker → researcher → synthesiser
+# ═════════════════════════════════════════════════════════════════════
+
+
+async def run_pipeline(task: str) -> str:
+    """Four-agent pipeline: thinker → researcher (+ executor) → synthesiser.
+
+    The thinker and synthesiser use an uncensored model with NO tools.
+    The researcher uses a tool-capable model and calls the executor
+    (which owns all MCP tools) via AgentTool.
+
+    Data flows via session state:
+      thinker  -> state["research_strategy"]
+      researcher -> state["research_findings"]
+      synthesiser reads {research_findings} and writes the final report.
+    """
+    session_service = InMemorySessionService()
+    session = await _new_session(session_service, report_mode=True)
+
+    # Initialise a fresh DuckDB corpus for this pipeline run.
+    # The condition_manager callback will populate it after each
+    # researcher iteration, and the thinker/synthesiser read from it.
+    reset_corpus(session.state)
+
+    runner = Runner(
+        agent=pipeline_agent,
+        app_name=APP_NAME,
+        session_service=session_service,
+    )
+
+    try:
+        result = await _collect_with_heartbeat(
+            runner, USER_ID, session.id, task,
+            stall_timeout=120.0,  # longer timeout — pipeline has 3 stages
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Pipeline stalled — no event for 120s; returning partial results")
+        result = "(Pipeline stalled before completion — no output produced)"
+    finally:
+        # Release DuckDB connection so it doesn't leak in long-running servers.
+        cleanup_corpus(session.state)
     return result
 
 
@@ -905,7 +953,7 @@ async def main(
 
     Args:
         task: Research question.  Defaults to a demo question.
-        mode: ``"factoid"`` | ``"report"`` | ``"batch"`` | ``"exhaustive"`` | ``"decompose"``.
+        mode: ``"factoid"`` | ``"report"`` | ``"pipeline"`` | ``"batch"`` | ``"exhaustive"`` | ``"decompose"``.
         workers: Number of parallel batch workers (batch/exhaustive/decompose modes).
         batch_size: Items per batch (batch/exhaustive modes only).
         keep_k: Override KEEP_TOOL_RESULT for this run.
@@ -923,35 +971,44 @@ async def main(
 
     logger.info("Mode: %s | Task: %s", mode, task[:200])
 
-    if mode == "factoid":
-        result = await run_factoid(task)
-    elif mode == "report":
-        result = await run_report(task)
-    elif mode == "batch":
-        result = await run_batch(
-            task, workers=workers, batch_size=batch_size,
-            keep_k=keep_k if keep_k is not None else 2,
-            stall_timeout=_effective_stall,
-            resume=not no_resume,
-        )
-    elif mode == "exhaustive":
-        result = await run_exhaustive(
-            task, workers=workers, batch_size=batch_size,
-            keep_k=keep_k if keep_k is not None else 2,
-            stall_timeout=_effective_stall,
-            resume=not no_resume,
-            crawl_depth=crawl_depth,
-        )
-    elif mode == "decompose":
-        result = await run_decompose(
-            task, workers=workers,
-            stall_timeout=_effective_stall,
-        )
-    else:
-        raise ValueError(
-            f"Unknown mode: {mode!r}. "
-            "Use 'factoid', 'report', 'batch', 'exhaustive', or 'decompose'."
-        )
+    try:
+        if mode == "factoid":
+            result = await run_factoid(task)
+        elif mode == "report":
+            result = await run_report(task)
+        elif mode == "pipeline":
+            result = await run_pipeline(task)
+        elif mode == "batch":
+            result = await run_batch(
+                task, workers=workers, batch_size=batch_size,
+                keep_k=keep_k if keep_k is not None else 2,
+                stall_timeout=_effective_stall,
+                resume=not no_resume,
+            )
+        elif mode == "exhaustive":
+            result = await run_exhaustive(
+                task, workers=workers, batch_size=batch_size,
+                keep_k=keep_k if keep_k is not None else 2,
+                stall_timeout=_effective_stall,
+                resume=not no_resume,
+                crawl_depth=crawl_depth,
+            )
+        elif mode == "decompose":
+            result = await run_decompose(
+                task, workers=workers,
+                stall_timeout=_effective_stall,
+            )
+        else:
+            raise ValueError(
+                f"Unknown mode: {mode!r}. "
+                "Use 'factoid', 'report', 'pipeline', 'batch', 'exhaustive', or 'decompose'."
+            )
+    finally:
+        # Chainlit pattern: gracefully close all MCP subprocess connections
+        # BEFORE the event loop shuts down.  Without this, npx processes
+        # (Brave, Firecrawl, Exa) crash during teardown with
+        # "loop is closed, resources may be leaked" warnings.
+        await close_all_mcp_toolsets()
 
     print(f"\n{'=' * 60}")
     print(f"Mode: {mode}")
@@ -967,7 +1024,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("task", nargs="?", default=None, help="Research question")
     parser.add_argument(
         "--mode",
-        choices=["factoid", "report", "batch", "exhaustive", "decompose"],
+        choices=["factoid", "report", "pipeline", "batch", "exhaustive", "decompose"],
         default="report",
         help="Execution mode (default: report)",
     )

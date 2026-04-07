@@ -270,6 +270,9 @@ _BROWSER_TOOLS = [
 # Public API
 # ---------------------------------------------------------------------------
 
+# Track all created MCPToolset instances for graceful teardown.
+_active_toolsets: List[MCPToolset] = []
+
 
 def get_tools(tool_names: List[str]):
     """
@@ -295,6 +298,7 @@ def get_tools(tool_names: List[str]):
             toolset = MCPToolset(
                 connection_params=server_params,
             )
+            _active_toolsets.append(toolset)
             tools.append(toolset)
         else:
             raise ValueError(
@@ -302,3 +306,34 @@ def get_tools(tool_names: List[str]):
                 f"Available: {sorted(list(_TOOL_CONFIGS.keys()) + ['browser'])}"
             )
     return tools
+
+
+async def close_all_mcp_toolsets() -> None:
+    """Gracefully close all MCP toolset connections.
+
+    Call this before the event loop shuts down to prevent the
+    'loop is closed, resources may be leaked' warnings from
+    ``MCPSessionManager._cleanup_session``.
+
+    This is the **Chainlit pattern**: explicitly tear down MCP
+    subprocess connections (npx Brave, Firecrawl, Exa, etc.)
+    instead of letting them crash when ``asyncio.run()`` exits.
+    """
+    global _browser_session
+
+    for toolset in _active_toolsets:
+        try:
+            await toolset.close()
+        except Exception as exc:
+            logger.warning("Error closing MCP toolset: %s", exc)
+    _active_toolsets.clear()
+
+    # Also close the Playwright browser session if it was started.
+    if _browser_session is not None:
+        try:
+            await _browser_session.close()
+        except Exception as exc:
+            logger.warning("Error closing Playwright session: %s", exc)
+        _browser_session = None
+
+    logger.info("All MCP toolsets closed")
