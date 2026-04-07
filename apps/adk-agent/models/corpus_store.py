@@ -64,10 +64,19 @@ class CorpusStore:
     def admit(self, condition: AtomicCondition) -> Optional[int]:
         """Insert a condition into the corpus.
 
-        Returns the assigned ID, or ``None`` if the fact is empty/trivial.
+        Returns the assigned ID, or ``None`` if the fact is empty/trivial
+        or is an exact duplicate of an existing condition.
         """
         fact = condition.fact.strip()
         if not fact or len(fact) < 10:
+            return None
+
+        # Exact-match dedup: skip if this fact is already in the corpus.
+        existing = self.conn.execute(
+            "SELECT id FROM conditions WHERE fact = ?", [fact]
+        ).fetchone()
+        if existing:
+            logger.debug("Skipped duplicate of condition #%d: %.80s", existing[0], fact)
             return None
 
         cid = self._next_id

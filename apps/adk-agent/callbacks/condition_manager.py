@@ -173,9 +173,21 @@ def _get_corpus(state: dict) -> "CorpusStore":
 
 
 def reset_corpus(state: dict) -> None:
-    """Reset the corpus store for a new pipeline run."""
+    """Reset the corpus store for a new pipeline run.
+
+    Closes and removes the previous CorpusStore (if any) to avoid
+    leaking DuckDB connections in long-running servers.
+    """
     import uuid
+
+    # Close and remove the previous corpus store if it exists
+    old_key = state.get("_corpus_key")
+    if old_key and old_key in _corpus_stores:
+        _corpus_stores[old_key].close()
+        del _corpus_stores[old_key]
 
     key = f"corpus_{uuid.uuid4().hex[:8]}"
     state["_corpus_key"] = key
+    # Provide fallback so synthesiser never gets a raw template literal
+    state.setdefault("corpus_for_synthesis", "(no findings)")
     logger.info("Reset corpus store with key=%s", key)
