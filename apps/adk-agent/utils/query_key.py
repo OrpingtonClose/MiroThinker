@@ -73,8 +73,10 @@ def build_query_key(
         return prefix + tool_name + "_" + (args.get("video_url", "") or args.get("url", ""))
     if tool_name == "search_youtube":
         return prefix + tool_name + "_" + (args.get("query", "") or args.get("q", ""))
-    if tool_name in ("search_channel_videos", "list_channel_videos", "get_channel_latest_videos"):
+    if tool_name in ("list_channel_videos", "get_channel_latest_videos"):
         return prefix + tool_name + "_" + (args.get("channel", "") or args.get("channel_id", ""))
+    if tool_name == "search_channel_videos":
+        return prefix + tool_name + "_" + (args.get("channel", "") or args.get("channel_id", "")) + "_" + (args.get("query", "") or args.get("q", ""))
     if tool_name == "list_playlist_videos":
         return prefix + tool_name + "_" + args.get("playlist_id", "")
     return None
