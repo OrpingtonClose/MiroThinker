@@ -8,6 +8,9 @@ dependencies = [
     "python-dotenv",
     "litellm",
     "aiosqlite",
+    "ag-ui-adk>=0.5.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
 ]
 
 [tool.uv.sources]
