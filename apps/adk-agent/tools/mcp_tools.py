@@ -90,7 +90,7 @@ _TOOL_CONFIGS = {
             args=["-y", "firecrawl-mcp"],
             env=_full_env(FIRECRAWL_API_KEY=FIRECRAWL_API_KEY),
         ),
-        timeout=30.0,
+        timeout=120.0,
     ),
     # ── Official Exa MCP server ────────────────────────────────────────────
     # npm: exa-mcp-server  (MIT, exa-labs/exa-mcp-server)
@@ -116,7 +116,7 @@ _TOOL_CONFIGS = {
             ],
             env=_full_env(EXA_API_KEY=EXA_API_KEY),
         ),
-        timeout=30.0,
+        timeout=120.0,
     ),
     # ── Official Kagi MCP server ──────────────────────────────────────────
     # npm: kagimcp  (MIT, kagisearch/kagimcp)
@@ -128,7 +128,7 @@ _TOOL_CONFIGS = {
             args=["kagimcp"],
             env=_full_env(KAGI_API_KEY=KAGI_API_KEY),
         ),
-        timeout=30.0,
+        timeout=120.0,
     ),
     # ── Qualitative Research MCP server ─────────────────────────────────────
     # GitHub: tejpalvirk/qualitativeresearch  (TypeScript, knowledge-graph MCP)
