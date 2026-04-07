@@ -69,6 +69,7 @@ from google.genai import types as genai_types
 from agents.research import research_agent
 from agents.summary import summary_agent
 from agents.pipeline import pipeline_agent
+from callbacks.condition_manager import reset_corpus
 from prompts.templates import (
     FAILURE_EXPERIENCE_FOOTER,
     FAILURE_EXPERIENCE_HEADER,
@@ -361,6 +362,11 @@ async def run_pipeline(task: str) -> str:
     """
     session_service = InMemorySessionService()
     session = await _new_session(session_service, report_mode=True)
+
+    # Initialise a fresh DuckDB corpus for this pipeline run.
+    # The condition_manager callback will populate it after each
+    # researcher iteration, and the thinker/synthesiser read from it.
+    reset_corpus(session.state)
 
     runner = Runner(
         agent=pipeline_agent,

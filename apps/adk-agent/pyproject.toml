@@ -11,6 +11,7 @@ dependencies = [
     "arize-phoenix-otel",
     "openinference-instrumentation-google-adk",
     "aiosqlite",
+    "duckdb>=1.0.0",
 ]
 
 [tool.uv.sources]

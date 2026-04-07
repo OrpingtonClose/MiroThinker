@@ -33,6 +33,7 @@ from agents.model_config import build_model
 from agents.executor import executor_agent
 from callbacks.after_model import after_model_callback
 from callbacks.before_model import before_model_callback
+from callbacks.condition_manager import researcher_condition_callback
 from tools.knowledge_graph import KNOWLEDGE_GRAPH_TOOLS
 from tools.research_tools import RESEARCH_TOOLS
 
@@ -100,5 +101,6 @@ researcher_agent = Agent(
     tools=[AgentTool(agent=executor_agent)] + RESEARCH_TOOLS + KNOWLEDGE_GRAPH_TOOLS,
     before_model_callback=before_model_callback,
     after_model_callback=after_model_callback,
+    after_agent_callback=researcher_condition_callback,
     output_key="research_findings",
 )

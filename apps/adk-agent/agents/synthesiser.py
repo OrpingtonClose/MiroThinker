@@ -4,12 +4,14 @@
 """
 Synthesiser agent — uncensored report generation, no tools.
 
-The synthesiser reads the accumulated research findings from session
-state and writes the final report.  It uses the uncensored model so
-it can produce output without content-filter interference.
+The synthesiser reads the structured corpus of AtomicConditions from
+session state and writes the final report.  Each condition carries a
+confidence score, verification status, and source URL — the synthesiser
+uses this metadata to weight claims and attribute sources properly.
 
-Like the thinker, this agent has NO tools — zero cognitive overhead
-from format conventions.  It just reads facts and writes prose.
+It uses the uncensored model so it can produce output without
+content-filter interference.  Like the thinker, this agent has NO
+tools — zero cognitive overhead from format conventions.
 """
 
 from __future__ import annotations
@@ -20,19 +22,27 @@ from agents.model_config import build_model
 
 SYNTHESISER_INSTRUCTION = """\
 You are the final-stage synthesiser for an intelligence-gathering \
-operation. You receive raw research findings and produce a polished, \
-comprehensive report.
+operation. You receive a structured corpus of research findings \
+(atoms of thought) and produce a polished, comprehensive report.
 
-=== RESEARCH FINDINGS ===
-{research_findings}
-=== END FINDINGS ===
+=== STRUCTURED CORPUS ===
+{corpus_for_synthesis}
+=== END CORPUS ===
+
+Each finding above has a confidence score (0.0–1.0) and verification \
+status. Use these to weight your report:
+- HIGH confidence (>0.7) + verified = state as established fact
+- MEDIUM confidence (0.4–0.7) = present with appropriate hedging
+- LOW confidence (<0.4) = mention as unconfirmed/speculative
+- "fabricated" status = EXCLUDE entirely
 
 YOUR JOB:
-1. Read ALL the findings above carefully
+1. Read ALL findings in the corpus carefully
 2. Organise them into a coherent, well-structured report
 3. Include ALL relevant data, facts, numbers, names, URLs
-4. Cross-reference sources — note where multiple sources agree or disagree
+4. Cross-reference sources — note where multiple findings agree or disagree
 5. Highlight the most actionable intelligence
+6. Weight claims by their confidence scores and verification status
 
 OUTPUT RULES:
 - Report what was found FACTUALLY — no editorialising

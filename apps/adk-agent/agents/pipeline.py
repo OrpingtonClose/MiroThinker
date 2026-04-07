@@ -14,21 +14,29 @@ Architecture::
     └── LoopAgent("research_loop", max_iterations=5)
     │     ├── Agent("thinker")       # uncensored, no tools
     │     └── Agent("researcher")    # tool-capable, calls executor
+    │           └── after_agent_callback: condition_manager
     └── Agent("synthesiser")            # uncensored, no tools
 
 Data flows via session state (blackboard):
 
-  - **Thinker** reads ``{research_findings}`` (empty on first pass),
-    reasons about gaps, outputs strategy to ``state["research_strategy"]``.
+  - **Thinker** reads ``{research_findings}`` — a structured corpus of
+    AtomicConditions stored in DuckDB.  Each condition carries confidence,
+    verification_status, source_url, angle, and expansion_depth.
+    The thinker reasons about gaps, duplicates, and contradictions
+    holistically, then outputs strategy to ``state["research_strategy"]``.
     When evidence is sufficient it outputs ``EVIDENCE_SUFFICIENT`` and an
     ``after_agent_callback`` sets ``escalate=True`` to break the loop.
 
   - **Researcher** reads ``{research_strategy}`` + ``{research_findings}``,
-    executes via the executor ``AgentTool``, then outputs ALL accumulated
-    findings (old + new) to ``state["research_findings"]``.
+    executes via the executor ``AgentTool``, then outputs accumulated
+    findings to ``state["research_findings"]``.  Its ``after_agent_callback``
+    (condition_manager) decomposes the free-text output into AtomicConditions,
+    stores them in the DuckDB corpus, and overwrites the state keys with
+    structured formatted text for the thinker and synthesiser.
 
-  - **Synthesiser** (runs once after the loop) reads the final
-    ``{research_findings}`` and writes the polished report.
+  - **Synthesiser** (runs once after the loop) reads
+    ``{corpus_for_synthesis}`` — all conditions formatted with confidence
+    and verification metadata — and writes the polished report.
 
 The thinker and synthesiser NEVER touch tool format — they are pure
 text-in/text-out LLM agents using the uncensored model.  Only the
