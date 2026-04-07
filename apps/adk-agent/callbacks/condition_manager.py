@@ -172,27 +172,50 @@ def _get_corpus(state: dict) -> "CorpusStore":
     return _corpus_stores[key]
 
 
-def reset_corpus(state: dict) -> None:
-    """Reset the corpus store for a new pipeline run.
+def build_corpus_state() -> dict:
+    """Return the initial session-state dict for a new pipeline run.
 
-    Closes and removes the previous CorpusStore (if any) to avoid
-    leaking DuckDB connections in long-running servers.
+    ``InMemorySessionService`` deep-copies sessions on both ``create_session``
+    and ``get_session``, so state set *after* creation is invisible to the
+    Runner.  This function builds the dict that must be passed to
+    ``create_session(state=…)`` so the Runner sees the keys.
+
+    Call :func:`init_corpus` after session creation to register the
+    CorpusStore singleton.
     """
     import uuid
 
+    key = f"corpus_{uuid.uuid4().hex[:8]}"
+    return {
+        "_corpus_key": key,
+        "_corpus_iteration": 0,
+        # Fallbacks so agents never see raw template literals.
+        # "(no findings yet)" matches the thinker's first-iteration check.
+        "corpus_for_synthesis": "(no findings)",
+        "research_findings": "(no findings yet)",
+    }
+
+
+def init_corpus(state: dict) -> None:
+    """Register (or re-register) the CorpusStore singleton for a session.
+
+    Call this *after* ``create_session`` with the state returned by
+    :func:`build_corpus_state` so the module-level ``_corpus_stores`` dict
+    knows about the new key.  Also tears down any previous store for this
+    session to avoid leaking DuckDB connections.
+    """
+    key = state.get("_corpus_key")
+    if not key:
+        logger.warning("init_corpus called without _corpus_key in state")
+        return
+
     # Close and remove the previous corpus store if it exists
-    old_key = state.get("_corpus_key")
+    old_key = state.get("_prev_corpus_key")
     if old_key and old_key in _corpus_stores:
         _corpus_stores[old_key].close()
         del _corpus_stores[old_key]
 
-    key = f"corpus_{uuid.uuid4().hex[:8]}"
-    state["_corpus_key"] = key
-    # Provide fallbacks so agents never see raw template literals.
-    # "(no findings yet)" matches the thinker's first-iteration check.
-    state.setdefault("corpus_for_synthesis", "(no findings)")
-    state.setdefault("research_findings", "(no findings yet)")
-    logger.info("Reset corpus store with key=%s", key)
+    logger.info("Initialised corpus store for key=%s", key)
 
 
 def cleanup_corpus(state: dict) -> None:
