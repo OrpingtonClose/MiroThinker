@@ -167,6 +167,50 @@ function MainContent({ themeColor }: { themeColor: string }) {
     [themeColor],
   );
 
+  useRenderToolCall(
+    {
+      name: "get_youtube_transcript",
+      description: "Get transcript from a YouTube video.",
+      parameters: [
+        { name: "video_url", type: "string", required: true },
+      ],
+      render: ({ args, result }) => {
+        return (
+          <ToolCallCard
+            title="YouTube Transcript"
+            icon="video"
+            query={args.video_url}
+            result={result}
+            themeColor={themeColor}
+          />
+        );
+      },
+    },
+    [themeColor],
+  );
+
+  useRenderToolCall(
+    {
+      name: "search_youtube",
+      description: "Search YouTube for videos.",
+      parameters: [
+        { name: "query", type: "string", required: true },
+      ],
+      render: ({ args, result }) => {
+        return (
+          <ToolCallCard
+            title="YouTube Search"
+            icon="video"
+            query={args.query}
+            result={result}
+            themeColor={themeColor}
+          />
+        );
+      },
+    },
+    [themeColor],
+  );
+
   return (
     <div className="min-h-screen flex justify-center items-start pt-12 px-4 bg-slate-900">
       <ResearchFindings state={state} setState={setState} />
@@ -193,6 +237,7 @@ function ToolCallCard({
     document: "\uD83D\uDCC4",
     sparkle: "\u2728",
     globe: "\uD83C\uDF10",
+    video: "\uD83C\uDFAC",
   };
 
   return (

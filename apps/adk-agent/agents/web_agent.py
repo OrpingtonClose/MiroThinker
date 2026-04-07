@@ -4,7 +4,7 @@
 """
 Tier 3 web specialist sub-agent.
 
-Wraps ALL web data-source MCPToolsets (Brave Search, Firecrawl, Exa) behind
+Wraps ALL web data-source MCPToolsets (Brave Search, Firecrawl, Exa, TranscriptAPI) behind
 a single ADK Agent.  The parent research_agent sees ONE tool (this agent)
 instead of ~15 individual MCP tools, dramatically reducing context burn.
 
@@ -26,7 +26,7 @@ WEB_AGENT_INSTRUCTION = """\
 You are a web research specialist. Your ONLY job is to search, scrape, crawl, \
 and extract data from the web using the tools available to you.
 
-You have four families of tools:
+You have five families of tools:
 - **Brave Search** (brave_web_search, brave_local_search, brave_image_search, \
 brave_video_search, brave_news_search, brave_summarizer) — fast web search
 - **Firecrawl** (firecrawl_scrape, firecrawl_search, firecrawl_crawl, \
@@ -35,6 +35,9 @@ firecrawl_map, firecrawl_extract) — deep scraping, crawling, extraction
 get_code_context_exa) — semantic search with clean content extraction
 - **Kagi** (kagi_search, kagi_summarize, kagi_fastgpt, kagi_enrich_web, \
 kagi_enrich_news) — premium search, instant summarization, and small-web enrichment
+- **TranscriptAPI** (get_youtube_transcript, search_youtube, \
+get_channel_latest_videos, search_channel_videos, list_channel_videos, \
+list_playlist_videos) — YouTube transcripts, video search, channel browsing, playlists
 
 STRATEGY:
 1. Use brave_web_search for broad initial searches
@@ -54,6 +57,12 @@ STRATEGY:
 8. Use crawling_exa to get content from a specific URL (Exa's cache is fast)
 9. Use firecrawl_crawl or firecrawl_map for site-wide discovery
 10. Use get_code_context_exa for code/documentation searches
+11. Use get_youtube_transcript to extract full transcripts from YouTube videos — \
+   great for analysing talks, tutorials, interviews, and podcasts
+12. Use search_youtube to find relevant YouTube videos on any topic
+13. Use get_channel_latest_videos to browse a channel's recent uploads (free, no credits)
+14. Use search_channel_videos to search within a specific channel
+15. Use list_playlist_videos to browse playlist contents
 
 EXECUTION MODEL — SEQUENTIAL:
 You execute ONE tool call at a time. After each result, review it and decide \
@@ -94,12 +103,12 @@ web_agent = Agent(
     model=build_model(parallel_tool_calls=False),
     description=(
         "Web research specialist that searches, scrapes, crawls, and extracts "
-        "data from the web using Brave Search, Firecrawl, Exa, and Kagi "
-        "(search, summarize, fastgpt, enrich). Delegate any web data "
-        "retrieval task to this agent — it owns all web tools."
+        "data from the web using Brave Search, Firecrawl, Exa, Kagi, and "
+        "TranscriptAPI (YouTube transcripts, search, channels, playlists). "
+        "Delegate any web data retrieval task to this agent — it owns all web tools."
     ),
     instruction=WEB_AGENT_INSTRUCTION,
-    tools=get_tools(["brave-search", "firecrawl", "exa", "kagi"]),
+    tools=get_tools(["brave-search", "firecrawl", "exa", "kagi", "transcriptapi"]),
     before_tool_callback=before_tool_callback,
     after_tool_callback=after_tool_callback,
 )

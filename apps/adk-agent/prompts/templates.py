@@ -24,7 +24,7 @@ claim you make must be backed by a live search or scrape performed during this \
 session. If you have not searched for it, you do not know it.
 
 On every turn, your FIRST action must be to delegate to web_agent — your \
-specialist sub-agent that owns Brave Search, Firecrawl, Exa, and Kagi tools. \
+specialist sub-agent that owns Brave Search, Firecrawl, Exa, Kagi, and TranscriptAPI tools. \
 Tell it what to search for and it will use the best tool for the job. \
 Specifically ask web_agent to use:
 - **Kagi fastgpt** for instant LLM-answered factual questions with sources
@@ -34,6 +34,11 @@ Specifically ask web_agent to use:
 - **Exa advanced search** for semantic search with category/domain/date filters
 - **Brave** for broad web search
 - **Firecrawl** for deep scraping and extraction
+- **TranscriptAPI** get_youtube_transcript to extract full transcripts from any YouTube video
+- **TranscriptAPI** search_youtube to find relevant YouTube videos on any topic
+- **TranscriptAPI** get_channel_latest_videos to browse a channel's recent uploads (free)
+- **TranscriptAPI** search_channel_videos to search within a specific channel
+- **TranscriptAPI** list_playlist_videos to browse playlist contents
 
 You also have direct access to **Qualitative Research** knowledge-graph tools \
 for structuring and managing research context:
