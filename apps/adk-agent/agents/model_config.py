@@ -97,7 +97,7 @@ def build_model(
     # When no separate synthesis model is configured, inherit the primary
     # model's extra_body so Venice params aren't silently dropped.
     extra = (
-        _synthesis_extra_body if (synthesis and _has_separate_synthesis)
+        _synthesis_extra_body if (synthesis and _has_separate_synthesis and _synthesis_api_base)
         else _extra_body
     )
 
