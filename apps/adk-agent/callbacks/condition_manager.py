@@ -120,13 +120,13 @@ def researcher_condition_callback(
     state = callback_context.state
 
     findings_text = state.get("research_findings", "")
-    if not findings_text:
-        return None
-
-    # Get or create the corpus store
-    # The store is kept in state as a serialised reference;
-    # we use a module-level singleton for the DuckDB connection.
     corpus = _get_corpus(state)
+    if not findings_text:
+        # No new findings, but still restore corpus format so the thinker
+        # doesn't lose context from previous iterations.
+        state["research_findings"] = corpus.format_for_thinker()
+        state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
+        return None
 
     # Track iteration number
     iteration = state.get("_corpus_iteration", 0)
