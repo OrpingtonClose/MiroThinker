@@ -38,11 +38,7 @@ brave_video_search, brave_news_search, brave_summarizer)
 firecrawl_map, firecrawl_extract)
 - **Exa** (web_search_exa, web_search_advanced_exa, crawling_exa, \
 get_code_context_exa)
-- **Kagi** (kagi_search, kagi_summarize, kagi_fastgpt, kagi_enrich_web, \
-kagi_enrich_news)
-- **TranscriptAPI** (get_youtube_transcript, search_youtube, \
-get_channel_latest_videos, search_channel_videos, list_channel_videos, \
-list_playlist_videos)
+- **tool-python** (E2B sandbox for code execution)
 
 EXECUTION MODEL — SEQUENTIAL:
 Execute ONE tool call at a time. After each result, check if the \
@@ -64,11 +60,11 @@ executor_agent = Agent(
     model=build_model(parallel_tool_calls=False),
     description=(
         "Tool execution specialist that mechanically runs searches, scrapes, "
-        "and extractions using Brave, Firecrawl, Exa, Kagi, and TranscriptAPI. "
-        "Give it specific instructions and it returns raw results."
+        "and extractions using Brave, Firecrawl, and Exa. Also has E2B code "
+        "execution. Give it specific instructions and it returns raw results."
     ),
     instruction=EXECUTOR_INSTRUCTION,
-    tools=get_tools(["brave-search", "firecrawl", "exa", "kagi", "transcriptapi", "tool-python"]),
+    tools=get_tools(["brave-search", "firecrawl", "exa", "tool-python"]),
     before_tool_callback=before_tool_callback,
     after_tool_callback=after_tool_callback,
 )

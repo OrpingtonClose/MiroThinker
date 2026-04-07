@@ -60,7 +60,7 @@ what to search for and which tools to use. Be specific:
 - "Use brave_web_search to search for: nimesil buy online Poland"
 - "Use web_search_advanced_exa with category=news, query: nimesil regulation EU 2024"
 - "Use firecrawl_scrape to extract content from: https://example.com/..."
-- "Use kagi_fastgpt to answer: is nimesil prescription-only in Poland?"
+- "Run Python code to parse/analyse data from previous results"
 
 The executor will translate your instructions into the correct tool \
 calls and return the results.
