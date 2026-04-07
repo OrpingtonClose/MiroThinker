@@ -19,7 +19,7 @@ from agents.model_config import build_model
 # is injected as the user message at runtime (see main.py).
 summary_agent = Agent(
     name="summary_agent",
-    model=build_model(),
+    model=build_model(synthesis=True),
     description="Summarizes research findings and produces a final boxed answer.",
     instruction=(
         "You are a summarization agent. You receive a conversation history and "

@@ -22,7 +22,10 @@ from typing import List
 from dotenv import load_dotenv
 from google.adk.tools import FunctionTool
 from google.adk.tools.mcp_tool import MCPToolset
-from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
+from google.adk.tools.mcp_tool.mcp_session_manager import (
+    StdioConnectionParams,
+    StreamableHTTPConnectionParams,
+)
 from mcp import StdioServerParameters
 
 load_dotenv()
@@ -45,6 +48,8 @@ TENCENTCLOUD_SECRET_KEY = os.environ.get("TENCENTCLOUD_SECRET_KEY", "")
 BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "")
 FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY", "")
 EXA_API_KEY = os.environ.get("EXA_API_KEY", "")
+KAGI_API_KEY = os.environ.get("KAGI_API_KEY", "")
+TRANSCRIPTAPI_KEY = os.environ.get("TRANSCRIPTAPI_KEY", "")
 
 
 def _full_env(**overrides: str) -> dict:
@@ -89,7 +94,7 @@ _TOOL_CONFIGS = {
             args=["-y", "firecrawl-mcp"],
             env=_full_env(FIRECRAWL_API_KEY=FIRECRAWL_API_KEY),
         ),
-        timeout=30.0,
+        timeout=120.0,
     ),
     # ── Official Exa MCP server ────────────────────────────────────────────
     # npm: exa-mcp-server  (MIT, exa-labs/exa-mcp-server)
@@ -114,6 +119,42 @@ _TOOL_CONFIGS = {
                 "require(r+'/exa-mcp-server/.smithery/stdio/index.cjs');",
             ],
             env=_full_env(EXA_API_KEY=EXA_API_KEY),
+        ),
+        timeout=120.0,
+    ),
+    # ── Official Kagi MCP server ──────────────────────────────────────────
+    # npm: kagimcp  (MIT, kagisearch/kagimcp)
+    # Auto-discovered tools: kagi_search, kagi_summarize, kagi_fastgpt,
+    #   kagi_enrich_web, kagi_enrich_news
+    "kagi": lambda: StdioConnectionParams(
+        server_params=StdioServerParameters(
+            command="uvx",
+            args=["kagimcp"],
+            env=_full_env(KAGI_API_KEY=KAGI_API_KEY),
+        ),
+        timeout=120.0,
+    ),
+    # ── TranscriptAPI MCP server (remote Streamable HTTP) ────────────────────
+    # https://transcriptapi.com  (YouTube transcripts, search, channels, playlists)
+    # Auto-discovered tools: get_youtube_transcript, search_youtube,
+    #   get_channel_latest_videos, search_channel_videos,
+    #   list_channel_videos, list_playlist_videos
+    "transcriptapi": lambda: StreamableHTTPConnectionParams(
+        url="https://transcriptapi.com/mcp",
+        headers={"Authorization": f"Bearer {TRANSCRIPTAPI_KEY}"},
+        timeout=30.0,
+        sse_read_timeout=120.0,
+    ),
+    # ── Qualitative Research MCP server ─────────────────────────────────────
+    # GitHub: tejpalvirk/qualitativeresearch  (TypeScript, knowledge-graph MCP)
+    # Tools: startsession, loadcontext, endsession, buildcontext,
+    #   deletecontext, advancedcontext + domain functions
+    # (getProjectOverview, getThematicAnalysis, getCodedData, etc.)
+    "qualitative-research": lambda: StdioConnectionParams(
+        server_params=StdioServerParameters(
+            command="node",
+            args=["/home/ubuntu/qualitativeresearch/index.js"],
+            env=_full_env(),
         ),
         timeout=30.0,
     ),

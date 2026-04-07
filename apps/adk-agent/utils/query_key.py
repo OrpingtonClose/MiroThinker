@@ -63,4 +63,20 @@ def build_query_key(
         return prefix + tool_name + "_" + (args.get("query", "") or args.get("q", ""))
     if tool_name == "crawling_exa":
         return prefix + tool_name + "_" + args.get("url", "")
+    # Kagi MCP tools
+    if tool_name in ("kagi_search", "kagi_fastgpt", "kagi_enrich_web", "kagi_enrich_news"):
+        return prefix + tool_name + "_" + (args.get("query", "") or args.get("q", ""))
+    if tool_name == "kagi_summarize":
+        return prefix + tool_name + "_" + args.get("url", "")
+    # TranscriptAPI MCP tools
+    if tool_name == "get_youtube_transcript":
+        return prefix + tool_name + "_" + (args.get("video_url", "") or args.get("url", ""))
+    if tool_name == "search_youtube":
+        return prefix + tool_name + "_" + (args.get("query", "") or args.get("q", ""))
+    if tool_name in ("list_channel_videos", "get_channel_latest_videos"):
+        return prefix + tool_name + "_" + (args.get("channel", "") or args.get("channel_id", ""))
+    if tool_name == "search_channel_videos":
+        return prefix + tool_name + "_" + (args.get("channel", "") or args.get("channel_id", "")) + "_" + (args.get("query", "") or args.get("q", ""))
+    if tool_name == "list_playlist_videos":
+        return prefix + tool_name + "_" + args.get("playlist_id", "")
     return None

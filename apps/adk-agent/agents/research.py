@@ -5,9 +5,11 @@
 Main research agent definition (Tier 3 — fully agentic).
 
 The research_agent delegates ALL web data retrieval to ``web_agent``
-(a specialist sub-agent that owns Brave, Firecrawl, and Exa MCP
-toolsets).  This reduces context burn from ~15 tool descriptions to
-just 2 (web_agent + tool-python).
+(a specialist sub-agent that owns Brave, Firecrawl, Exa, and Kagi MCP
+toolsets).  It also has direct access to the Qualitative Research MCP
+for structuring research into knowledge graphs.  This reduces context
+burn from ~15 tool descriptions to just a few (web_agent + tool-python
++ qualitative-research).
 
 Callbacks wired here:
   - before_model: Algorithm 5 (context window), Algorithm 7 (intermediate answers)
@@ -36,7 +38,7 @@ research_agent = Agent(
     model=build_model(),
     description="Deep research agent that uses tools and sub-agents to answer questions.",
     instruction=MAIN_AGENT_INSTRUCTION,
-    tools=get_tools(["tool-python"]) + RESEARCH_TOOLS + KNOWLEDGE_GRAPH_TOOLS,
+    tools=get_tools(["tool-python", "qualitative-research"]) + RESEARCH_TOOLS + KNOWLEDGE_GRAPH_TOOLS,
     sub_agents=[web_agent],  # Tier 3: web_agent owns all web tools
     before_tool_callback=before_tool_callback,
     after_tool_callback=after_tool_callback,
