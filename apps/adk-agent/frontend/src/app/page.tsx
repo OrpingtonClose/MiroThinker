@@ -125,7 +125,7 @@ function MainContent({ themeColor }: { themeColor: string }) {
 
   useRenderToolCall(
     {
-      name: "exa_web_search",
+      name: "web_search_exa",
       description: "Search with Exa neural search.",
       parameters: [
         { name: "query", type: "string", required: true },
@@ -147,7 +147,7 @@ function MainContent({ themeColor }: { themeColor: string }) {
 
   useRenderToolCall(
     {
-      name: "kagi_web_search",
+      name: "kagi_search",
       description: "Search with Kagi.",
       parameters: [
         { name: "query", type: "string", required: true },
