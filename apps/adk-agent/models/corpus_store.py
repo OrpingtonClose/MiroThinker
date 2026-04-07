@@ -169,8 +169,9 @@ class CorpusStore:
                 )
             lines.append("")
 
-        # Summary stats
-        status_counts = self.count_by_status()
+        # Summary stats (only non-fabricated, matching the listed conditions)
+        from collections import Counter
+        status_counts = Counter(c["verification_status"] or "(unset)" for c in conditions)
         lines.append("STATUS SUMMARY: " + ", ".join(
             f"{k}={v}" for k, v in sorted(status_counts.items())
         ))

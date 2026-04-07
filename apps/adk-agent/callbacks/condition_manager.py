@@ -193,3 +193,17 @@ def reset_corpus(state: dict) -> None:
     state.setdefault("corpus_for_synthesis", "(no findings)")
     state.setdefault("research_findings", "(no findings yet)")
     logger.info("Reset corpus store with key=%s", key)
+
+
+def cleanup_corpus(state: dict) -> None:
+    """Close and remove the CorpusStore for a completed pipeline run.
+
+    Call this after ``run_pipeline`` returns to release the DuckDB
+    connection and its in-memory data.  Without this, each pipeline
+    run leaks a CorpusStore in the module-level ``_corpus_stores`` dict.
+    """
+    key = state.get("_corpus_key")
+    if key and key in _corpus_stores:
+        _corpus_stores[key].close()
+        del _corpus_stores[key]
+        logger.info("Cleaned up CorpusStore for key=%s", key)

@@ -69,7 +69,7 @@ from google.genai import types as genai_types
 from agents.research import research_agent
 from agents.summary import summary_agent
 from agents.pipeline import pipeline_agent
-from callbacks.condition_manager import reset_corpus
+from callbacks.condition_manager import cleanup_corpus, reset_corpus
 from prompts.templates import (
     FAILURE_EXPERIENCE_FOOTER,
     FAILURE_EXPERIENCE_HEADER,
@@ -382,6 +382,9 @@ async def run_pipeline(task: str) -> str:
     except asyncio.TimeoutError:
         logger.warning("Pipeline stalled — no event for 120s; returning partial results")
         result = "(Pipeline stalled before completion — no output produced)"
+    finally:
+        # Release DuckDB connection so it doesn't leak in long-running servers.
+        cleanup_corpus(session.state)
     return result
 
 
