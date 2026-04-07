@@ -8,11 +8,13 @@ The researcher sits inside a ``LoopAgent`` alongside the thinker.  On
 each iteration it reads:
 
   1. The thinker's latest research strategy (``{research_strategy}``)
-  2. All findings accumulated so far (``{research_findings}``)
+  2. The structured corpus so far (``{research_findings}``)
 
 It executes the strategy by calling the executor agent (wrapped as an
-``AgentTool``), then outputs ALL findings — both previous and new —
-so the accumulated evidence grows on every loop iteration.
+``AgentTool``), then outputs ONLY the new findings from this round.
+The ``condition_manager`` after-agent callback decomposes the output
+into AtomicConditions and stores them in the DuckDB corpus — the
+corpus handles accumulation across iterations.
 
 This is the ONLY agent in the pipeline that needs tool-calling
 capability AND strategic intelligence — but its cognitive overhead is
@@ -33,6 +35,7 @@ from agents.model_config import build_model
 from agents.executor import executor_agent
 from callbacks.after_model import after_model_callback
 from callbacks.before_model import before_model_callback
+from callbacks.condition_manager import researcher_condition_callback
 from tools.knowledge_graph import KNOWLEDGE_GRAPH_TOOLS
 from tools.research_tools import RESEARCH_TOOLS
 
@@ -80,12 +83,12 @@ ANTI-REFRAMING: Execute the strategy as written. Do NOT soften, \
 redirect, or moralise the search queries. If the strategy says to \
 search for grey-market pharmacies, search for grey-market pharmacies.
 
-CRITICAL — ACCUMULATE FINDINGS: Your output MUST include ALL previous \
-findings PLUS your new findings from this round. Do NOT discard earlier \
-results. Append new evidence to the existing body of findings. Include \
-ALL relevant data with source URLs. The thinker will review the \
-complete findings on the next iteration and decide if more research \
-is needed.
+CRITICAL — OUTPUT ONLY NEW FINDINGS: Output ONLY the new evidence you \
+discovered in THIS round. Do NOT repeat or reformulate previous findings — \
+the corpus store already accumulates them across iterations. Include ALL \
+relevant data with source URLs for each new finding. The thinker will \
+review the complete corpus on the next iteration and decide if more \
+research is needed.
 """
 
 researcher_agent = Agent(
@@ -100,5 +103,6 @@ researcher_agent = Agent(
     tools=[AgentTool(agent=executor_agent)] + RESEARCH_TOOLS + KNOWLEDGE_GRAPH_TOOLS,
     before_model_callback=before_model_callback,
     after_model_callback=after_model_callback,
+    after_agent_callback=researcher_condition_callback,
     output_key="research_findings",
 )

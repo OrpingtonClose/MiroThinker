@@ -69,6 +69,8 @@ from google.genai import types as genai_types
 from agents.research import research_agent
 from agents.summary import summary_agent
 from agents.pipeline import pipeline_agent
+from callbacks.condition_manager import cleanup_corpus, reset_corpus
+from tools.mcp_tools import close_all_mcp_toolsets
 from prompts.templates import (
     FAILURE_EXPERIENCE_FOOTER,
     FAILURE_EXPERIENCE_HEADER,
@@ -362,6 +364,11 @@ async def run_pipeline(task: str) -> str:
     session_service = InMemorySessionService()
     session = await _new_session(session_service, report_mode=True)
 
+    # Initialise a fresh DuckDB corpus for this pipeline run.
+    # The condition_manager callback will populate it after each
+    # researcher iteration, and the thinker/synthesiser read from it.
+    reset_corpus(session.state)
+
     runner = Runner(
         agent=pipeline_agent,
         app_name=APP_NAME,
@@ -376,6 +383,9 @@ async def run_pipeline(task: str) -> str:
     except asyncio.TimeoutError:
         logger.warning("Pipeline stalled — no event for 120s; returning partial results")
         result = "(Pipeline stalled before completion — no output produced)"
+    finally:
+        # Release DuckDB connection so it doesn't leak in long-running servers.
+        cleanup_corpus(session.state)
     return result
 
 
@@ -977,37 +987,44 @@ async def main(
 
     logger.info("Mode: %s | Task: %s", mode, task[:200])
 
-    if mode == "factoid":
-        result = await run_factoid(task)
-    elif mode == "report":
-        result = await run_report(task)
-    elif mode == "pipeline":
-        result = await run_pipeline(task)
-    elif mode == "batch":
-        result = await run_batch(
-            task, workers=workers, batch_size=batch_size,
-            keep_k=keep_k if keep_k is not None else 2,
-            stall_timeout=_effective_stall,
-            resume=not no_resume,
-        )
-    elif mode == "exhaustive":
-        result = await run_exhaustive(
-            task, workers=workers, batch_size=batch_size,
-            keep_k=keep_k if keep_k is not None else 2,
-            stall_timeout=_effective_stall,
-            resume=not no_resume,
-            crawl_depth=crawl_depth,
-        )
-    elif mode == "decompose":
-        result = await run_decompose(
-            task, workers=workers,
-            stall_timeout=_effective_stall,
-        )
-    else:
-        raise ValueError(
-            f"Unknown mode: {mode!r}. "
-            "Use 'factoid', 'report', 'pipeline', 'batch', 'exhaustive', or 'decompose'."
-        )
+    try:
+        if mode == "factoid":
+            result = await run_factoid(task)
+        elif mode == "report":
+            result = await run_report(task)
+        elif mode == "pipeline":
+            result = await run_pipeline(task)
+        elif mode == "batch":
+            result = await run_batch(
+                task, workers=workers, batch_size=batch_size,
+                keep_k=keep_k if keep_k is not None else 2,
+                stall_timeout=_effective_stall,
+                resume=not no_resume,
+            )
+        elif mode == "exhaustive":
+            result = await run_exhaustive(
+                task, workers=workers, batch_size=batch_size,
+                keep_k=keep_k if keep_k is not None else 2,
+                stall_timeout=_effective_stall,
+                resume=not no_resume,
+                crawl_depth=crawl_depth,
+            )
+        elif mode == "decompose":
+            result = await run_decompose(
+                task, workers=workers,
+                stall_timeout=_effective_stall,
+            )
+        else:
+            raise ValueError(
+                f"Unknown mode: {mode!r}. "
+                "Use 'factoid', 'report', 'pipeline', 'batch', 'exhaustive', or 'decompose'."
+            )
+    finally:
+        # Chainlit pattern: gracefully close all MCP subprocess connections
+        # BEFORE the event loop shuts down.  Without this, npx processes
+        # (Brave, Firecrawl, Exa) crash during teardown with
+        # "loop is closed, resources may be leaked" warnings.
+        await close_all_mcp_toolsets()
 
     print(f"\n{'=' * 60}")
     print(f"Mode: {mode}")

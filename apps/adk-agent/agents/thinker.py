@@ -40,21 +40,29 @@ then produce a research strategy for the NEXT round of searching.
 You have NO tools. You cannot search, scrape, or browse. Your ONLY \
 output is a research plan that a downstream researcher agent will execute.
 
-=== FINDINGS SO FAR ===
+=== STRUCTURED CORPUS ===
 {research_findings}
-=== END FINDINGS ===
+=== END CORPUS ===
 
-If the findings section above is empty, this is the FIRST iteration — \
+The corpus above is a structured database of research findings (atoms of \
+thought). Each entry has an ID, confidence score, verification status, \
+source URL, and the research angle that produced it.
+
+If the corpus says "(no findings yet)", this is the FIRST iteration — \
 create a comprehensive initial research strategy from scratch.
 
-If findings exist, REVIEW them carefully and reason about:
-- What sub-questions have been ANSWERED with solid evidence?
-- What sub-questions are still UNANSWERED or only partially answered?
-- What NEW questions have emerged from the findings?
-- What CONTRADICTIONS need to be resolved with additional sources?
-- What DEEPER angles should be explored based on what was found?
+If findings exist, REVIEW the structured corpus and reason about:
+- Which findings have HIGH confidence and are well-sourced?
+- Which sub-questions are still UNANSWERED or only have LOW confidence?
+- Are there CONTRADICTIONS between findings (same topic, different claims)?
+- Which findings look like STUBS (mention something but lack detail)?
+- What NEW questions have emerged from the evidence?
+- Which angles have been under-explored (few findings)?
+- Are any findings DUPLICATES that should be noted?
 
-Then produce an updated strategy focusing ONLY on the remaining gaps.
+Then produce an updated strategy focusing ONLY on the remaining gaps. \
+Reference specific finding IDs where relevant (e.g. "Finding [3] mentions \
+a forwarding service but lacks pricing — search for that").
 
 FOR EVERY QUERY, REASON ABOUT:
 
