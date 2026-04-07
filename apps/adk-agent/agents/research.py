@@ -5,7 +5,7 @@
 Main research agent definition (Tier 3 — fully agentic).
 
 The research_agent delegates ALL web data retrieval to ``web_agent``
-(a specialist sub-agent that owns Brave, Firecrawl, and Exa MCP
+(a specialist sub-agent that owns Brave, Firecrawl, Exa, and Kagi MCP
 toolsets).  This reduces context burn from ~15 tool descriptions to
 just 2 (web_agent + tool-python).
 
