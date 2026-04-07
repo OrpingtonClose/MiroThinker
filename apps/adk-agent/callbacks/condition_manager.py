@@ -188,6 +188,8 @@ def reset_corpus(state: dict) -> None:
 
     key = f"corpus_{uuid.uuid4().hex[:8]}"
     state["_corpus_key"] = key
-    # Provide fallback so synthesiser never gets a raw template literal
+    # Provide fallbacks so agents never see raw template literals.
+    # "(no findings yet)" matches the thinker's first-iteration check.
     state.setdefault("corpus_for_synthesis", "(no findings)")
+    state.setdefault("research_findings", "(no findings yet)")
     logger.info("Reset corpus store with key=%s", key)
