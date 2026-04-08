@@ -215,11 +215,10 @@ def _batch_db_url() -> str:
 
 async def _new_session(
     session_service: InMemorySessionService | DatabaseSessionService,
-    keep_k: int | None = None,
     report_mode: bool = False,
     initial_state: dict | None = None,
 ) -> object:
-    """Create a fresh session, optionally overriding Keep-K and report mode.
+    """Create a fresh session, optionally setting report mode.
 
     IMPORTANT: ``InMemorySessionService`` deep-copies the session on both
     ``create_session`` and ``get_session``, so state set *after* creation
@@ -506,7 +505,6 @@ async def _run_batch_worker(
     session_service: DatabaseSessionService,
     batch_prompt: str,
     batch_id: int,
-    keep_k: int,
     stall_timeout: float = DEFAULT_STALL_TIMEOUT,
 ) -> str:
     """Run a single batch evaluation in its own ADK session.
@@ -521,7 +519,7 @@ async def _run_batch_worker(
     can run indefinitely as long as ADK events keep flowing.  If no
     event arrives for *stall_timeout* seconds it is cancelled.
     """
-    session = await _new_session(session_service, keep_k=keep_k, report_mode=True)
+    session = await _new_session(session_service, report_mode=True)
 
     runner = Runner(
         app=app,
@@ -567,6 +565,9 @@ async def run_batch(
     workers are replayed from the last persisted event — no custom
     JSONL checkpoint scanning required.
     """
+    # Wire keep_k → CONTEXT_INVOCATIONS_TO_KEEP so build_plugins() picks it up
+    os.environ["CONTEXT_INVOCATIONS_TO_KEEP"] = str(keep_k)
+
     # ── ADK-native resumable App ──────────────────────────────────────
     batch_app = App(
         name=APP_NAME,
@@ -643,7 +644,6 @@ async def run_batch(
         session_service,
         workers=workers,
         batch_size=batch_size,
-        keep_k=keep_k,
         stall_timeout=stall_timeout,
     )
 
@@ -655,7 +655,6 @@ async def _run_evaluation_and_synthesis(
     session_service: DatabaseSessionService,
     workers: int = 3,
     batch_size: int = 5,
-    keep_k: int = 2,
     stall_timeout: float = DEFAULT_STALL_TIMEOUT,
 ) -> str:
     """Shared Phase 2 (parallel evaluation) + Phase 3 (synthesis).
@@ -690,7 +689,6 @@ async def _run_evaluation_and_synthesis(
                     session_service,
                     prompt,
                     bid,
-                    keep_k,
                     stall_timeout=stall_timeout,
                 )
             except asyncio.TimeoutError:
@@ -815,6 +813,9 @@ async def run_exhaustive(
     Phase 3 (synthesis) as standard batch mode — but with a richer,
     more complete item list.
     """
+    # Wire keep_k → CONTEXT_INVOCATIONS_TO_KEEP so build_plugins() picks it up
+    os.environ["CONTEXT_INVOCATIONS_TO_KEEP"] = str(keep_k)
+
     batch_app = App(
         name=APP_NAME,
         root_agent=research_agent,
@@ -939,7 +940,6 @@ async def run_exhaustive(
         session_service,
         workers=workers,
         batch_size=batch_size,
-        keep_k=keep_k,
         stall_timeout=stall_timeout,
     )
 
