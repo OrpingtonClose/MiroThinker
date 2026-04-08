@@ -153,7 +153,7 @@ class CorpusStore:
                 specificity_score FLOAT DEFAULT 0.5,
                 relevance_score FLOAT DEFAULT 0.5,
                 actionability_score FLOAT DEFAULT 0.5,
-                duplication_score FLOAT DEFAULT 0.0,
+                duplication_score FLOAT DEFAULT -1.0,
                 fabrication_risk FLOAT DEFAULT 0.0,
 
                 -- Categorical
@@ -394,7 +394,7 @@ class CorpusStore:
         """
         new_ids = self.conn.execute(
             "SELECT id FROM conditions "
-            "WHERE duplication_score = 0.0 AND scored_at != ''"
+            "WHERE duplication_score < 0.0 AND scored_at != ''"
         ).fetchall()
         if not new_ids:
             return 0

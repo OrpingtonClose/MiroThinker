@@ -45,7 +45,8 @@ def researcher_condition_callback(
 
     findings_text = state.get("research_findings", "")
     corpus = _get_corpus(state)
-    if not findings_text:
+    _SENTINELS = {"(no findings yet)", "(no findings)"}
+    if not findings_text or findings_text.strip() in _SENTINELS:
         # No new findings, but still restore corpus format so the thinker
         # doesn't lose context from previous iterations.
         state["research_findings"] = corpus.format_for_thinker()
