@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import glob
+import html as html_mod
 import json
 import logging
 import os
@@ -141,7 +142,7 @@ async def dashboard_html(request: Request) -> HTMLResponse:
     data = _load_run_by_id(session_id)
     if not data:
         return HTMLResponse(
-            f"<h1>Run {session_id} not found</h1>", status_code=404
+            f"<h1>Run {html_mod.escape(session_id)} not found</h1>", status_code=404
         )
     html_content = generate_dashboard_html(data)
     return HTMLResponse(html_content)

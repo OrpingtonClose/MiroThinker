@@ -288,14 +288,17 @@ class PipelineCollector:
                     start_time=time.time() - duration,
                 )
             rec.end_time = time.time()
-            rec.duration_secs = duration
+            # Compute actual duration from timestamps when available,
+            # rather than using the passed-in value (often 0.0).
+            actual_duration = rec.end_time - rec.start_time if rec.start_time else duration
+            rec.duration_secs = actual_duration
             rec.completion_tokens_est = completion_tokens_est
             self.llm_calls.append(rec)
             self._emit(
                 "llm_call_end",
                 agent=agent,
                 data={
-                    "duration_secs": round(duration, 3),
+                    "duration_secs": round(actual_duration, 3),
                     "completion_tokens_est": completion_tokens_est,
                 },
             )
