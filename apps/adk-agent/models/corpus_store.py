@@ -80,22 +80,34 @@ class CorpusStore:
 
     def _setup_flock(self) -> None:
         """Create the DuckDB SECRET and MODEL that Flock needs."""
+        def _sql_escape(val: str) -> str:
+            return val.replace("'", "''")
+
         secret_parts = ["TYPE OPENAI"]
         if _FLOCK_KEY:
-            secret_parts.append(f"API_KEY '{_FLOCK_KEY}'")
+            secret_parts.append(f"API_KEY '{_sql_escape(_FLOCK_KEY)}'")
         if _FLOCK_BASE:
-            secret_parts.append(f"BASE_URL '{_FLOCK_BASE}'")
+            secret_parts.append(f"BASE_URL '{_sql_escape(_FLOCK_BASE)}'")
 
         if _FLOCK_KEY:
             try:
                 self.conn.execute("DROP SECRET IF EXISTS flock_secret")
             except Exception:
                 pass
-            self.conn.execute(
-                f"CREATE SECRET flock_secret ({', '.join(secret_parts)})"
-            )
+            try:
+                self.conn.execute(
+                    f"CREATE SECRET flock_secret "
+                    f"({', '.join(secret_parts)})"
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to CREATE SECRET -- Flock will be "
+                    "unavailable (bad API key format?).",
+                    exc_info=True,
+                )
 
-        model_name = _FLOCK_MODEL or "gpt-4o"
+        model_name = _sql_escape(_FLOCK_MODEL or "gpt-4o")
+        provider = _sql_escape(_FLOCK_PROVIDER)
         try:
             self.conn.execute("DROP MODEL IF EXISTS 'corpus_model'")
         except Exception:
@@ -103,13 +115,13 @@ class CorpusStore:
         try:
             self.conn.execute(
                 f"CREATE MODEL('corpus_model', '{model_name}', "
-                f"'{_FLOCK_PROVIDER}')"
+                f"'{provider}')"
             )
         except Exception:
             logger.warning(
-                "Failed to CREATE MODEL -- Flock scoring will be "
-                "unavailable. Ensure the flock extension is installed "
-                "and a valid API key is set.",
+                "Failed to CREATE MODEL -- Flock ingestion and "
+                "scoring will be unavailable. Ensure the flock "
+                "extension is installed and a valid API key is set.",
                 exc_info=True,
             )
 
@@ -662,27 +674,35 @@ class CorpusStore:
             [raw_id, raw_text, source_type, source_ref, now],
         )
 
-        atomised = self._flock_complete(
-            "You are a research finding decomposer. Extract every "
-            "atomic fact from the text below. An atomic fact is a "
-            "single, self-contained claim that can be verified "
-            "independently. "
-            "Rules: "
-            "- One fact per line "
-            "- Preserve ALL specific data: names, numbers, dates, "
-            "prices, URLs "
-            "- If a URL is associated with a fact, append it as "
-            "[URL] at the end of the line "
-            "- If the text expresses confidence/uncertainty, append "
-            "(confidence=X.X) where X.X is 0.0-1.0 "
-            "- Do NOT summarise or generalise "
-            "- Do NOT add commentary, disclaimers, or meta-text "
-            "- Do NOT skip any fact, no matter how minor "
-            "- Short facts (names, prices, dates) are valid "
-            "- If the text is a single atomic fact already, return "
-            "it as-is "
-            "Text to decompose: " + raw_text
-        )
+        try:
+            atomised = self._flock_complete(
+                "You are a research finding decomposer. Extract every "
+                "atomic fact from the text below. An atomic fact is a "
+                "single, self-contained claim that can be verified "
+                "independently. "
+                "Rules: "
+                "- One fact per line "
+                "- Preserve ALL specific data: names, numbers, dates, "
+                "prices, URLs "
+                "- If a URL is associated with a fact, append it as "
+                "[URL] at the end of the line "
+                "- If the text expresses confidence/uncertainty, append "
+                "(confidence=X.X) where X.X is 0.0-1.0 "
+                "- Do NOT summarise or generalise "
+                "- Do NOT add commentary, disclaimers, or meta-text "
+                "- Do NOT skip any fact, no matter how minor "
+                "- Short facts (names, prices, dates) are valid "
+                "- If the text is a single atomic fact already, return "
+                "it as-is "
+                "Text to decompose: " + raw_text
+            )
+        except Exception:
+            logger.warning(
+                "Flock atomisation failed -- falling back to raw "
+                "text as single condition",
+                exc_info=True,
+            )
+            atomised = raw_text
 
         ids: list[int] = []
         for line in atomised.split("\n"):
@@ -700,7 +720,7 @@ class CorpusStore:
 
             conf_match = self._CONF_RE.search(line)
             confidence = (
-                float(conf_match.group(1))
+                max(0.0, min(1.0, float(conf_match.group(1))))
                 if conf_match else 0.5
             )
             if conf_match:
