@@ -7,107 +7,30 @@ After-agent callback for the researcher: decomposes findings into atoms.
 After the researcher outputs its findings text (stored in
 ``state["research_findings"]``), this callback:
 
-  1. Parses the text into individual ``AtomicCondition`` objects
-  2. Stores them in the shared ``CorpusStore`` (DuckDB)
+  1. Ingests the raw text via Flock atomisation (``corpus.ingest_raw()``)
+  2. Stores the resulting atoms in the shared ``CorpusStore`` (DuckDB)
   3. Overwrites ``state["research_findings"]`` with the structured corpus
      formatted for the thinker's next iteration
 
 This bridges the gap between the researcher's free-text output and the
 structured corpus that the thinker reads.  The researcher writes prose;
-the condition manager turns it into queryable atoms.
+Flock turns it into queryable atoms with gradient-flag scoring.
 """
 
 from __future__ import annotations
 
 import logging
-import re
 from typing import TYPE_CHECKING, Optional
 
 from google.adk.agents.callback_context import CallbackContext
 from google.genai import types as genai_types
 
 from dashboard import get_active_collector
-from models.atomic_condition import AtomicCondition
 
 if TYPE_CHECKING:
     from models.corpus_store import CorpusStore
 
 logger = logging.getLogger(__name__)
-
-# URL pattern for extracting source URLs from findings text
-_URL_RE = re.compile(r"https?://[^\s)\]\"'>]+")
-
-# Confidence keywords → score mapping
-_CONFIDENCE_KEYWORDS: list[tuple[list[str], float]] = [
-    (["confirmed", "verified", "established", "proven", "definitive"], 0.9),
-    (["strong evidence", "multiple sources", "well-documented", "reliable"], 0.8),
-    (["likely", "probable", "credible", "reported by"], 0.7),
-    (["suggests", "indicates", "appears", "some evidence"], 0.6),
-    (["possible", "may", "could", "uncertain", "mixed"], 0.5),
-    (["speculative", "unconfirmed", "rumour", "anecdotal", "unclear"], 0.3),
-    (["unlikely", "doubtful", "disputed", "contradicted"], 0.2),
-]
-
-
-def _infer_confidence(text: str) -> float:
-    """Infer confidence from keyword heuristics in the text."""
-    lower = text.lower()
-    for keywords, score in _CONFIDENCE_KEYWORDS:
-        if any(kw in lower for kw in keywords):
-            return score
-    return 0.5  # default
-
-
-def _extract_source_url(text: str) -> str:
-    """Extract the first URL from a text chunk."""
-    match = _URL_RE.search(text)
-    return match.group(0).rstrip(".,;:") if match else ""
-
-
-def _parse_findings_to_conditions(
-    findings_text: str,
-    iteration: int = 0,
-) -> list[AtomicCondition]:
-    """Parse free-text findings into AtomicCondition objects.
-
-    Splits on paragraph breaks, numbered lists, or bullet points.
-    Each chunk becomes one atom with inferred confidence and source URL.
-    """
-    if not findings_text or findings_text.strip() == "(no findings yet)":
-        return []
-
-    # Split on common delimiters: numbered items, bullets, double newlines
-    chunks = re.split(
-        r"\n\s*(?:\d+[\.\)]\s+|[-*•]\s+|\n)",
-        findings_text,
-    )
-
-    conditions: list[AtomicCondition] = []
-    for chunk in chunks:
-        text = chunk.strip()
-        # Skip preamble, headers, and very short chunks
-        if not text or len(text) < 20:
-            continue
-        # Skip lines that look like section headers
-        if text.startswith("===") or text.startswith("##") or text.startswith("---"):
-            continue
-        # Skip lines that are just metadata (e.g. "CORPUS: 5 conditions")
-        if text.startswith("CORPUS:") or text.startswith("STATUS SUMMARY:"):
-            continue
-
-        source_url = _extract_source_url(text)
-        confidence = _infer_confidence(text)
-
-        conditions.append(AtomicCondition(
-            fact=text,
-            source_url=source_url,
-            confidence=confidence,
-            verification_status="verified",  # tool-grounded from researcher
-            angle=f"iteration_{iteration}",
-            expansion_depth=0,
-        ))
-
-    return conditions
 
 
 def researcher_condition_callback(
@@ -115,14 +38,15 @@ def researcher_condition_callback(
 ) -> Optional[genai_types.Content]:
     """After-agent callback: decompose researcher findings into atoms.
 
-    Reads ``state["research_findings"]``, parses into AtomicConditions,
-    stores in the CorpusStore, and updates state with formatted corpus.
+    Reads ``state["research_findings"]``, ingests via Flock atomisation,
+    and updates state with formatted corpus.
     """
     state = callback_context.state
 
     findings_text = state.get("research_findings", "")
     corpus = _get_corpus(state)
-    if not findings_text:
+    _SENTINELS = {"(no findings yet)", "(no findings)"}
+    if not findings_text or findings_text.strip() in _SENTINELS:
         # No new findings, but still restore corpus format so the thinker
         # doesn't lose context from previous iterations.
         state["research_findings"] = corpus.format_for_thinker()
@@ -132,19 +56,34 @@ def researcher_condition_callback(
     # Track iteration number
     iteration = state.get("_corpus_iteration", 0)
 
-    # Parse findings into atoms
-    new_conditions = _parse_findings_to_conditions(findings_text, iteration)
-    if new_conditions:
-        ids = corpus.admit_batch(new_conditions)
-        admitted_count = len(ids)
-        total_count = corpus.count()
+    # Ingest raw findings via Flock atomisation (replaces regex parsing)
+    ids = corpus.ingest_raw(
+        raw_text=findings_text,
+        source_type="researcher",
+        source_ref="",
+        angle=f"iteration_{iteration}",
+        iteration=iteration,
+    )
+    admitted_count = len(ids)
+    total_count = corpus.count()
+    if admitted_count:
         logger.info(
-            "Condition manager: admitted %d/%d conditions (iteration %d, total %d)",
-            admitted_count, len(new_conditions), iteration, total_count,
+            "Condition manager: ingested %d conditions "
+            "(iteration %d, total %d)",
+            admitted_count, iteration, total_count,
         )
         _c = get_active_collector()
         if _c:
             _c.corpus_update(admitted_count, total_count, iteration)
+
+    # Score newly ingested conditions and compute dedup flags
+    user_query = state.get("user_query", "")
+    scored = corpus.score_new_conditions(user_query)
+    if scored:
+        logger.info("Scored %d conditions via Flock", scored)
+    deduped = corpus.compute_duplications()
+    if deduped:
+        logger.info("Evaluated %d dedup pairs via Flock", deduped)
 
     # Update state with structured corpus for thinker
     state["research_findings"] = corpus.format_for_thinker()
