@@ -26,6 +26,8 @@ from typing import Any, Dict, Optional
 
 from google.adk.tools import ToolContext
 
+from dashboard import get_active_collector
+
 logger = logging.getLogger(__name__)
 
 # Maximum length for scrape results in demo mode

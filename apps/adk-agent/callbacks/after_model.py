@@ -20,6 +20,7 @@ from google.adk.agents.callback_context import CallbackContext
 from google.genai import types as genai_types
 
 from callbacks.before_model import release_llm_semaphore_if_held
+from dashboard import get_active_collector
 from utils.boxed import extract_boxed_content
 
 logger = logging.getLogger(__name__)
@@ -62,5 +63,11 @@ def after_model_callback(
     if boxed:
         state["intermediate_boxed_answers"].append(boxed)
         logger.info("Intermediate boxed answer captured: %s", boxed[:200])
+
+    # Record LLM end in dashboard
+    _c = get_active_collector()
+    if _c:
+        agent_name = getattr(callback_context, "agent_name", "")
+        _c.llm_end(agent_name, 0.0, len(response_text) // 4)  # rough token estimate
 
     return None  # keep the original response

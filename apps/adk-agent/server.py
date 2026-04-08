@@ -28,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from ag_ui_adk import ADKAgent, add_adk_fastapi_endpoint
 
 from agents.research import research_agent
+from dashboard.sse import mount_dashboard_routes
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -58,5 +59,8 @@ adk_agent = ADKAgent(
 
 # Mount the AG-UI SSE endpoint at root
 add_adk_fastapi_endpoint(app, adk_agent, path="/")
+
+# ── Dashboard endpoints ───────────────────────────────────────────
+mount_dashboard_routes(app)
 
 logger.info("MiroThinker AG-UI server ready at http://0.0.0.0:8000")

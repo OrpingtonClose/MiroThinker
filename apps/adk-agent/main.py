@@ -70,6 +70,9 @@ from callbacks.condition_manager import (
     get_corpus_text,
     init_corpus,
 )
+from dashboard import get_active_collector, set_active_collector
+from dashboard.collector import PipelineCollector
+from dashboard.html_report import generate_dashboard_html
 from plugins import build_plugins, setup_otel
 from tools.mcp_tools import close_all_mcp_toolsets
 from prompts.templates import (
@@ -101,8 +104,41 @@ CONTEXT_COMPRESS_LIMIT = int(os.environ.get("CONTEXT_COMPRESS_LIMIT", "5"))
 DEFAULT_STALL_TIMEOUT = float(os.environ.get("STALL_TIMEOUT", "45"))
 
 
+def _record_adk_event(event: object, agent: str = "") -> None:
+    """Feed a single ADK event into the active pipeline collector."""
+    collector = get_active_collector()
+    if collector is None:
+        return
+    has_text = False
+    text_len = 0
+    is_reasoning = False
+    is_tool_call = False
+    tool_name = ""
+    if event.content and event.content.parts:
+        for part in event.content.parts:
+            if hasattr(part, "function_call") and part.function_call:
+                is_tool_call = True
+                tool_name = getattr(part.function_call, "name", "unknown")
+            elif hasattr(part, "thought") and part.thought:
+                is_reasoning = True
+                text_len += len(part.text) if hasattr(part, "text") and part.text else 0
+            elif hasattr(part, "text") and part.text:
+                has_text = True
+                text_len += len(part.text)
+    collector.adk_event(
+        agent=agent,
+        event_type=getattr(event, "author", ""),
+        has_text=has_text,
+        text_len=text_len,
+        is_reasoning=is_reasoning,
+        is_tool_call=is_tool_call,
+        tool_name=tool_name,
+    )
+
+
 async def _collect_response_text(
-    runner: Runner, user_id: str, session_id: str, message: str
+    runner: Runner, user_id: str, session_id: str, message: str,
+    collector_agent: str = "",
 ) -> str:
     """Run an agent and collect the full response text (no stall detection)."""
     collected = ""
@@ -111,6 +147,7 @@ async def _collect_response_text(
         async for event in runner.run_async(
             user_id=user_id, session_id=session_id, new_message=content
         ):
+            _record_adk_event(event, collector_agent)
             if event.content and event.content.parts:
                 for part in event.content.parts:
                     if hasattr(part, "text") and part.text:
@@ -139,6 +176,7 @@ async def _collect_with_heartbeat(
     message: str,
     stall_timeout: float = DEFAULT_STALL_TIMEOUT,
     worker_id: int | None = None,
+    collector_agent: str = "",
 ) -> str:
     """Run an agent with event-stream stall detection.
 
@@ -174,6 +212,7 @@ async def _collect_with_heartbeat(
                 raise
 
             event_count += 1
+            _record_adk_event(event, collector_agent)
             if event.content and event.content.parts:
                 for part in event.content.parts:
                     if hasattr(part, "text") and part.text:
@@ -358,6 +397,34 @@ async def run_report(task: str) -> str:
     return result
 
 
+# ── Dashboard HTML helper ──────────────────────────────────────────
+
+_DASHBOARD_LOGS_DIR = os.environ.get(
+    "DASHBOARD_LOGS_DIR",
+    os.path.join(os.path.dirname(__file__), "dashboard_logs"),
+)
+
+
+def _save_dashboard_html(data: dict) -> None:
+    """Generate and save a self-contained HTML dashboard report from finalized data."""
+    try:
+        import time as _time
+        session_id = data.get("session_id", "unknown")
+        started_at = data.get("started_at", _time.time())
+        ts = _time.strftime("%Y-%m-%dT%H-%M-%S", _time.gmtime(started_at))
+        os.makedirs(_DASHBOARD_LOGS_DIR, exist_ok=True)
+        html_path = os.path.join(
+            _DASHBOARD_LOGS_DIR,
+            f"pipeline_{session_id[:8]}_{ts}.html",
+        )
+        html_content = generate_dashboard_html(data)
+        with open(html_path, "w") as f:
+            f.write(html_content)
+        logger.info("Dashboard HTML saved to %s", html_path)
+    except Exception:
+        logger.exception("Failed to save dashboard HTML")
+
+
 # ═════════════════════════════════════════════════════════════════════
 # Mode: pipeline — 4-agent sequential: thinker → researcher → synthesiser
 # ═════════════════════════════════════════════════════════════════════
@@ -404,6 +471,10 @@ async def run_pipeline(task: str) -> str:
     # Register the corpus store singleton (keyed by the session's _corpus_key).
     init_corpus(session.state)
 
+    # ── Dashboard collector ───────────────────────────────────────────
+    collector = PipelineCollector(query=task, session_id=session.id)
+    set_active_collector(collector)
+
     # ------------------------------------------------------------------
     # Phase 1: Research loop — stall-detected (events = heartbeats)
     # ------------------------------------------------------------------
@@ -416,24 +487,34 @@ async def run_pipeline(task: str) -> str:
 
     try:
         logger.info("Pipeline phase 1: starting research loop")
+        collector.phase_start("research_loop", "thinker+researcher")
         _research_text = await _collect_with_heartbeat(
             research_runner,
             USER_ID,
             session.id,
             task,
             stall_timeout=300.0,  # reasoning tokens act as heartbeats
+            collector_agent="research_loop",
         )
+        collector.phase_end("research_loop", "ok")
         logger.info(
             "Pipeline phase 1 complete — research loop produced %d chars",
             len(_research_text),
         )
     except asyncio.TimeoutError:
         logger.warning("Research loop stalled — returning partial corpus")
+        collector.stall_detected("research_loop", collector.total_adk_events, 300.0)
+        collector.phase_end("research_loop", "stalled")
         corpus_text = get_corpus_text(session.state)
         cleanup_corpus(session.state)  # release DuckDB connection
         if corpus_text:
-            return "## Partial Results (research loop stalled)\n\n" + corpus_text
-        return "(Pipeline stalled during research — no findings collected)"
+            result = "## Partial Results (research loop stalled)\n\n" + corpus_text
+        else:
+            result = "(Pipeline stalled during research — no findings collected)"
+        dashboard_data = collector.finalize(result_text=result)
+        _save_dashboard_html(dashboard_data)
+        set_active_collector(None)
+        return result
 
     # ------------------------------------------------------------------
     # Phase 2: Synthesiser — NO stall detection (single long LLM call)
@@ -469,6 +550,7 @@ async def run_pipeline(task: str) -> str:
             "Pipeline phase 2: starting synthesiser (%d chars of corpus)",
             len(corpus_text),
         )
+        collector.phase_start("synthesiser", "synthesiser")
         # Hard timeout: 20 minutes for the synthesis LLM call.
         # No stall detection — just wait for the single response.
         async with asyncio.timeout(1200):
@@ -477,9 +559,12 @@ async def run_pipeline(task: str) -> str:
                 USER_ID,
                 synth_session.id,
                 "Synthesise the research corpus into a comprehensive report.",
+                collector_agent="synthesiser",
             )
+        collector.phase_end("synthesiser", "ok")
     except (asyncio.TimeoutError, TimeoutError):
         logger.warning("Synthesiser timed out after 1200s — returning raw corpus")
+        collector.phase_end("synthesiser", "timeout")
         result = "## Partial Results (synthesiser timed out)\n\n" + corpus_text
     finally:
         cleanup_corpus(session.state)
@@ -492,6 +577,10 @@ async def run_pipeline(task: str) -> str:
         )
 
     logger.info("Pipeline complete — %d chars of output", len(result))
+    # Finalize dashboard and generate HTML report
+    dashboard_data = collector.finalize(result_text=result)
+    _save_dashboard_html(dashboard_data)
+    set_active_collector(None)
     return result
 
 
