@@ -403,6 +403,7 @@ async def run_pipeline(task: str) -> str:
     except asyncio.TimeoutError:
         logger.warning("Research loop stalled — returning partial corpus")
         corpus_text = get_corpus_text(session.state)
+        cleanup_corpus(session.state)  # release DuckDB connection
         if corpus_text:
             return (
                 "## Partial Results (research loop stalled)\n\n"
@@ -425,7 +426,6 @@ async def run_pipeline(task: str) -> str:
     # Create a fresh session for the synthesiser with the corpus baked in.
     synth_state = {
         "corpus_for_synthesis": corpus_text,
-        "report_mode": True,
     }
     synth_session = await _new_session(
         session_service, report_mode=True, initial_state=synth_state,

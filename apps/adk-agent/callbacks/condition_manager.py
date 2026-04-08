@@ -209,12 +209,6 @@ def init_corpus(state: dict) -> None:
         logger.warning("init_corpus called without _corpus_key in state")
         return
 
-    # Close and remove the previous corpus store if it exists
-    old_key = state.get("_prev_corpus_key")
-    if old_key and old_key in _corpus_stores:
-        _corpus_stores[old_key].close()
-        del _corpus_stores[old_key]
-
     logger.info("Initialised corpus store for key=%s", key)
 
 
