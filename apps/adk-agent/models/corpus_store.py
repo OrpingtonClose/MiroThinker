@@ -721,10 +721,13 @@ class CorpusStore:
                 line = self._URL_RE.sub("", line).strip()
 
             conf_match = self._CONF_RE.search(line)
-            confidence = (
-                max(0.0, min(1.0, float(conf_match.group(1))))
-                if conf_match else 0.5
-            )
+            try:
+                confidence = (
+                    max(0.0, min(1.0, float(conf_match.group(1))))
+                    if conf_match else 0.5
+                )
+            except (ValueError, TypeError):
+                confidence = 0.5
             if conf_match:
                 line = self._CONF_RE.sub("", line).strip()
 
@@ -860,10 +863,11 @@ class CorpusStore:
         )
 
         # Phase 2: gossip refinement
+        phase1_summaries = dict(angle_summaries)
         for angle in list(angle_summaries.keys()):
             peer_text = "\n\n".join(
                 f"### {a}\n{s}"
-                for a, s in angle_summaries.items()
+                for a, s in phase1_summaries.items()
                 if a != angle
             )
             refined = self._flock_complete(
