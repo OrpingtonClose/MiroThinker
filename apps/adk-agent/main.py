@@ -574,7 +574,6 @@ async def run_batch(
         name=APP_NAME,
         root_agent=research_agent,
         resumability_config=ResumabilityConfig(is_resumable=True),
-        plugins=build_plugins(),
     )
     session_service = DatabaseSessionService(db_url=_batch_db_url())
     set_findings_file("batch_findings.jsonl")
@@ -822,7 +821,6 @@ async def run_exhaustive(
         name=APP_NAME,
         root_agent=research_agent,
         resumability_config=ResumabilityConfig(is_resumable=True),
-        plugins=build_plugins(),
     )
     session_service = DatabaseSessionService(db_url=_batch_db_url())
     set_findings_file("exhaustive_findings.jsonl")
