@@ -721,8 +721,7 @@ class CorpusStore:
             else:
                 bare_match = self._BARE_URL_RE.search(line)
                 if bare_match:
-                    source_url = bare_match.group(1)
-                    line = self._BARE_URL_RE.sub("", line).strip()
+                    source_url = bare_match.group(1).rstrip(".,;:")
                 else:
                     source_url = ""
 
