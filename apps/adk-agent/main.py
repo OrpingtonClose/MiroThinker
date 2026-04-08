@@ -1078,6 +1078,7 @@ async def main(
 
     logger.info("Mode: %s | Task: %s", mode, task[:200])
 
+    _agentops_status = "Success"
     try:
         if mode == "factoid":
             result = await run_factoid(task)
@@ -1110,6 +1111,9 @@ async def main(
                 f"Unknown mode: {mode!r}. "
                 "Use 'factoid', 'report', 'pipeline', 'batch', 'exhaustive', or 'decompose'."
             )
+    except Exception:
+        _agentops_status = "Fail"
+        raise
     finally:
         # Chainlit pattern: gracefully close all MCP subprocess connections
         # BEFORE the event loop shuts down.  Without this, npx processes
@@ -1117,7 +1121,7 @@ async def main(
         # "loop is closed, resources may be leaked" warnings.
         await close_all_mcp_toolsets()
         # Flush AgentOps telemetry before the event loop closes.
-        agentops.end_session("Success")
+        agentops.end_session(_agentops_status)
 
     print(f"\n{'=' * 60}")
     print(f"Mode: {mode}")
