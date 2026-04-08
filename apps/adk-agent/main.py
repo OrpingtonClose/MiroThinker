@@ -52,7 +52,8 @@ from google.genai import types as genai_types
 
 from agents.research import research_agent
 from agents.summary import summary_agent
-from agents.pipeline import pipeline_agent
+from agents.pipeline import pipeline_agent, research_loop
+from agents.synthesiser import synthesiser_agent
 from callbacks.condition_manager import build_corpus_state, cleanup_corpus, get_corpus_text, init_corpus
 from tools.mcp_tools import close_all_mcp_toolsets
 from prompts.templates import (
@@ -348,10 +349,25 @@ async def run_pipeline(task: str) -> str:
     The researcher uses a tool-capable model and calls the executor
     (which owns all MCP tools) via AgentTool.
 
-    Data flows via session state:
+    **Execution is split into two phases** so each gets the right timeout
+    strategy:
+
+      Phase 1 — research_loop (LoopAgent: thinker ↔ researcher)
+        Uses ``_collect_with_heartbeat`` with stall detection.  Tool calls
+        and reasoning tokens flow as ADK events (heartbeats), so the loop
+        can run indefinitely as long as progress is being made.
+
+      Phase 2 — synthesiser (single LLM call, NO tools)
+        Uses ``_collect_response_text`` with NO stall detection.  The
+        synthesiser is one long LLM call that produces no intermediate ADK
+        events until the full response is ready.  A hard ``asyncio.timeout``
+        caps the wall-clock time.
+
+    Data flows via session state (blackboard):
       thinker  -> state["research_strategy"]
       researcher -> state["research_findings"]
-      synthesiser reads {research_findings} and writes the final report.
+      condition_manager -> state["corpus_for_synthesis"]
+      synthesiser reads {corpus_for_synthesis} and writes the final report.
     """
     session_service = InMemorySessionService()
 
@@ -365,31 +381,92 @@ async def run_pipeline(task: str) -> str:
     # Register the corpus store singleton (keyed by the session's _corpus_key).
     init_corpus(session.state)
 
-    runner = Runner(
-        agent=pipeline_agent,
+    # ------------------------------------------------------------------
+    # Phase 1: Research loop — stall-detected (events = heartbeats)
+    # ------------------------------------------------------------------
+    research_runner = Runner(
+        agent=research_loop,
         app_name=APP_NAME,
         session_service=session_service,
     )
 
     try:
-        result = await _collect_with_heartbeat(
-            runner, USER_ID, session.id, task,
-            stall_timeout=1200.0,  # synthesis stage may take 10+ min on a single LLM call
+        logger.info("Pipeline phase 1: starting research loop")
+        _research_text = await _collect_with_heartbeat(
+            research_runner, USER_ID, session.id, task,
+            stall_timeout=300.0,  # reasoning tokens act as heartbeats
+        )
+        logger.info(
+            "Pipeline phase 1 complete — research loop produced %d chars",
+            len(_research_text),
         )
     except asyncio.TimeoutError:
-        logger.warning("Pipeline stalled — no event for 1200s; returning partial corpus")
-        # Dump the corpus as partial results so research data isn't lost.
+        logger.warning("Research loop stalled — returning partial corpus")
         corpus_text = get_corpus_text(session.state)
         if corpus_text:
-            result = (
-                "## Partial Results (pipeline stalled during synthesis)\n\n"
+            return (
+                "## Partial Results (research loop stalled)\n\n"
                 + corpus_text
             )
-        else:
-            result = "(Pipeline stalled before completion — no output produced)"
-    finally:
-        # Release DuckDB connection so it doesn't leak in long-running servers.
+        return "(Pipeline stalled during research — no findings collected)"
+
+    # ------------------------------------------------------------------
+    # Phase 2: Synthesiser — NO stall detection (single long LLM call)
+    # ------------------------------------------------------------------
+    # The corpus is already in session state (set by condition_manager
+    # after each researcher iteration).  But we need to refresh it from
+    # DuckDB in case the session's deep-copy is stale.
+    corpus_text = get_corpus_text(session.state)
+    if not corpus_text:
+        logger.warning("No corpus text after research loop — nothing to synthesise")
         cleanup_corpus(session.state)
+        return "(Research loop completed but no findings were stored in corpus)"
+
+    # Create a fresh session for the synthesiser with the corpus baked in.
+    synth_state = {
+        "corpus_for_synthesis": corpus_text,
+        "report_mode": True,
+    }
+    synth_session = await _new_session(
+        session_service, report_mode=True, initial_state=synth_state,
+    )
+
+    synth_runner = Runner(
+        agent=synthesiser_agent,
+        app_name=APP_NAME,
+        session_service=session_service,
+    )
+
+    try:
+        logger.info(
+            "Pipeline phase 2: starting synthesiser (%d chars of corpus)",
+            len(corpus_text),
+        )
+        # Hard timeout: 20 minutes for the synthesis LLM call.
+        # No stall detection — just wait for the single response.
+        async with asyncio.timeout(1200):
+            result = await _collect_response_text(
+                synth_runner, USER_ID, synth_session.id,
+                "Synthesise the research corpus into a comprehensive report.",
+            )
+    except (asyncio.TimeoutError, TimeoutError):
+        logger.warning("Synthesiser timed out after 1200s — returning raw corpus")
+        result = (
+            "## Partial Results (synthesiser timed out)\n\n"
+            + corpus_text
+        )
+    finally:
+        cleanup_corpus(session.state)
+
+    if not result.strip():
+        # Synthesiser returned empty — fall back to raw corpus
+        logger.warning("Synthesiser returned empty — falling back to corpus dump")
+        result = (
+            "## Raw Research Corpus (synthesiser produced no output)\n\n"
+            + corpus_text
+        )
+
+    logger.info("Pipeline complete — %d chars of output", len(result))
     return result
 
 
