@@ -22,7 +22,10 @@ the sentinel ``EVIDENCE_SUFFICIENT`` in its output.  An
 
 This agent uses the synthesis/uncensored model so its reasoning is
 never constrained by tool-calling conventions or content filters.
-It has NO tools — zero cognitive overhead from format conventions.
+
+It has access to Qualitative Research knowledge-graph tools for
+structuring findings into coded themes, building analytical context,
+and querying thematic analysis across iterations.
 """
 
 from __future__ import annotations
@@ -31,14 +34,27 @@ from google.adk import Agent
 
 from agents.model_config import build_model
 from callbacks.thinker_escalate import thinker_escalate_callback
+from tools.mcp_tools import get_tools
 
 THINKER_INSTRUCTION = """\
 You are the strategic thinker for an intelligence-gathering operation. \
 Your job is to read the user's query and any findings gathered so far, \
 then produce a research strategy for the NEXT round of searching.
 
-You have NO tools. You cannot search, scrape, or browse. Your ONLY \
-output is a research plan that a downstream researcher agent will execute.
+You cannot search, scrape, or browse. Your ONLY output is a research \
+plan that a downstream researcher agent will execute.
+
+However, you DO have access to **Qualitative Research** knowledge-graph \
+tools for structuring and analysing research:
+- **startsession / endsession** — manage qualitative research sessions
+- **buildcontext / loadcontext / advancedcontext** — build, load, and query \
+  structured knowledge graphs (projects, participants, codes, themes, findings)
+- **deletecontext** — remove outdated context
+
+Use these tools to organise complex multi-source findings into structured \
+knowledge graphs. This is especially useful when the corpus has many \
+findings across different angles — the knowledge graph helps you see \
+patterns, contradictions, and gaps that raw text review would miss.
 
 === STRUCTURED CORPUS ===
 {research_findings}
@@ -116,11 +132,12 @@ thinker_agent = Agent(
     model=build_model(thinker=True),
     description=(
         "Strategic thinker that analyses a query and accumulated findings, "
-        "then produces the next research strategy. No tools — pure reasoning. "
+        "then produces the next research strategy. Has Qualitative Research "
+        "knowledge-graph tools for structuring findings into coded themes. "
         "Signals EVIDENCE_SUFFICIENT when enough evidence is gathered."
     ),
     instruction=THINKER_INSTRUCTION,
-    tools=[],
+    tools=get_tools(["qualitative-research"]),
     output_key="research_strategy",
     after_agent_callback=thinker_escalate_callback,
 )
