@@ -646,6 +646,7 @@ class CorpusStore:
     # ------------------------------------------------------------------
 
     _URL_RE = re.compile(r"\[(https?://[^\]]+)\]")
+    _BARE_URL_RE = re.compile(r"(https?://[^\s)\]\"'>]+)")
     _CONF_RE = re.compile(r"\(confidence=([0-9.]+)\)")
 
     def ingest_raw(
@@ -714,11 +715,16 @@ class CorpusStore:
                 continue
 
             url_match = self._URL_RE.search(line)
-            source_url = (
-                url_match.group(1) if url_match else ""
-            )
             if url_match:
+                source_url = url_match.group(1)
                 line = self._URL_RE.sub("", line).strip()
+            else:
+                bare_match = self._BARE_URL_RE.search(line)
+                if bare_match:
+                    source_url = bare_match.group(1)
+                    line = self._BARE_URL_RE.sub("", line).strip()
+                else:
+                    source_url = ""
 
             conf_match = self._CONF_RE.search(line)
             try:
