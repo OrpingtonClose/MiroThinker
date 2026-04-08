@@ -53,7 +53,7 @@ from google.genai import types as genai_types
 from agents.research import research_agent
 from agents.summary import summary_agent
 from agents.pipeline import pipeline_agent
-from callbacks.condition_manager import build_corpus_state, cleanup_corpus, init_corpus
+from callbacks.condition_manager import build_corpus_state, cleanup_corpus, get_corpus_text, init_corpus
 from tools.mcp_tools import close_all_mcp_toolsets
 from prompts.templates import (
     FAILURE_EXPERIENCE_FOOTER,
@@ -374,11 +374,19 @@ async def run_pipeline(task: str) -> str:
     try:
         result = await _collect_with_heartbeat(
             runner, USER_ID, session.id, task,
-            stall_timeout=120.0,  # longer timeout — pipeline has 3 stages
+            stall_timeout=1200.0,  # synthesis stage may take 10+ min on a single LLM call
         )
     except asyncio.TimeoutError:
-        logger.warning("Pipeline stalled — no event for 120s; returning partial results")
-        result = "(Pipeline stalled before completion — no output produced)"
+        logger.warning("Pipeline stalled — no event for 1200s; returning partial corpus")
+        # Dump the corpus as partial results so research data isn't lost.
+        corpus_text = get_corpus_text(session.state)
+        if corpus_text:
+            result = (
+                "## Partial Results (pipeline stalled during synthesis)\n\n"
+                + corpus_text
+            )
+        else:
+            result = "(Pipeline stalled before completion — no output produced)"
     finally:
         # Release DuckDB connection so it doesn't leak in long-running servers.
         cleanup_corpus(session.state)

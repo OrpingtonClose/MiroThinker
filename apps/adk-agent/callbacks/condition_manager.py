@@ -218,6 +218,18 @@ def init_corpus(state: dict) -> None:
     logger.info("Initialised corpus store for key=%s", key)
 
 
+def get_corpus_text(state: dict) -> str:
+    """Return the synthesiser-formatted corpus text, or empty string.
+
+    Used to dump partial results when the pipeline stalls before
+    the synthesiser can produce its report.
+    """
+    key = state.get("_corpus_key")
+    if key and key in _corpus_stores:
+        return _corpus_stores[key].format_for_synthesiser()
+    return ""
+
+
 def cleanup_corpus(state: dict) -> None:
     """Close and remove the CorpusStore for a completed pipeline run.
 
