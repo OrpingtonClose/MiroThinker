@@ -75,6 +75,15 @@ def researcher_condition_callback(
         if _c:
             _c.corpus_update(admitted_count, total_count, iteration)
 
+    # Score newly ingested conditions and compute dedup flags
+    user_query = state.get("user_query", "")
+    scored = corpus.score_new_conditions(user_query)
+    if scored:
+        logger.info("Scored %d conditions via Flock", scored)
+    deduped = corpus.compute_duplications()
+    if deduped:
+        logger.info("Evaluated %d dedup pairs via Flock", deduped)
+
     # Update state with structured corpus for thinker
     state["research_findings"] = corpus.format_for_thinker()
     state["_corpus_iteration"] = iteration + 1

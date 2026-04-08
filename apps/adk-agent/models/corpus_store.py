@@ -208,9 +208,10 @@ class CorpusStore:
         self.conn.execute(
             """INSERT INTO conditions
                (id, fact, source_url, source_type, source_ref,
-                confidence, angle, parent_id, strategy,
+                confidence, verification_status, angle,
+                parent_id, strategy,
                 expansion_depth, created_at, iteration)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 cid,
                 fact,
@@ -218,6 +219,7 @@ class CorpusStore:
                 getattr(condition, "source_type", "researcher"),
                 getattr(condition, "source_ref", ""),
                 condition.confidence,
+                getattr(condition, "verification_status", ""),
                 condition.angle,
                 condition.parent_id,
                 condition.strategy,
