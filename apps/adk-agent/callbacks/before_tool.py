@@ -60,11 +60,11 @@ def _enforce_exa_budget(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     if tool_name in ("web_search_exa", "web_search_advanced_exa"):
         if "numResults" not in args:
             args["numResults"] = EXA_DEFAULT_NUM_RESULTS
-        # Cap numResults if LLM asked for too many (coerce to int — LLM
-        # sometimes sends string values like "8" instead of 8)
+        # Coerce numResults to int and cap at 10 — LLM sometimes sends
+        # string values like "8" instead of 8, which downstream rejects.
         try:
-            if int(args.get("numResults", 0)) > 10:
-                args["numResults"] = 10
+            nr = int(args.get("numResults", 0))
+            args["numResults"] = min(nr, 10)
         except (TypeError, ValueError):
             args["numResults"] = EXA_DEFAULT_NUM_RESULTS
         # Inject textMaxCharacters if LLM didn't set it

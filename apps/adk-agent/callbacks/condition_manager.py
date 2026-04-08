@@ -201,14 +201,22 @@ def init_corpus(state: dict) -> None:
 
     Call this *after* ``create_session`` with the state returned by
     :func:`build_corpus_state` so the module-level ``_corpus_stores`` dict
-    knows about the new key.  Also tears down any previous store for this
-    session to avoid leaking DuckDB connections.
+    knows about the new key.  Eagerly creates the CorpusStore so that
+    ``get_corpus_text`` works even if the researcher callback never fires.
+    Also tears down any existing store for this key as a safety net
+    against leaked DuckDB connections.
     """
+    from models.corpus_store import CorpusStore
+
     key = state.get("_corpus_key")
     if not key:
         logger.warning("init_corpus called without _corpus_key in state")
         return
 
+    # Defensive cleanup: close existing store for this key if present
+    if key in _corpus_stores:
+        _corpus_stores[key].close()
+    _corpus_stores[key] = CorpusStore()
     logger.info("Initialised corpus store for key=%s", key)
 
 
