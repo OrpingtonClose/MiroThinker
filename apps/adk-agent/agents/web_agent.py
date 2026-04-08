@@ -8,9 +8,9 @@ Wraps ALL web data-source MCPToolsets (Brave Search, Firecrawl, Exa, TranscriptA
 a single ADK Agent.  The parent research_agent sees ONE tool (this agent)
 instead of ~15 individual MCP tools, dramatically reducing context burn.
 
-Callbacks for dedup (Algorithm 2), arg-fix (Algorithm 8), and bad-result
-detection (Algorithm 4) are attached here so they run at the tool-call
-level inside this agent.
+Callbacks for Exa source budget enforcement and DEMO_MODE truncation are
+attached here. Dedup is handled by GlobalInstructionPlugin, retries by
+ReflectAndRetryToolPlugin, and context trimming by ContextFilterPlugin.
 """
 
 from __future__ import annotations
@@ -75,20 +75,19 @@ the `exa_multi_search` batch tool which runs queries in parallel internally \
 but returns a single unified result.
 
 CONTEXT BUDGET:
-Each tool result is automatically compressed into structured memory \
-(key facts, sources, confidence) before entering the conversation history. \
-You still get full results to read and reason about — the compression \
-happens transparently after you process each result.
+Older invocations are automatically trimmed from context by ContextFilterPlugin. \
+Results are NOT compressed — you receive raw tool output. This means YOU must \
+distill findings before returning them to the parent agent.
 
-1. **Exa searches**: ALWAYS pass `enableHighlights: true` and \
+1. **Distill before returning** (CRITICAL): When you have gathered enough data, \
+   synthesize your findings into a structured summary with source URLs. Do NOT \
+   pass through raw multi-page HTML/text dumps. Extract the specific facts, \
+   data points, names, URLs, and numbers the parent agent asked for.
+2. **Exa searches**: ALWAYS pass `enableHighlights: true` and \
    `highlightsQuery: "<your search intent>"` to get focused excerpts.
-2. **Brave searches**: Results are naturally compact — no special handling needed.
-3. **Firecrawl scrapes**: When scraping full pages, only scrape 1-2 URLs at a time. \
+3. **Brave searches**: Results are naturally compact — no special handling needed.
+4. **Firecrawl scrapes**: When scraping full pages, only scrape 1-2 URLs at a time. \
    Use firecrawl_map first to discover URLs, then selectively scrape the best ones.
-4. **Distill before returning**: When you have gathered enough data, synthesize \
-   your findings into a structured summary with source URLs. Do NOT pass through \
-   raw multi-page HTML/text dumps. Extract the specific facts, data points, \
-   names, URLs, and numbers the parent agent asked for.
 
 RULES:
 - Execute the searches/scrapes requested by the parent agent
