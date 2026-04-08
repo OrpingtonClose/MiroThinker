@@ -227,8 +227,6 @@ async def _new_session(
     must be passed via the ``state`` parameter of ``create_session``.
     """
     state: dict = initial_state.copy() if initial_state else {}
-    if keep_k is not None:
-        state["keep_k"] = keep_k
     if report_mode:
         state["report_mode"] = True
     session = await session_service.create_session(
@@ -1137,7 +1135,7 @@ async def main(
         mode: ``"factoid"`` | ``"report"`` | ``"pipeline"`` | ``"batch"`` | ``"exhaustive"`` | ``"decompose"``.
         workers: Number of parallel batch workers (batch/exhaustive/decompose modes).
         batch_size: Items per batch (batch/exhaustive modes only).
-        keep_k: Override KEEP_TOOL_RESULT for this run.
+        keep_k: Override CONTEXT_INVOCATIONS_TO_KEEP for this run.
         stall_timeout: Per-event stall timeout in seconds (batch/exhaustive modes).
         no_resume: If True, clear previous findings instead of resuming.
         crawl_depth: Number of discovery rounds (exhaustive mode only, default 3).
@@ -1146,7 +1144,7 @@ async def main(
         task = "What is the title of today's arxiv paper in computer science?"
 
     if keep_k is not None:
-        os.environ["KEEP_TOOL_RESULT"] = str(keep_k)
+        os.environ["CONTEXT_INVOCATIONS_TO_KEEP"] = str(keep_k)
 
     _effective_stall = (
         stall_timeout if stall_timeout is not None else DEFAULT_STALL_TIMEOUT
@@ -1238,7 +1236,7 @@ def _parse_args() -> argparse.Namespace:
         "--keep-k",
         type=int,
         default=None,
-        help="Override KEEP_TOOL_RESULT for this run",
+        help="Override CONTEXT_INVOCATIONS_TO_KEEP for this run (ContextFilterPlugin)",
     )
     parser.add_argument(
         "--stall-timeout",
