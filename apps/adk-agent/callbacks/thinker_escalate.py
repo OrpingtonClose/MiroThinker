@@ -21,6 +21,8 @@ from typing import Optional
 from google.adk.agents.callback_context import CallbackContext
 from google.genai import types as genai_types
 
+from dashboard import get_active_collector
+
 logger = logging.getLogger(__name__)
 
 _SENTINEL = "EVIDENCE_SUFFICIENT"
@@ -41,4 +43,7 @@ def thinker_escalate_callback(
     if _SENTINEL in strategy:
         logger.info("Thinker signalled EVIDENCE_SUFFICIENT — escalating out of research loop")
         callback_context.actions.escalate = True
+        _c = get_active_collector()
+        if _c:
+            _c.thinker_escalate()
     return None

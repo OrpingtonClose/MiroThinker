@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Optional
 from google.adk.agents.callback_context import CallbackContext
 from google.genai import types as genai_types
 
+from dashboard import get_active_collector
 from models.atomic_condition import AtomicCondition
 
 if TYPE_CHECKING:
@@ -135,10 +136,15 @@ def researcher_condition_callback(
     new_conditions = _parse_findings_to_conditions(findings_text, iteration)
     if new_conditions:
         ids = corpus.admit_batch(new_conditions)
+        admitted_count = len(ids)
+        total_count = corpus.count()
         logger.info(
             "Condition manager: admitted %d/%d conditions (iteration %d, total %d)",
-            len(ids), len(new_conditions), iteration, corpus.count(),
+            admitted_count, len(new_conditions), iteration, total_count,
         )
+        _c = get_active_collector()
+        if _c:
+            _c.corpus_update(admitted_count, total_count, iteration)
 
     # Update state with structured corpus for thinker
     state["research_findings"] = corpus.format_for_thinker()

@@ -29,6 +29,8 @@ from typing import Any, List, Optional
 from google.adk.agents.callback_context import CallbackContext
 from google.genai import types as genai_types
 
+from dashboard import get_active_collector
+
 logger = logging.getLogger(__name__)
 
 # ── LLM concurrency gate ────────────────────────────────────────────
@@ -115,6 +117,12 @@ async def before_model_callback(
     # ── Context length check ────────────────────────────────────────────
     estimated = _estimate_tokens(contents)
 
+    if keep_k >= 0 and len(tool_indices) > keep_k:
+        _c = get_active_collector()
+        if _c:
+            util = estimated / MAX_CONTEXT_TOKENS if MAX_CONTEXT_TOKENS > 0 else 0
+            _c.keep_k_trim(len(tool_indices) - len(indices_to_trim), len(indices_to_trim), util)
+
     if estimated > MAX_CONTEXT_TOKENS:
         if not state.get("force_end"):
             state["force_end"] = True
@@ -124,6 +132,9 @@ async def before_model_callback(
                 estimated,
                 MAX_CONTEXT_TOKENS,
             )
+            _c = get_active_collector()
+            if _c:
+                _c.force_end(estimated)
         # Re-inject on every call since contents are rebuilt from session
         # history (the injected message is not persisted to the session)
         report_mode = state.get("report_mode", False)
@@ -144,5 +155,11 @@ async def before_model_callback(
             parts=[genai_types.Part(text=wrap_up_text)],
         )
         contents.append(force_end_msg)
+
+    # Record LLM start in dashboard
+    _c = get_active_collector()
+    if _c:
+        agent_name = getattr(callback_context, "agent_name", "")
+        _c.llm_start(agent_name, estimated)
 
     return None  # proceed with the (modified) request
