@@ -64,7 +64,13 @@ from agents.research import research_agent
 from agents.summary import summary_agent
 from agents.pipeline import pipeline_agent, research_loop
 from agents.synthesiser import synthesiser_agent
-from callbacks.condition_manager import build_corpus_state, cleanup_corpus, get_corpus_text, init_corpus
+from callbacks.condition_manager import (
+    build_corpus_state,
+    cleanup_corpus,
+    get_corpus_text,
+    init_corpus,
+)
+from plugins import build_plugins, setup_otel
 from tools.mcp_tools import close_all_mcp_toolsets
 from prompts.templates import (
     FAILURE_EXPERIENCE_FOOTER,
@@ -78,6 +84,9 @@ from tools.research_tools import clear_findings, read_findings, set_findings_fil
 from utils.boxed import extract_boxed_content
 
 logger = logging.getLogger(__name__)
+
+# ── OTel observability (SQLite archive + optional Phoenix) ─────────
+setup_otel()
 
 APP_NAME = "mirothinker_adk"
 USER_ID = "user"
@@ -97,9 +106,7 @@ async def _collect_response_text(
 ) -> str:
     """Run an agent and collect the full response text (no stall detection)."""
     collected = ""
-    content = genai_types.Content(
-        role="user", parts=[genai_types.Part(text=message)]
-    )
+    content = genai_types.Content(role="user", parts=[genai_types.Part(text=message)])
     try:
         async for event in runner.run_async(
             user_id=user_id, session_id=session_id, new_message=content
@@ -113,6 +120,7 @@ async def _collect_response_text(
         # slot leak when an LLM call fails between before_model and
         # after_model callbacks (after_model never fires in that case).
         from callbacks.before_model import release_llm_semaphore_if_held
+
         try:
             sess = await runner._session_service.get_session(
                 app_name=runner._app_name, user_id=user_id, session_id=session_id
@@ -142,9 +150,7 @@ async def _collect_with_heartbeat(
     alive as long as events keep flowing.
     """
     collected = ""
-    content = genai_types.Content(
-        role="user", parts=[genai_types.Part(text=message)]
-    )
+    content = genai_types.Content(role="user", parts=[genai_types.Part(text=message)])
     tag = f"worker {worker_id}" if worker_id is not None else "agent"
     event_count = 0
 
@@ -155,15 +161,15 @@ async def _collect_with_heartbeat(
     try:
         while True:
             try:
-                event = await asyncio.wait_for(
-                    aiter.__anext__(), timeout=stall_timeout
-                )
+                event = await asyncio.wait_for(aiter.__anext__(), timeout=stall_timeout)
             except StopAsyncIteration:
                 break
             except asyncio.TimeoutError:
                 logger.warning(
                     "%s stalled — no event for %.0fs after %d events",
-                    tag, stall_timeout, event_count,
+                    tag,
+                    stall_timeout,
+                    event_count,
                 )
                 raise
 
@@ -183,6 +189,7 @@ async def _collect_with_heartbeat(
         # slot leak when a worker stalls mid-LLM-call (the after_model
         # callback never fires in that case).
         from callbacks.before_model import release_llm_semaphore_if_held
+
         try:
             sess = await runner._session_service.get_session(
                 app_name=runner._app_name, user_id=user_id, session_id=session_id
@@ -225,7 +232,9 @@ async def _new_session(
     if report_mode:
         state["report_mode"] = True
     session = await session_service.create_session(
-        app_name=APP_NAME, user_id=USER_ID, state=state,
+        app_name=APP_NAME,
+        user_id=USER_ID,
+        state=state,
     )
     return session
 
@@ -262,6 +271,7 @@ async def run_factoid(task: str) -> str:
             agent=research_agent,
             app_name=APP_NAME,
             session_service=session_service,
+            plugins=build_plugins(),
         )
 
         research_result = await _collect_response_text(
@@ -283,6 +293,7 @@ async def run_factoid(task: str) -> str:
             agent=summary_agent,
             app_name=APP_NAME,
             session_service=session_service,
+            plugins=build_plugins(),
         )
         summary_input = research_result + "\n\n" + summary_prompt
         summary_result = await _collect_response_text(
@@ -293,7 +304,8 @@ async def run_factoid(task: str) -> str:
             final_answer = boxed
             logger.info(
                 "Answer found via summarisation on attempt %d: %s",
-                attempt, boxed[:200],
+                attempt,
+                boxed[:200],
             )
             break
 
@@ -311,6 +323,7 @@ async def run_factoid(task: str) -> str:
                 agent=summary_agent,
                 app_name=APP_NAME,
                 session_service=session_service,
+                plugins=build_plugins(),
             )
             failure_input = research_result + "\n\n" + FAILURE_SUMMARY_PROMPT
             failure_text = await _collect_response_text(
@@ -341,6 +354,7 @@ async def run_report(task: str) -> str:
         agent=research_agent,
         app_name=APP_NAME,
         session_service=session_service,
+        plugins=build_plugins(),
     )
 
     result = await _collect_response_text(runner, USER_ID, session.id, task)
@@ -386,7 +400,9 @@ async def run_pipeline(task: str) -> str:
     # creation is invisible to the Runner's get_session() call.
     corpus_state = build_corpus_state()
     session = await _new_session(
-        session_service, report_mode=True, initial_state=corpus_state,
+        session_service,
+        report_mode=True,
+        initial_state=corpus_state,
     )
     # Register the corpus store singleton (keyed by the session's _corpus_key).
     init_corpus(session.state)
@@ -398,12 +414,16 @@ async def run_pipeline(task: str) -> str:
         agent=research_loop,
         app_name=APP_NAME,
         session_service=session_service,
+        plugins=build_plugins(),
     )
 
     try:
         logger.info("Pipeline phase 1: starting research loop")
         _research_text = await _collect_with_heartbeat(
-            research_runner, USER_ID, session.id, task,
+            research_runner,
+            USER_ID,
+            session.id,
+            task,
             stall_timeout=300.0,  # reasoning tokens act as heartbeats
         )
         logger.info(
@@ -415,10 +435,7 @@ async def run_pipeline(task: str) -> str:
         corpus_text = get_corpus_text(session.state)
         cleanup_corpus(session.state)  # release DuckDB connection
         if corpus_text:
-            return (
-                "## Partial Results (research loop stalled)\n\n"
-                + corpus_text
-            )
+            return "## Partial Results (research loop stalled)\n\n" + corpus_text
         return "(Pipeline stalled during research — no findings collected)"
 
     # ------------------------------------------------------------------
@@ -438,13 +455,16 @@ async def run_pipeline(task: str) -> str:
         "corpus_for_synthesis": corpus_text,
     }
     synth_session = await _new_session(
-        session_service, report_mode=True, initial_state=synth_state,
+        session_service,
+        report_mode=True,
+        initial_state=synth_state,
     )
 
     synth_runner = Runner(
         agent=synthesiser_agent,
         app_name=APP_NAME,
         session_service=session_service,
+        plugins=build_plugins(),
     )
 
     try:
@@ -456,15 +476,14 @@ async def run_pipeline(task: str) -> str:
         # No stall detection — just wait for the single response.
         async with asyncio.timeout(1200):
             result = await _collect_response_text(
-                synth_runner, USER_ID, synth_session.id,
+                synth_runner,
+                USER_ID,
+                synth_session.id,
                 "Synthesise the research corpus into a comprehensive report.",
             )
     except (asyncio.TimeoutError, TimeoutError):
         logger.warning("Synthesiser timed out after 1200s — returning raw corpus")
-        result = (
-            "## Partial Results (synthesiser timed out)\n\n"
-            + corpus_text
-        )
+        result = "## Partial Results (synthesiser timed out)\n\n" + corpus_text
     finally:
         cleanup_corpus(session.state)
 
@@ -472,8 +491,7 @@ async def run_pipeline(task: str) -> str:
         # Synthesiser returned empty — fall back to raw corpus
         logger.warning("Synthesiser returned empty — falling back to corpus dump")
         result = (
-            "## Raw Research Corpus (synthesiser produced no output)\n\n"
-            + corpus_text
+            "## Raw Research Corpus (synthesiser produced no output)\n\n" + corpus_text
         )
 
     logger.info("Pipeline complete — %d chars of output", len(result))
@@ -510,11 +528,15 @@ async def _run_batch_worker(
     runner = Runner(
         app=app,
         session_service=session_service,
+        plugins=build_plugins(),
     )
 
     logger.info("Batch worker %d starting (session %s)", batch_id, session.id)
     result = await _collect_with_heartbeat(
-        runner, USER_ID, session.id, batch_prompt,
+        runner,
+        USER_ID,
+        session.id,
+        batch_prompt,
         stall_timeout=stall_timeout,
         worker_id=batch_id,
     )
@@ -552,6 +574,7 @@ async def run_batch(
         name=APP_NAME,
         root_agent=research_agent,
         resumability_config=ResumabilityConfig(is_resumable=True),
+        plugins=build_plugins(),
     )
     session_service = DatabaseSessionService(db_url=_batch_db_url())
     set_findings_file("batch_findings.jsonl")
@@ -574,17 +597,22 @@ async def run_batch(
     runner = Runner(
         app=batch_app,
         session_service=session_service,
+        plugins=build_plugins(),
     )
 
     try:
         discovery_result = await _collect_with_heartbeat(
-            runner, USER_ID, session.id, discovery_prompt,
+            runner,
+            USER_ID,
+            session.id,
+            discovery_prompt,
             stall_timeout=stall_timeout,
         )
     except Exception as exc:
         logger.warning(
             "Phase 1 discovery failed (%s: %s); falling back to report mode",
-            type(exc).__name__, exc,
+            type(exc).__name__,
+            exc,
         )
         return await run_report(task)
 
@@ -599,7 +627,9 @@ async def run_batch(
             # Try to parse the whole response as JSON
             items = json.loads(discovery_result)
     except (json.JSONDecodeError, TypeError):
-        logger.warning("Could not parse discovery items as JSON; treating full output as single-item batch")
+        logger.warning(
+            "Could not parse discovery items as JSON; treating full output as single-item batch"
+        )
 
     if not items:
         # Fallback: run as a single report-mode research pass
@@ -610,8 +640,13 @@ async def run_batch(
 
     # Delegate to shared evaluation + synthesis pipeline
     return await _run_evaluation_and_synthesis(
-        task, items, batch_app, session_service,
-        workers=workers, batch_size=batch_size, keep_k=keep_k,
+        task,
+        items,
+        batch_app,
+        session_service,
+        workers=workers,
+        batch_size=batch_size,
+        keep_k=keep_k,
         stall_timeout=stall_timeout,
     )
 
@@ -654,28 +689,35 @@ async def _run_evaluation_and_synthesis(
             )
             try:
                 return await _run_batch_worker(
-                    batch_app, session_service, prompt, bid, keep_k,
+                    batch_app,
+                    session_service,
+                    prompt,
+                    bid,
+                    keep_k,
                     stall_timeout=stall_timeout,
                 )
             except asyncio.TimeoutError:
                 logger.warning(
                     "Batch worker %d stalled (no event for %.0fs) — moving on",
-                    bid, stall_timeout,
+                    bid,
+                    stall_timeout,
                 )
                 return "(stalled)"
             except Exception as exc:
                 logger.warning(
                     "Batch worker %d failed (%s: %s) — moving on",
-                    bid, type(exc).__name__, exc,
+                    bid,
+                    type(exc).__name__,
+                    exc,
                 )
                 return "(error)"
 
-    batch_tasks = [
-        _guarded_worker(batch, i) for i, batch in enumerate(batches)
-    ]
+    batch_tasks = [_guarded_worker(batch, i) for i, batch in enumerate(batches)]
     results = await asyncio.gather(*batch_tasks, return_exceptions=True)
 
-    completed = sum(1 for r in results if isinstance(r, str) and r not in ("(stalled)", "(error)"))
+    completed = sum(
+        1 for r in results if isinstance(r, str) and r not in ("(stalled)", "(error)")
+    )
     stalled = sum(1 for r in results if r == "(stalled)")
     errored = sum(1 for r in results if r == "(error)" or isinstance(r, BaseException))
     for i, r in enumerate(results):
@@ -684,7 +726,10 @@ async def _run_evaluation_and_synthesis(
 
     logger.info(
         "Phase 2 complete: %d/%d batches OK, %d stalled, %d errored",
-        completed, len(results) if results else 0, stalled, errored,
+        completed,
+        len(results) if results else 0,
+        stalled,
+        errored,
     )
 
     # ── Phase 3: Synthesis (always runs) ─────────────────────────────
@@ -704,15 +749,17 @@ async def _run_evaluation_and_synthesis(
     except (json.JSONDecodeError, TypeError):
         pass
 
-    findings_empty = (
-        not all_findings
-        or all_findings.strip() in ("", "[]", "No findings recorded yet.")
+    findings_empty = not all_findings or all_findings.strip() in (
+        "",
+        "[]",
+        "No findings recorded yet.",
     )
     if findings_empty:
         logger.warning("No findings accumulated; synthesising from worker prose")
         # Fall back to concatenating whatever prose the workers returned
         worker_prose = "\n\n---\n\n".join(
-            r for r in results
+            r
+            for r in results
             if isinstance(r, str) and r not in ("", "(stalled)", "(error)")
         )
         all_findings = worker_prose if worker_prose else "(no data collected)"
@@ -733,6 +780,7 @@ async def _run_evaluation_and_synthesis(
         agent=summary_agent,
         app_name=APP_NAME,
         session_service=session_service,
+        plugins=build_plugins(),
     )
 
     report = await _collect_response_text(
@@ -774,6 +822,7 @@ async def run_exhaustive(
         name=APP_NAME,
         root_agent=research_agent,
         resumability_config=ResumabilityConfig(is_resumable=True),
+        plugins=build_plugins(),
     )
     session_service = DatabaseSessionService(db_url=_batch_db_url())
     set_findings_file("exhaustive_findings.jsonl")
@@ -807,7 +856,9 @@ async def run_exhaustive(
             )
         else:
             # Subsequent rounds: ask for items NOT already discovered
-            known = json.dumps([{"name": i.get("name"), "url": i.get("url")} for i in all_items[:50]])
+            known = json.dumps(
+                [{"name": i.get("name"), "url": i.get("url")} for i in all_items[:50]]
+            )
             discovery_prompt = (
                 f"{task}\n\n"
                 f"EXHAUSTIVE DISCOVERY — ROUND {round_num}/{crawl_depth}:\n"
@@ -824,17 +875,24 @@ async def run_exhaustive(
             )
 
         session = await _new_session(session_service, report_mode=True)
-        runner = Runner(app=batch_app, session_service=session_service)
+        runner = Runner(
+            app=batch_app, session_service=session_service, plugins=build_plugins()
+        )
 
         try:
             result = await _collect_with_heartbeat(
-                runner, USER_ID, session.id, discovery_prompt,
+                runner,
+                USER_ID,
+                session.id,
+                discovery_prompt,
                 stall_timeout=stall_timeout,
             )
         except Exception as exc:
             logger.warning(
                 "Discovery round %d failed (%s: %s); continuing with items so far",
-                round_num, type(exc).__name__, exc,
+                round_num,
+                type(exc).__name__,
+                exc,
             )
             continue
 
@@ -860,7 +918,10 @@ async def run_exhaustive(
 
         logger.info(
             "Round %d: found %d new items (%d duplicates skipped), total now %d",
-            round_num, added, len(new_items) - added, len(all_items),
+            round_num,
+            added,
+            len(new_items) - added,
+            len(all_items),
         )
 
         if added == 0 and round_num > 1:
@@ -876,8 +937,13 @@ async def run_exhaustive(
     # ── Phase 2 + 3: reuse batch mode's evaluation + synthesis ─────────
     # We reuse the batch mode infrastructure from here
     return await _run_evaluation_and_synthesis(
-        task, all_items, batch_app, session_service,
-        workers=workers, batch_size=batch_size, keep_k=keep_k,
+        task,
+        all_items,
+        batch_app,
+        session_service,
+        workers=workers,
+        batch_size=batch_size,
+        keep_k=keep_k,
         stall_timeout=stall_timeout,
     )
 
@@ -917,7 +983,7 @@ async def run_decompose(
         "- Each must be specific and searchable\n"
         "- Together they must cover the full scope of the original question\n"
         "- DO NOT use any tools — just think and decompose\n\n"
-        "Return as ```json\n[{\"sub_query\": \"...\", \"aspect\": \"...\"}]\n```"
+        'Return as ```json\n[{"sub_query": "...", "aspect": "..."}]\n```'
     )
 
     session = await _new_session(session_service, report_mode=True)
@@ -925,6 +991,7 @@ async def run_decompose(
         agent=summary_agent,  # Use summary agent (no tools) for decomposition
         app_name=APP_NAME,
         session_service=session_service,
+        plugins=build_plugins(),
     )
 
     decompose_result = await _collect_response_text(
@@ -969,6 +1036,7 @@ async def run_decompose(
                 agent=research_agent,
                 app_name=APP_NAME,
                 session_service=sub_session_service,
+                plugins=build_plugins(),
             )
 
             prompt = (
@@ -981,7 +1049,10 @@ async def run_decompose(
 
             try:
                 result = await _collect_with_heartbeat(
-                    sub_runner, USER_ID, sub_session.id, prompt,
+                    sub_runner,
+                    USER_ID,
+                    sub_session.id,
+                    prompt,
                     stall_timeout=stall_timeout,
                     worker_id=idx,
                 )
@@ -990,7 +1061,9 @@ async def run_decompose(
             except Exception as exc:
                 logger.warning(
                     "Sub-report %d failed (%s: %s)",
-                    idx, type(exc).__name__, exc,
+                    idx,
+                    type(exc).__name__,
+                    exc,
                 )
                 return f"## {aspect}\n\n(Research failed: {exc})"
 
@@ -1007,7 +1080,9 @@ async def run_decompose(
             sub_reports.append(f"## {aspect}\n\n(Error: {r})")
             logger.error("Sub-report %d raised %s: %s", i, type(r).__name__, r)
 
-    completed = sum(1 for r in sub_results if isinstance(r, str) and "(Research failed" not in r)
+    completed = sum(
+        1 for r in sub_results if isinstance(r, str) and "(Research failed" not in r
+    )
     logger.info("Sub-reports complete: %d/%d successful", completed, len(sub_queries))
 
     # ── Step 3: Synthesis ─────────────────────────────────────────────
@@ -1032,6 +1107,7 @@ async def run_decompose(
         agent=summary_agent,
         app_name=APP_NAME,
         session_service=session_service,
+        plugins=build_plugins(),
     )
 
     report = await _collect_response_text(
@@ -1074,7 +1150,9 @@ async def main(
     if keep_k is not None:
         os.environ["KEEP_TOOL_RESULT"] = str(keep_k)
 
-    _effective_stall = stall_timeout if stall_timeout is not None else DEFAULT_STALL_TIMEOUT
+    _effective_stall = (
+        stall_timeout if stall_timeout is not None else DEFAULT_STALL_TIMEOUT
+    )
 
     logger.info("Mode: %s | Task: %s", mode, task[:200])
 
@@ -1088,14 +1166,18 @@ async def main(
             result = await run_pipeline(task)
         elif mode == "batch":
             result = await run_batch(
-                task, workers=workers, batch_size=batch_size,
+                task,
+                workers=workers,
+                batch_size=batch_size,
                 keep_k=keep_k if keep_k is not None else 2,
                 stall_timeout=_effective_stall,
                 resume=not no_resume,
             )
         elif mode == "exhaustive":
             result = await run_exhaustive(
-                task, workers=workers, batch_size=batch_size,
+                task,
+                workers=workers,
+                batch_size=batch_size,
                 keep_k=keep_k if keep_k is not None else 2,
                 stall_timeout=_effective_stall,
                 resume=not no_resume,
@@ -1103,7 +1185,8 @@ async def main(
             )
         elif mode == "decompose":
             result = await run_decompose(
-                task, workers=workers,
+                task,
+                workers=workers,
                 stall_timeout=_effective_stall,
             )
         else:
@@ -1142,28 +1225,40 @@ def _parse_args() -> argparse.Namespace:
         help="Execution mode (default: report)",
     )
     parser.add_argument(
-        "--workers", type=int, default=3,
+        "--workers",
+        type=int,
+        default=3,
         help="Number of parallel batch workers (batch mode only)",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=5,
+        "--batch-size",
+        type=int,
+        default=5,
         help="Items per batch (batch mode only)",
     )
     parser.add_argument(
-        "--keep-k", type=int, default=None,
+        "--keep-k",
+        type=int,
+        default=None,
         help="Override KEEP_TOOL_RESULT for this run",
     )
     parser.add_argument(
-        "--stall-timeout", type=float, default=None,
+        "--stall-timeout",
+        type=float,
+        default=None,
         help="Per-event stall timeout in seconds (batch mode, default: 45). "
-             "Workers can run indefinitely as long as events keep flowing.",
+        "Workers can run indefinitely as long as events keep flowing.",
     )
     parser.add_argument(
-        "--no-resume", action="store_true", default=False,
+        "--no-resume",
+        action="store_true",
+        default=False,
         help="Clear previous findings instead of resuming from checkpoint",
     )
     parser.add_argument(
-        "--crawl-depth", type=int, default=3,
+        "--crawl-depth",
+        type=int,
+        default=3,
         help="Number of discovery rounds (exhaustive mode only, default: 3)",
     )
     return parser.parse_args()

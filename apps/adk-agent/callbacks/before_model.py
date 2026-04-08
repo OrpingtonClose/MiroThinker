@@ -2,15 +2,21 @@
 # This source code is licensed under the Apache 2.0 License.
 
 """
-Before-model callback implementing Algorithm 5 (Keep-K-Recent).
+Before-model callback — LLM concurrency gate + context-length safety net.
 
-Trims the conversation history so that only the initial user message and
-the last *K* tool-result messages are fully retained.  Older tool results
-are replaced with a short placeholder to save tokens.
+Keep-K-Recent (Algorithm 5), Adaptive K, and dynamic compression have been
+removed — they are now handled by ``ContextFilterPlugin`` which trims at the
+invocation level (simpler, framework-native, and sufficient because
+MiroThinker's important data flows through session *state*, not raw
+conversation context).
 
-Also performs a rough context-length check.  If the estimated token count
-exceeds a configurable threshold the ``force_end`` flag is set in session
-state so the agent instruction can trigger a final answer.
+What remains:
+1. **LLM concurrency semaphore** — limits parallel LLM calls to
+   ``MAX_CONCURRENT_LLM`` so providers (Venice, RunPod) aren't rate-limited
+   when running batch workers.
+2. **Context-length safety net** — if the estimated token count exceeds
+   ``MAX_CONTEXT_TOKENS``, sets ``force_end=True`` in session state and
+   injects a wrap-up instruction so the agent produces a final answer.
 """
 
 from __future__ import annotations
@@ -39,16 +45,12 @@ def release_llm_semaphore_if_held(state: dict) -> None:
         _llm_semaphore.release()
         state["_llm_sem_held"] = False
 
-# Default number of recent tool results to keep (matches keep_tool_result=5)
-DEFAULT_KEEP_K = int(os.environ.get("KEEP_TOOL_RESULT", "5"))
 
 # Rough chars-per-token ratio for estimating context size
 _CHARS_PER_TOKEN = 4
 
 # Maximum estimated tokens before forcing a final answer
 MAX_CONTEXT_TOKENS = int(os.environ.get("MAX_CONTEXT_TOKENS", "128000"))
-
-_PLACEHOLDER = "Tool result is omitted to save tokens."
 
 
 def _estimate_tokens(contents: List[genai_types.Content]) -> int:
@@ -88,45 +90,18 @@ async def before_model_callback(
     1. Acquires the LLM concurrency semaphore — limits parallel LLM
        calls to ``MAX_CONCURRENT_LLM`` (default 2) so providers like
        Venice don't get rate-limited when running batch workers.
-    2. Trims old tool results via Keep-K-Recent (Algorithm 5).
-    3. Checks context length and signals force_end if too large.
+    2. Checks context length and signals force_end if too large.
 
     Returns None (ADK proceeds with the — possibly modified — request).
     """
     # Acquire semaphore — blocks if too many LLM calls in flight.
-    # ADK will await this coroutine, so other workers can proceed
-    # while we wait for a slot.
     await _llm_semaphore.acquire()
-    # Release happens in after_model_callback via _llm_semaphore.release().
-    # Store on callback_context state so after_model can find it.
     callback_context.state["_llm_sem_held"] = True
-    logger.debug("LLM semaphore acquired (%d/%d slots used)",
-                 _MAX_CONCURRENT_LLM - _llm_semaphore._value,
-                 _MAX_CONCURRENT_LLM)
-    state = callback_context.state
-    keep_k = state.get("keep_k", DEFAULT_KEEP_K)
-
-    # ── Adaptive Keep-K ─────────────────────────────────────────────────
-    # Dynamically adjust K based on context utilisation so we retain
-    # maximum context when there's headroom and aggressively trim when
-    # approaching the limit.  Only activates when not explicitly overridden.
-    if not state.get("keep_k_locked"):
-        contents_for_estimate: list = getattr(llm_request, "contents", None) or []
-        if contents_for_estimate:
-            est_tokens = _estimate_tokens(contents_for_estimate)
-            utilisation = est_tokens / MAX_CONTEXT_TOKENS if MAX_CONTEXT_TOKENS > 0 else 0
-            if utilisation > 0.70:
-                keep_k = min(keep_k, 2)
-            elif utilisation > 0.50:
-                keep_k = min(keep_k, 3)
-            elif utilisation < 0.30:
-                keep_k = max(keep_k, 8)
-            state["_adaptive_keep_k"] = keep_k
-            if keep_k != state.get("keep_k", DEFAULT_KEEP_K):
-                logger.info(
-                    "Adaptive Keep-K: utilisation=%.0f%%, K adjusted to %d",
-                    utilisation * 100, keep_k,
-                )
+    logger.debug(
+        "LLM semaphore acquired (%d/%d slots used)",
+        _MAX_CONCURRENT_LLM - _llm_semaphore._value,
+        _MAX_CONCURRENT_LLM,
+    )
 
     # Access the contents list from the LLM request
     contents: Optional[List[genai_types.Content]] = getattr(
@@ -135,103 +110,8 @@ async def before_model_callback(
     if not contents:
         return None
 
-    # ── Algorithm 5: Keep-K-Recent ──────────────────────────────────────
-    # Identify indices of tool-role messages (function responses)
-    tool_indices: List[int] = []
-    first_user_idx: Optional[int] = None
+    state = callback_context.state
 
-    for idx, content in enumerate(contents):
-        role = getattr(content, "role", None)
-        if role == "user" and first_user_idx is None:
-            first_user_idx = idx
-        # In ADK, tool results come back as role="tool" or with
-        # function_response parts
-        if role == "tool" or (
-            role == "user"
-            and idx != first_user_idx
-            and content.parts
-            and any(hasattr(p, "function_response") and p.function_response for p in content.parts)
-        ):
-            tool_indices.append(idx)
-
-    if keep_k >= 0 and len(tool_indices) > keep_k:
-        # Replace all but the last K tool results with placeholder.
-        # IMPORTANT: Also replace the corresponding FunctionCall parts in
-        # the preceding model message to maintain the FunctionCall →
-        # FunctionResponse pairing required by both Gemini and OpenAI APIs.
-        #
-        # To avoid corrupting parallel tool call groups (where a single
-        # model message contains multiple FunctionCalls with the same name),
-        # we first group tool responses by their originating model message.
-        # If the trim boundary falls inside a group, we adjust it so the
-        # entire group is either trimmed or kept.
-        raw_split = len(tool_indices) - keep_k
-
-        # Map each tool_index to the model message that issued its FunctionCall
-        def _find_model_msg(resp_idx: int) -> int:
-            """Find the model message index that issued the FunctionCall for resp_idx."""
-            for pi in range(resp_idx - 1, -1, -1):
-                prev = contents[pi]
-                if getattr(prev, "role", None) == "model" and prev.parts:
-                    if any(hasattr(p, "function_call") and p.function_call for p in prev.parts):
-                        return pi
-            return -1
-
-        # Check if the split point falls inside a parallel tool call group
-        # (i.e., the last trimmed and first kept share the same model message)
-        if raw_split > 0 and raw_split < len(tool_indices):
-            last_trimmed_model = _find_model_msg(tool_indices[raw_split - 1])
-            first_kept_model = _find_model_msg(tool_indices[raw_split])
-            if last_trimmed_model == first_kept_model and last_trimmed_model != -1:
-                # Adjust split to keep the entire group — move split point
-                # back to before this group starts
-                while raw_split > 0 and _find_model_msg(tool_indices[raw_split - 1]) == last_trimmed_model:
-                    raw_split -= 1
-
-        indices_to_trim = tool_indices[:raw_split]
-
-        for idx in indices_to_trim:
-            # Replace the tool response content with a placeholder.
-            # IMPORTANT: Leave the corresponding FunctionCall parts in
-            # model messages UNTOUCHED to maintain the FunctionCall →
-            # FunctionResponse structural pairing required by both
-            # Gemini and OpenAI APIs. Only the bulky response content
-            # is replaced — this mirrors the original MiroThinker approach.
-            # IMPORTANT: role="tool" messages MUST contain function_response
-            # parts (not plain text) to satisfy the API schema. For role="user"
-            # messages that happen to carry function_response parts, plain text
-            # is acceptable.
-            orig_role = getattr(contents[idx], "role", "user")
-            if orig_role == "tool":
-                # Build proper FunctionResponse placeholders preserving names
-                placeholder_parts = []
-                for part in (contents[idx].parts or []):
-                    if hasattr(part, "function_response") and part.function_response:
-                        fr_name = getattr(part.function_response, "name", "unknown")
-                        placeholder_parts.append(genai_types.Part(
-                            function_response=genai_types.FunctionResponse(
-                                name=fr_name,
-                                response={"result": _PLACEHOLDER},
-                            )
-                        ))
-                if not placeholder_parts:
-                    # Fallback: shouldn't happen, but use text under "user" role
-                    placeholder_parts = [genai_types.Part(text=_PLACEHOLDER)]
-                    orig_role = "user"
-                contents[idx] = genai_types.Content(
-                    role=orig_role, parts=placeholder_parts
-                )
-            else:
-                contents[idx] = genai_types.Content(
-                    role=orig_role,
-                    parts=[genai_types.Part(text=_PLACEHOLDER)],
-                )
-        omitted_count = len(indices_to_trim)
-        logger.info(
-            "Keep-K-Recent: trimmed %d tool results, kept last %d",
-            omitted_count,
-            len(tool_indices) - omitted_count,
-        )
     # ── Context length check ────────────────────────────────────────────
     estimated = _estimate_tokens(contents)
 
