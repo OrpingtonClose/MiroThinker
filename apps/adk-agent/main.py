@@ -33,6 +33,7 @@ indefinitely.  This is fundamentally different from a hard timeout:
 
 from __future__ import annotations
 
+import agentops
 import argparse
 import asyncio
 import json
@@ -43,6 +44,15 @@ import re
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
+
+# Initialise AgentOps — auto-instruments Google ADK (LLM calls, tool
+# usage, agent interactions) with zero custom code.  Requires
+# AGENTOPS_API_KEY in the environment.
+if os.environ.get("AGENTOPS_API_KEY"):
+    agentops.init()
+    logging.getLogger(__name__).info("AgentOps tracing enabled")
+else:
+    logging.getLogger(__name__).info("AgentOps disabled (no AGENTOPS_API_KEY)")
 
 from google.adk.apps import App
 from google.adk.apps.app import ResumabilityConfig
@@ -1106,6 +1116,8 @@ async def main(
         # (Brave, Firecrawl, Exa) crash during teardown with
         # "loop is closed, resources may be leaked" warnings.
         await close_all_mcp_toolsets()
+        # Flush AgentOps telemetry before the event loop closes.
+        agentops.end_session("Success")
 
     print(f"\n{'=' * 60}")
     print(f"Mode: {mode}")
