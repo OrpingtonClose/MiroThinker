@@ -328,17 +328,34 @@ class CorpusStore:
                 "Query: " + user_query + " Finding: " + fact
             ), 0.5)
 
+        novelty = self._parse_float(self._flock_complete(
+            "Rate how novel this finding is on 0.0 to 1.0. "
+            "1.0 = completely new information not commonly known. "
+            "0.0 = widely known, obvious, or trivial. "
+            "Return ONLY a decimal number. "
+            "Finding: " + fact
+        ), 0.5)
+
+        actionability = self._parse_float(self._flock_complete(
+            "Rate how actionable this finding is on 0.0 to 1.0. "
+            "1.0 = directly usable, contains specific steps or data. "
+            "0.0 = purely informational with no actionable content. "
+            "Return ONLY a decimal number. "
+            "Finding: " + fact
+        ), 0.5)
+
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
             """UPDATE conditions
                SET confidence = ?, trust_score = ?,
                    specificity_score = ?, fabrication_risk = ?,
-                   relevance_score = ?,
+                   relevance_score = ?, novelty_score = ?,
+                   actionability_score = ?,
                    scored_at = ?,
                    score_version = score_version + 1
                WHERE id = ?""",
             [confidence, trust, specificity, fabrication, relevance,
-             now, cid],
+             novelty, actionability, now, cid],
         )
 
     @staticmethod
@@ -669,7 +686,7 @@ class CorpusStore:
 
         ids: list[int] = []
         for line in atomised.split("\n"):
-            line = line.strip().lstrip("- *0123456789.)")
+            line = re.sub(r'^\s*(?:\d+[.)\]]\s*|[-*\u2022]\s+)', '', line.strip())
             line = line.strip()
             if not line:
                 continue
