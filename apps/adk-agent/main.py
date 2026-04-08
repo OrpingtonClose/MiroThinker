@@ -53,7 +53,7 @@ from google.genai import types as genai_types
 from agents.research import research_agent
 from agents.summary import summary_agent
 from agents.pipeline import pipeline_agent
-from callbacks.condition_manager import cleanup_corpus, reset_corpus
+from callbacks.condition_manager import build_corpus_state, cleanup_corpus, init_corpus
 from tools.mcp_tools import close_all_mcp_toolsets
 from prompts.templates import (
     FAILURE_EXPERIENCE_FOOTER,
@@ -199,15 +199,23 @@ async def _new_session(
     session_service: InMemorySessionService | DatabaseSessionService,
     keep_k: int | None = None,
     report_mode: bool = False,
+    initial_state: dict | None = None,
 ) -> object:
-    """Create a fresh session, optionally overriding Keep-K and report mode."""
-    session = await session_service.create_session(
-        app_name=APP_NAME, user_id=USER_ID
-    )
+    """Create a fresh session, optionally overriding Keep-K and report mode.
+
+    IMPORTANT: ``InMemorySessionService`` deep-copies the session on both
+    ``create_session`` and ``get_session``, so state set *after* creation
+    on the returned object is invisible to the Runner.  All initial state
+    must be passed via the ``state`` parameter of ``create_session``.
+    """
+    state: dict = initial_state.copy() if initial_state else {}
     if keep_k is not None:
-        session.state["keep_k"] = keep_k
+        state["keep_k"] = keep_k
     if report_mode:
-        session.state["report_mode"] = True
+        state["report_mode"] = True
+    session = await session_service.create_session(
+        app_name=APP_NAME, user_id=USER_ID, state=state,
+    )
     return session
 
 
@@ -346,12 +354,16 @@ async def run_pipeline(task: str) -> str:
       synthesiser reads {research_findings} and writes the final report.
     """
     session_service = InMemorySessionService()
-    session = await _new_session(session_service, report_mode=True)
 
-    # Initialise a fresh DuckDB corpus for this pipeline run.
-    # The condition_manager callback will populate it after each
-    # researcher iteration, and the thinker/synthesiser read from it.
-    reset_corpus(session.state)
+    # Build the initial state for the corpus *before* session creation.
+    # InMemorySessionService deep-copies on create, so state set after
+    # creation is invisible to the Runner's get_session() call.
+    corpus_state = build_corpus_state()
+    session = await _new_session(
+        session_service, report_mode=True, initial_state=corpus_state,
+    )
+    # Register the corpus store singleton (keyed by the session's _corpus_key).
+    init_corpus(session.state)
 
     runner = Runner(
         agent=pipeline_agent,
