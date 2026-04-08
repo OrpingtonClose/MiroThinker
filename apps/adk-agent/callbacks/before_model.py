@@ -117,12 +117,6 @@ async def before_model_callback(
     # ── Context length check ────────────────────────────────────────────
     estimated = _estimate_tokens(contents)
 
-    if keep_k >= 0 and len(tool_indices) > keep_k:
-        _c = get_active_collector()
-        if _c:
-            util = estimated / MAX_CONTEXT_TOKENS if MAX_CONTEXT_TOKENS > 0 else 0
-            _c.keep_k_trim(len(tool_indices) - len(indices_to_trim), len(indices_to_trim), util)
-
     if estimated > MAX_CONTEXT_TOKENS:
         if not state.get("force_end"):
             state["force_end"] = True
