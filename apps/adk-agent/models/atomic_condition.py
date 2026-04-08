@@ -45,6 +45,3 @@ class AtomicCondition:
     def __post_init__(self) -> None:
         # Clamp confidence to [0.0, 1.0]
         self.confidence = max(0.0, min(1.0, self.confidence))
-        # Truncate fact to 1000 chars to prevent bloat
-        if len(self.fact) > 1000:
-            self.fact = self.fact[:997] + "..."
