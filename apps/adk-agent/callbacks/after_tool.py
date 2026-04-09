@@ -105,18 +105,18 @@ def after_tool_callback(
     result_text = str(tool_response) if tool_response is not None else ""
 
     # ── Release provider semaphore ───────────────────────────────────
-    # Use the per-invocation key set in before_tool_callback so parallel
-    # tool calls don't interfere with each other's semaphore tracking.
-    invocation_id = tool_context.state.get("_tool_invocation_id", "")
-    if invocation_id:
-        sem_key = f"_provider_sem_{invocation_id}"
-        held_provider = tool_context.state.get(sem_key, "")
-        if held_provider:
-            _provider_semaphores[held_provider].release()
-            tool_context.state[sem_key] = ""
+    # Use function_call_id as the per-invocation key — same key that
+    # before_tool_callback used, and it's an attribute on ToolContext
+    # (not shared session state), so parallel calls can't overwrite it.
+    call_id = getattr(tool_context, "function_call_id", "") or tool_name
+    sem_key = f"_provider_sem_{call_id}"
+    held_provider = tool_context.state.get(sem_key, "")
+    if held_provider:
+        _provider_semaphores[held_provider].release()
+        tool_context.state[sem_key] = ""
 
     # ── Dashboard: track tool end ────────────────────────────────────
-    start_time = tool_context.state.get(f"_tool_start_time_{invocation_id}", 0) if invocation_id else 0
+    start_time = tool_context.state.get(f"_tool_start_time_{call_id}", 0)
     duration = time.time() - start_time if start_time else 0.0
     _c = get_active_collector()
     if _c:

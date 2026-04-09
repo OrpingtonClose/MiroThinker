@@ -30,15 +30,29 @@ from typing import Optional
 import duckdb
 
 from models.atomic_condition import AtomicCondition
+from utils.flock_proxy import start_flock_proxy
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Flock model configuration (env-driven)
 # ---------------------------------------------------------------------------
+def _extract_bare_model(model_str: str) -> str:
+    """Strip provider prefixes (litellm/, openai/) to get bare model name.
+
+    ADK_MODEL is typically ``litellm/openai/zai-org-glm-5-1`` but Flock
+    (via Venice) needs just ``zai-org-glm-5-1``.
+    """
+    # Strip known prefixes
+    for prefix in ("litellm/", "openai/", "azure/", "anthropic/"):
+        if model_str.startswith(prefix):
+            model_str = model_str[len(prefix):]
+    return model_str
+
+
 _FLOCK_MODEL = os.environ.get(
     "FLOCK_MODEL",
-    os.environ.get("ADK_MODEL", "openai/gpt-4o").replace("litellm/", ""),
+    _extract_bare_model(os.environ.get("ADK_MODEL", "gpt-4o")),
 )
 _FLOCK_KEY = os.environ.get(
     "FLOCK_API_KEY", os.environ.get("OPENAI_API_KEY", "")
@@ -91,24 +105,43 @@ class CorpusStore:
     # ------------------------------------------------------------------
 
     def _setup_flock(self) -> None:
-        """Create the DuckDB SECRET and MODEL that Flock needs."""
+        """Create the DuckDB SECRET and MODEL that Flock needs.
+
+        Flock sends ``response_format: json_schema`` on every request,
+        which Venice (and many OpenAI-compatible providers) reject.
+        We route Flock through a lightweight local proxy that strips
+        ``response_format`` before forwarding to the real API.
+        """
         def _sql_escape(val: str) -> str:
             return val.replace("'", "''")
+
+        # Start the Flock proxy to strip response_format from requests.
+        # This is needed because Flock sends json_schema response_format
+        # which Venice and other OpenAI-compatible providers reject.
+        flock_base = _FLOCK_BASE
+        if flock_base:
+            proxy_url = start_flock_proxy(flock_base)
+            logger.info(
+                "Flock proxy started: %s -> %s", proxy_url, flock_base,
+            )
+            flock_base = proxy_url
 
         secret_parts = ["TYPE OPENAI"]
         if _FLOCK_KEY:
             secret_parts.append(f"API_KEY '{_sql_escape(_FLOCK_KEY)}'")
-        if _FLOCK_BASE:
-            secret_parts.append(f"BASE_URL '{_sql_escape(_FLOCK_BASE)}'")
+        if flock_base:
+            secret_parts.append(f"BASE_URL '{_sql_escape(flock_base)}'")
+        else:
+            # No base URL — use default OpenAI endpoint
+            pass
 
         if _FLOCK_KEY:
-            try:
-                self.conn.execute("DROP SECRET IF EXISTS flock_secret")
-            except Exception:
-                pass
+            # Flock's llm_complete looks for the unnamed default secret
+            # (__default_openai), NOT a named secret.  We must create it
+            # without a name so Flock can find it automatically.
             try:
                 self.conn.execute(
-                    f"CREATE SECRET flock_secret "
+                    f"CREATE SECRET "
                     f"({', '.join(secret_parts)})"
                 )
             except Exception:

@@ -18,7 +18,6 @@ import asyncio
 import logging
 import os
 import time
-import uuid
 from typing import Any, Dict, Optional
 
 from google.adk.tools import ToolContext
@@ -132,9 +131,10 @@ def before_tool_callback(
     # ── Source-level context budget for Exa ───────────────────────────
     _enforce_exa_budget(tool_name, args)
 
-    # ── Per-invocation unique ID (used for state keys below) ────────
-    invocation_id = str(uuid.uuid4())[:8]
-    tool_context.state["_tool_invocation_id"] = invocation_id
+    # Use function_call_id as the per-invocation key.  ADK assigns a
+    # unique function_call_id to every tool invocation, so parallel calls
+    # never collide — unlike shared session-state keys.
+    call_id = getattr(tool_context, "function_call_id", "") or tool_name
 
     # ── Per-provider rate limiting ────────────────────────────────────
     provider = _get_provider(tool_name)
@@ -145,8 +145,8 @@ def before_tool_callback(
         # The semaphore still provides backpressure when concurrency is high.
         try:
             sem.acquire_nowait()
-            # Use per-invocation key so parallel calls don't overwrite each other
-            tool_context.state[f"_provider_sem_{invocation_id}"] = provider
+            # Key by function_call_id — unique per invocation, no overwrites
+            tool_context.state[f"_provider_sem_{call_id}"] = provider
             logger.debug(
                 "Provider semaphore acquired: %s (%d/%d slots used)",
                 provider,
@@ -162,7 +162,7 @@ def before_tool_callback(
             )
 
     # ── Dashboard: track tool start ───────────────────────────────────
-    tool_context.state[f"_tool_start_time_{invocation_id}"] = time.time()
+    tool_context.state[f"_tool_start_time_{call_id}"] = time.time()
     _c = get_active_collector()
     if _c:
         agent_name = getattr(tool_context, "agent_name", "researcher")
