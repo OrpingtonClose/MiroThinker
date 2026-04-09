@@ -189,6 +189,36 @@ def get_corpus_text(state: dict) -> str:
     return ""
 
 
+def run_swarm_synthesis(state: dict) -> str:
+    """Run Flock gossip-based swarm synthesis on the corpus.
+
+    For small corpora (≤GOSSIP_THRESHOLD conditions), runs a single
+    Flock synthesis pass.  For larger corpora, runs the 3-phase gossip
+    swarm: per-angle workers → peer refinement → queen merge.
+
+    Returns the synthesised report text, or empty string if the corpus
+    is empty or Flock is unavailable.
+    """
+    key = state.get("_corpus_key")
+    if not key or key not in _corpus_stores:
+        logger.warning("run_swarm_synthesis: no corpus found for key=%s", key)
+        return ""
+
+    corpus = _corpus_stores[key]
+    user_query = state.get("user_query", "")
+
+    logger.info(
+        "Starting swarm synthesis (corpus has %d conditions, query=%.80s)",
+        corpus.count(), user_query,
+    )
+    result = corpus.synthesise(user_query)
+    logger.info(
+        "Swarm synthesis complete: %d chars produced",
+        len(result),
+    )
+    return result
+
+
 def synthesis_condition_callback(
     callback_context: CallbackContext,
 ) -> Optional[genai_types.Content]:
@@ -244,6 +274,10 @@ def cleanup_corpus(state: dict) -> None:
         logger.info("Cleaned up CorpusStore for key=%s", key)
     # Clear corpus-related state keys so _init_pipeline_state
     # re-initialises cleanly on session reuse.
+    # ADK State objects don't support .pop(); use del with guard.
     for k in ("_corpus_key", "_corpus_iteration", "research_findings",
               "corpus_for_synthesis", "loop_synthesis"):
-        state.pop(k, None)
+        try:
+            del state[k]
+        except (KeyError, TypeError):
+            pass
