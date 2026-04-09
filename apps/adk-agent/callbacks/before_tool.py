@@ -7,16 +7,16 @@ Before-tool callback — source-level context budget + per-provider rate limitin
 What this callback does:
 1. **Source-level context budget for Exa** — injects ``textMaxCharacters`` and
    ``numResults`` into every Exa tool call so results are bounded at the source.
-2. **Per-provider rate limiting** — separate asyncio.Semaphore per MCP provider
+2. **Per-provider rate limiting** — separate threading.Semaphore per MCP provider
    (Brave, Exa, Firecrawl) so one slow provider doesn't block others.
 3. **Dashboard tool_start tracking** — records each tool call in the collector.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
+import threading
 import time
 from typing import Any, Dict, Optional
 
@@ -30,14 +30,16 @@ logger = logging.getLogger(__name__)
 # Separate semaphores prevent one slow provider from blocking others.
 # Default concurrency of 3 per provider is generous — most providers
 # handle 3 concurrent requests without rate-limiting.
+# We use threading.Semaphore (not asyncio.Semaphore) because the
+# before_tool_callback is synchronous and needs non-blocking acquire.
 _BRAVE_CONCURRENCY = int(os.environ.get("BRAVE_CONCURRENCY", "3"))
 _EXA_CONCURRENCY = int(os.environ.get("EXA_CONCURRENCY", "3"))
 _FIRECRAWL_CONCURRENCY = int(os.environ.get("FIRECRAWL_CONCURRENCY", "3"))
 
-_provider_semaphores: Dict[str, asyncio.Semaphore] = {
-    "brave": asyncio.Semaphore(_BRAVE_CONCURRENCY),
-    "exa": asyncio.Semaphore(_EXA_CONCURRENCY),
-    "firecrawl": asyncio.Semaphore(_FIRECRAWL_CONCURRENCY),
+_provider_semaphores: Dict[str, threading.Semaphore] = {
+    "brave": threading.Semaphore(_BRAVE_CONCURRENCY),
+    "exa": threading.Semaphore(_EXA_CONCURRENCY),
+    "firecrawl": threading.Semaphore(_FIRECRAWL_CONCURRENCY),
 }
 
 # Map tool names to provider keys
@@ -140,21 +142,19 @@ def before_tool_callback(
     provider = _get_provider(tool_name)
     if provider:
         sem = _provider_semaphores[provider]
-        # Non-blocking acquire attempt — if semaphore is full, log a warning
+        # Non-blocking acquire — if semaphore is full, log a warning
         # but proceed anyway (we don't want to deadlock the pipeline).
-        # The semaphore still provides backpressure when concurrency is high.
-        try:
-            sem.acquire_nowait()
+        # threading.Semaphore.acquire(blocking=False) returns True on
+        # success, False when the semaphore cannot be acquired.
+        acquired = sem.acquire(blocking=False)
+        if acquired:
             # Key by function_call_id — unique per invocation, no overwrites
             tool_context.state[f"_provider_sem_{call_id}"] = provider
             logger.debug(
-                "Provider semaphore acquired: %s (%d/%d slots used)",
+                "Provider semaphore acquired: %s",
                 provider,
-                _provider_semaphores[provider]._value,
-                {"brave": _BRAVE_CONCURRENCY, "exa": _EXA_CONCURRENCY,
-                 "firecrawl": _FIRECRAWL_CONCURRENCY}[provider],
             )
-        except Exception:
+        else:
             # Semaphore full — proceed without holding it
             logger.debug(
                 "Provider semaphore full for %s, proceeding without limit",

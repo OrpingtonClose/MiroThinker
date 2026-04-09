@@ -41,16 +41,47 @@ _proxy_lock = threading.Lock()
 
 
 def _clean_request(data: dict) -> dict:
-    """Strip fields from the request that Venice/compatible providers reject."""
-    data.pop("response_format", None)
-    return data
+    """Strip fields from the request that Venice/compatible providers reject.
+
+    Also stash the ``response_format`` schema so we can use it to wrap
+    plain-text responses back into the expected JSON structure.
+    Returns (cleaned_data, original_schema_or_None).
+    """
+    schema = data.pop("response_format", None)
+    return data, schema
 
 
-def _clean_response(data: dict) -> dict:
+def _wrap_content_as_json(content: str, schema: dict | None) -> str:
+    """If Flock expected json_schema output, wrap plain-text into it.
+
+    Flock's C++ ``ExtractCompletionOutput`` does
+    ``nlohmann::json::parse(content)`` and then indexes into the result
+    as an object.  Without ``response_format`` the model returns plain
+    text, which Flock can't parse.  We wrap it here.
+    """
+    if not schema:
+        return content
+
+    # Already a JSON *object*?  Return as-is.
+    # (Flock needs an object — a bare number/string/array won't work.)
+    try:
+        parsed = json.loads(content)
+        if isinstance(parsed, dict):
+            return content
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # Wrap in the expected schema: {"items": ["<content>"]}
+    # This matches the default Flock schema for llm_complete.
+    return json.dumps({"items": [content]})
+
+
+def _clean_response(data: dict, schema: dict | None = None) -> dict:
     """Normalise the response to strict OpenAI format for Flock.
 
     Venice adds extra fields (venice_parameters, reasoning_content, etc.)
-    that Flock's C++ JSON parser chokes on.  We strip them here.
+    that Flock's C++ JSON parser chokes on.  We strip them here and
+    ensure the content matches the expected json_schema structure.
     """
     # Remove top-level Venice extensions
     data.pop("venice_parameters", None)
@@ -66,6 +97,10 @@ def _clean_response(data: dict) -> dict:
             msg.pop("name", None)
         if not msg.get("tool_calls"):
             msg.pop("tool_calls", None)
+
+        # Wrap plain-text content in expected JSON schema
+        if "content" in msg and isinstance(msg["content"], str):
+            msg["content"] = _wrap_content_as_json(msg["content"], schema)
 
     # Ensure usage fields are integers (some providers return strings)
     usage = data.get("usage", {})
@@ -94,11 +129,12 @@ async def _proxy_handler(request: web.Request) -> web.Response:
         if k.lower() not in ("host", "content-length", "transfer-encoding")
     }
 
+    original_schema = None
     if body:
         try:
             data = json.loads(body)
             logger.debug("Flock request to %s: %s", request.path, json.dumps(data)[:500])
-            data = _clean_request(data)
+            data, original_schema = _clean_request(data)
             body = json.dumps(data).encode()
             headers["Content-Length"] = str(len(body))
         except (json.JSONDecodeError, TypeError):
@@ -120,7 +156,7 @@ async def _proxy_handler(request: web.Request) -> web.Response:
                 try:
                     resp_data = json.loads(resp_body)
                     logger.debug("Upstream response: %s", json.dumps(resp_data)[:500])
-                    resp_data = _clean_response(resp_data)
+                    resp_data = _clean_response(resp_data, original_schema)
                     resp_body = json.dumps(resp_data).encode()
                 except (json.JSONDecodeError, TypeError):
                     pass  # return raw body if not JSON
@@ -132,7 +168,9 @@ async def _proxy_handler(request: web.Request) -> web.Response:
             )
 
 
-def _run_proxy(real_base_url: str, port: int) -> None:
+def _run_proxy(
+    real_base_url: str, port: int, ready_event: threading.Event,
+) -> None:
     """Run the proxy server in a background thread."""
     import asyncio
 
@@ -148,18 +186,27 @@ def _run_proxy(real_base_url: str, port: int) -> None:
             "Flock proxy started on http://127.0.0.1:%d -> %s",
             port, real_base_url,
         )
+        # Signal the main thread that we're ready
+        ready_event.set()
         # Keep running forever
         await asyncio.Event().wait()
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(_start())
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_start())
+    except Exception:
+        logger.exception("Flock proxy failed to start")
+        # Signal anyway so the main thread doesn't hang — it will check
+        # _proxy_started which remains False on failure.
+        ready_event.set()
 
 
 def start_flock_proxy(real_base_url: str) -> str:
     """Start the Flock proxy if not already running.
 
     Returns the proxy base URL (e.g. ``http://127.0.0.1:18199``).
+    Raises RuntimeError if the proxy fails to start within 5 seconds.
     """
     global _proxy_started
 
@@ -167,18 +214,34 @@ def start_flock_proxy(real_base_url: str) -> str:
         if _proxy_started:
             return f"http://127.0.0.1:{_FLOCK_PROXY_PORT}"
 
+        ready_event = threading.Event()
         t = threading.Thread(
             target=_run_proxy,
-            args=(real_base_url, _FLOCK_PROXY_PORT),
+            args=(real_base_url, _FLOCK_PROXY_PORT, ready_event),
             daemon=True,
             name="flock-proxy",
         )
         t.start()
-        _proxy_started = True
 
-        # Brief wait for server to bind
-        import time
-        time.sleep(0.3)
+        # Wait for the proxy to actually bind and be ready
+        if not ready_event.wait(timeout=5.0):
+            logger.error(
+                "Flock proxy failed to start within 5 seconds"
+            )
+            raise RuntimeError(
+                "Flock proxy failed to start — check logs for details"
+            )
+
+        # Verify the thread is still alive (it might have crashed after
+        # setting ready_event in the except handler)
+        if not t.is_alive():
+            logger.error("Flock proxy thread died during startup")
+            raise RuntimeError(
+                "Flock proxy thread died during startup — "
+                "check logs for details"
+            )
+
+        _proxy_started = True
 
     proxy_url = f"http://127.0.0.1:{_FLOCK_PROXY_PORT}"
     logger.info("Flock proxy available at %s", proxy_url)
