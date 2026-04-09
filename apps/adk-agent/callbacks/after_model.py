@@ -53,16 +53,17 @@ def after_model_callback(
         content = llm_response.content
         if hasattr(content, "parts") and content.parts:
             for part in content.parts:
-                if hasattr(part, "text") and part.text:
-                    response_text += part.text
                 # Capture reasoning/thinking content from reasoning models.
-                # Different providers expose this differently:
-                #   - thought/thinking attribute on the part
-                #   - reasoning_content in the part metadata
+                # When part.thought is True, the part's .text contains
+                # reasoning content — capture it separately so it doesn't
+                # bloat the conversation context.
                 if hasattr(part, "thought") and part.thought:
-                    reasoning_text += str(part.thought)
+                    if hasattr(part, "text") and part.text:
+                        reasoning_text += part.text
                 elif hasattr(part, "thinking") and part.thinking:
                     reasoning_text += str(part.thinking)
+                elif hasattr(part, "text") and part.text:
+                    response_text += part.text
 
     if not response_text and not reasoning_text:
         return None

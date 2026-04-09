@@ -22,7 +22,7 @@ from typing import Any, Dict, Optional
 
 from google.adk.tools import ToolContext
 
-from callbacks.before_tool import _get_provider, _provider_semaphores
+from callbacks.before_tool import _provider_semaphores
 from dashboard import get_active_collector
 
 logger = logging.getLogger(__name__)
@@ -105,15 +105,18 @@ def after_tool_callback(
     result_text = str(tool_response) if tool_response is not None else ""
 
     # ── Release provider semaphore ───────────────────────────────────
-    provider = _get_provider(tool_name)
-    if provider:
-        sem_key = f"_provider_sem_{provider}"
-        if tool_context.state.get(sem_key):
-            _provider_semaphores[provider].release()
-            tool_context.state[sem_key] = False
+    # Use the per-invocation key set in before_tool_callback so parallel
+    # tool calls don't interfere with each other's semaphore tracking.
+    invocation_id = tool_context.state.get("_tool_invocation_id", "")
+    if invocation_id:
+        sem_key = f"_provider_sem_{invocation_id}"
+        held_provider = tool_context.state.get(sem_key, "")
+        if held_provider:
+            _provider_semaphores[held_provider].release()
+            tool_context.state[sem_key] = ""
 
     # ── Dashboard: track tool end ────────────────────────────────────
-    start_time = tool_context.state.get("_tool_start_time", 0)
+    start_time = tool_context.state.get(f"_tool_start_time_{invocation_id}", 0) if invocation_id else 0
     duration = time.time() - start_time if start_time else 0.0
     _c = get_active_collector()
     if _c:
