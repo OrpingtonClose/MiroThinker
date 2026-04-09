@@ -11,9 +11,10 @@ The pipeline architecture separates reasoning from tool execution:
 
     SequentialAgent("mirothinker_pipeline")
     └── LoopAgent("research_loop", max_iterations=3)
-    │     ├── thinker   → uncensored reasoning, no web tools
-    │     └── researcher → tool-capable, calls executor
-    └── synthesiser  → uncensored report writing, no tools
+    │     ├── thinker           → uncensored reasoning, no web tools
+    │     ├── researcher        → tool-capable, calls executor
+    │     └── loop_synthesiser  → fermentation, output re-ingested into corpus
+    └── synthesiser  → final uncensored report writing, no tools
 
 Usage:
     uvicorn server:app --host 0.0.0.0 --port 8000 --reload
@@ -63,6 +64,7 @@ app.add_middleware(
 adk_agent = ADKAgent(
     adk_agent=pipeline_agent,
     app_name="mirothinker_adk",
+    execution_timeout_seconds=1200,  # 20 min — pipeline needs time for 3 loop iterations + synthesis
 )
 
 # Mount the AG-UI SSE endpoint at root

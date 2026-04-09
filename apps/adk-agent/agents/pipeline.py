@@ -2,20 +2,37 @@
 # This source code is licensed under the Apache 2.0 License.
 
 """
-Blackboard research pipeline: LoopAgent(Thinker → Researcher) + Synthesiser.
+Blackboard research pipeline: LoopAgent(Thinker → Researcher → Ferment) + Synthesiser.
 
 Uses ADK's ``LoopAgent`` to implement an iterative research cycle where
 context grows richer on every iteration, then a ``SequentialAgent`` to
-run the synthesiser after the loop exits.
+run the final synthesiser after the loop exits.
 
 Architecture::
 
     SequentialAgent("mirothinker_pipeline")
     └── LoopAgent("research_loop", max_iterations=3)
-    │     ├── Agent("thinker")       # uncensored, no tools
-    │     └── Agent("researcher")    # tool-capable, calls executor
-    │           └── after_agent_callback: condition_manager
-    └── Agent("synthesiser")            # uncensored, no tools
+    │     ├── Agent("thinker")           # uncensored, no tools
+    │     ├── Agent("researcher")        # tool-capable, calls executor
+    │     │     └── after_agent_callback: researcher_condition_callback
+    │     └── Agent("loop_synthesiser")  # fermentation step
+    │           └── after_agent_callback: synthesis_condition_callback
+    └── Agent("synthesiser")                # final report, uncensored
+
+The loop implements a 3-phase cycle per iteration:
+
+  1. **Expansion** (researcher): brute-force tool execution — algorithmic
+     factory line of enrichment.  Flock atomises, scores, and deduplicates
+     the raw findings.
+
+  2. **Fermentation** (loop_synthesiser): quasi-human analysis that
+     connects themes, surfaces contradictions, and builds causal chains.
+     Its output is re-ingested into the CorpusStore as just another input
+     — no special status, scored and deduplicated equally with raw findings.
+
+  3. **Strategy** (thinker): reads the enriched corpus (now containing
+     both raw findings AND synthesised insights), reasons about gaps,
+     and plans the next expansion round.
 
 Data flows via session state (blackboard):
 
@@ -34,11 +51,16 @@ Data flows via session state (blackboard):
     stores them in the DuckDB corpus, and overwrites the state keys with
     structured formatted text for the thinker and synthesiser.
 
-  - **Synthesiser** (runs once after the loop) reads
+  - **Loop synthesiser** reads ``{corpus_for_synthesis}`` and produces
+    structured analysis.  Its ``after_agent_callback`` re-ingests the
+    output into the CorpusStore — the synthesis becomes fertiliser for
+    the next expansion round.
+
+  - **Final synthesiser** (runs once after the loop) reads
     ``{corpus_for_synthesis}`` — all conditions formatted with confidence
     and verification metadata — and writes the polished report.
 
-The thinker and synthesiser NEVER touch tool format — they are pure
+The thinker and synthesisers NEVER touch tool format — they are pure
 text-in/text-out LLM agents using the uncensored model.  Only the
 researcher and executor need tool-calling capability.
 """
@@ -56,6 +78,7 @@ from google.genai import types as genai_types
 from agents.thinker import thinker_agent
 from agents.researcher import researcher_agent
 from agents.synthesiser import synthesiser_agent
+from agents.loop_synthesiser import loop_synthesiser_agent
 from callbacks.condition_manager import build_corpus_state, cleanup_corpus, init_corpus
 
 logger = logging.getLogger(__name__)
@@ -94,13 +117,17 @@ def _cleanup_pipeline_state(
 
 
 # ---------------------------------------------------------------------------
-# Inner loop: thinker reasons → researcher executes → repeat
+# Inner loop: thinker → researcher → fermentation → repeat
 # The thinker escalates when it judges evidence is sufficient.
+# Each iteration: expansion (researcher) → fermentation (loop_synthesiser)
+# → strategy (thinker).  The loop_synthesiser's output is re-ingested
+# into the corpus so synthesised insights are treated equally to raw
+# findings by Flock's scoring, dedup, and contradiction detection.
 # ---------------------------------------------------------------------------
 research_loop = LoopAgent(
     name="research_loop",
     max_iterations=3,
-    sub_agents=[thinker_agent, researcher_agent],
+    sub_agents=[thinker_agent, researcher_agent, loop_synthesiser_agent],
 )
 
 # ---------------------------------------------------------------------------
@@ -109,9 +136,10 @@ research_loop = LoopAgent(
 pipeline_agent = SequentialAgent(
     name="mirothinker_pipeline",
     description=(
-        "Blackboard research pipeline: LoopAgent(thinker → researcher) runs "
-        "iteratively with ever-expanding context until the thinker signals "
-        "EVIDENCE_SUFFICIENT, then the synthesiser writes the final report."
+        "Blackboard research pipeline: LoopAgent(thinker → researcher → "
+        "loop_synthesiser) runs iteratively with ever-expanding context. "
+        "Each round: brute expansion → intelligent fermentation → strategy. "
+        "The final synthesiser writes the definitive report after the loop."
     ),
     sub_agents=[research_loop, synthesiser_agent],
     before_agent_callback=_init_pipeline_state,
