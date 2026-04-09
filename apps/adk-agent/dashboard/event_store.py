@@ -45,7 +45,9 @@ def _get_writer() -> sqlite3.Connection:
     global _writer_conn
     with _writer_lock:
         if _writer_conn is None:
-            _writer_conn = sqlite3.connect(_DB_PATH, timeout=10)
+            _writer_conn = sqlite3.connect(
+                _DB_PATH, timeout=10, check_same_thread=False
+            )
             _writer_conn.execute("PRAGMA journal_mode=WAL")
             _writer_conn.execute("PRAGMA synchronous=NORMAL")
             _writer_conn.execute("PRAGMA busy_timeout=5000")
@@ -104,12 +106,13 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 def insert_run(session_id: str, query: str) -> None:
     """Record the start of a new pipeline run."""
     conn = _get_writer()
-    conn.execute(
-        "INSERT OR REPLACE INTO runs (session_id, query, started_at, status) "
-        "VALUES (?, ?, ?, 'running')",
-        (session_id, query, time.time()),
-    )
-    conn.commit()
+    with _writer_lock:
+        conn.execute(
+            "INSERT OR REPLACE INTO runs (session_id, query, started_at, status) "
+            "VALUES (?, ?, ?, 'running')",
+            (session_id, query, time.time()),
+        )
+        conn.commit()
 
 
 def insert_event(
@@ -122,23 +125,25 @@ def insert_event(
 ) -> None:
     """Append an event to the log."""
     conn = _get_writer()
-    conn.execute(
-        "INSERT INTO events (session_id, event_type, agent, phase, data_json, timestamp) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (session_id, event_type, agent, phase, json.dumps(data, default=str), timestamp),
-    )
-    conn.commit()
+    with _writer_lock:
+        conn.execute(
+            "INSERT INTO events (session_id, event_type, agent, phase, data_json, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, event_type, agent, phase, json.dumps(data, default=str), timestamp),
+        )
+        conn.commit()
 
 
 def insert_snapshot(session_id: str, snapshot: dict[str, Any]) -> None:
     """Write a periodic snapshot (called by the collector)."""
     conn = _get_writer()
-    conn.execute(
-        "INSERT INTO snapshots (session_id, snapshot_json, timestamp) "
-        "VALUES (?, ?, ?)",
-        (session_id, json.dumps(snapshot, default=str), time.time()),
-    )
-    conn.commit()
+    with _writer_lock:
+        conn.execute(
+            "INSERT INTO snapshots (session_id, snapshot_json, timestamp) "
+            "VALUES (?, ?, ?)",
+            (session_id, json.dumps(snapshot, default=str), time.time()),
+        )
+        conn.commit()
 
 
 def finalize_run(
@@ -149,12 +154,13 @@ def finalize_run(
 ) -> None:
     """Mark a run as complete and store the finalized data."""
     conn = _get_writer()
-    conn.execute(
-        "UPDATE runs SET status = ?, finalized_at = ?, elapsed_secs = ?, result_json = ? "
-        "WHERE session_id = ?",
-        (status, time.time(), elapsed_secs, result_json, session_id),
-    )
-    conn.commit()
+    with _writer_lock:
+        conn.execute(
+            "UPDATE runs SET status = ?, finalized_at = ?, elapsed_secs = ?, result_json = ? "
+            "WHERE session_id = ?",
+            (status, time.time(), elapsed_secs, result_json, session_id),
+        )
+        conn.commit()
 
 
 # ── Reader API (called from SSE endpoint, thread-safe) ───────────
