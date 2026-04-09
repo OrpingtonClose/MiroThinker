@@ -552,9 +552,18 @@ class CorpusStore:
                  - 0.15*fabrication_risk - staleness_penalty
                  + cross_ref_boost
 
+        Recomputes every battery run so that changes to staleness_penalty
+        and cross_ref_boost from earlier algorithms are reflected.
+
         Returns number of conditions updated.
         """
-        updated = self.conn.execute(
+        # Count how many will be updated before running
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM conditions WHERE scored_at != ''"
+        ).fetchone()[0]
+        if count == 0:
+            return 0
+        self.conn.execute(
             """UPDATE conditions
                SET composite_quality = (
                    0.25 * confidence
@@ -568,16 +577,12 @@ class CorpusStore:
                    + cross_ref_boost
                ),
                processing_status = CASE
-                   WHEN processing_status = 'scored' THEN 'analysed'
+                   WHEN processing_status IN ('raw', 'scored') THEN 'analysed'
                    ELSE processing_status
                END
                WHERE scored_at != ''
-                 AND composite_quality < 0.0
             """
-        ).fetchone()
-        count = self.conn.execute(
-            "SELECT changes()"
-        ).fetchone()[0]
+        )
         logger.info("Composite quality: updated %d conditions", count)
         return count
 
@@ -591,6 +596,14 @@ class CorpusStore:
 
         Returns number of conditions flagged for expansion.
         """
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE composite_quality >= 0.0 AND composite_quality < ? "
+            "AND expansion_strategy = 'none'",
+            [threshold],
+        ).fetchone()[0]
+        if count == 0:
+            return 0
         self.conn.execute(
             """UPDATE conditions
                SET expansion_strategy = 'exa_search',
@@ -604,7 +617,6 @@ class CorpusStore:
             """,
             [threshold],
         )
-        count = self.conn.execute("SELECT changes()").fetchone()[0]
         if count:
             logger.info(
                 "Quality gate: flagged %d conditions for expansion "
@@ -621,6 +633,14 @@ class CorpusStore:
 
         Returns number flagged.
         """
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE specificity_score < 0.3 "
+            "AND (source_url = '' OR source_url IS NULL) "
+            "AND expansion_strategy = 'none' AND scored_at != ''"
+        ).fetchone()[0]
+        if count == 0:
+            return 0
         self.conn.execute(
             """UPDATE conditions
                SET expansion_strategy = 'brave_deep',
@@ -633,7 +653,6 @@ class CorpusStore:
                  AND scored_at != ''
             """
         )
-        count = self.conn.execute("SELECT changes()").fetchone()[0]
         if count:
             logger.info(
                 "Specificity gate: flagged %d vague conditions "
@@ -753,7 +772,11 @@ class CorpusStore:
                  AND source_url IS NOT NULL
             """
         )
-        count = self.conn.execute("SELECT changes()").fetchone()[0]
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE scored_at != '' AND source_url != '' "
+            "AND source_url IS NOT NULL"
+        ).fetchone()[0]
         if count:
             logger.info(
                 "Source diversity: adjusted %d conditions", count,
@@ -982,7 +1005,9 @@ class CorpusStore:
         """
         dupes = self.conn.execute(
             """SELECT sf.condition_a, c1.fact, c1.source_url,
-                      sf.condition_b, c2.fact, c2.source_url
+                      c1.composite_quality AS quality_a,
+                      sf.condition_b, c2.fact, c2.source_url,
+                      c2.composite_quality AS quality_b
                FROM similarity_flags sf
                JOIN conditions c1 ON sf.condition_a = c1.id
                JOIN conditions c2 ON sf.condition_b = c2.id
@@ -996,7 +1021,7 @@ class CorpusStore:
             return 0
 
         merge_count = 0
-        for id_a, fact_a, url_a, id_b, fact_b, url_b in dupes:
+        for id_a, fact_a, url_a, q_a, id_b, fact_b, url_b, q_b in dupes:
             try:
                 merged_fact = self._flock_complete(
                     "Merge these two near-duplicate findings into "
@@ -1009,22 +1034,28 @@ class CorpusStore:
                 if not merged_fact or not merged_fact.strip():
                     continue
 
-                # Update the higher-scored condition with merged text
-                # Mark the lower-scored one as merged
+                # Keep the higher-scored condition, merge away the lower
+                if (q_b or 0.0) > (q_a or 0.0):
+                    survivor_id, merged_id = id_b, id_a
+                    best_url = url_b or url_a
+                else:
+                    survivor_id, merged_id = id_a, id_b
+                    best_url = url_a or url_b
+
                 self.conn.execute(
                     "UPDATE conditions SET fact = ?, "
                     "source_url = CASE "
                     "  WHEN source_url = '' THEN ? "
                     "  ELSE source_url END "
                     "WHERE id = ?",
-                    [merged_fact.strip(), url_b or url_a, id_a],
+                    [merged_fact.strip(), best_url, survivor_id],
                 )
                 self.conn.execute(
                     "UPDATE conditions "
                     "SET processing_status = 'merged', "
                     "    duplication_score = 1.0 "
                     "WHERE id = ?",
-                    [id_b],
+                    [merged_id],
                 )
                 merge_count += 1
             except Exception:
@@ -1051,6 +1082,12 @@ class CorpusStore:
 
         Returns number marked ready.
         """
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE scored_at != '' "
+            "AND processing_status NOT IN ('merged', 'ready') "
+            "AND expansion_strategy = 'none'"
+        ).fetchone()[0]
         self.conn.execute(
             """UPDATE conditions
                SET processing_status = 'ready'
@@ -1059,7 +1096,6 @@ class CorpusStore:
                  AND expansion_strategy = 'none'
             """
         )
-        count = self.conn.execute("SELECT changes()").fetchone()[0]
         logger.info("Marked %d conditions as ready for swarm", count)
         return count
 
