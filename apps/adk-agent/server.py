@@ -322,7 +322,7 @@ adk_app = App(
 adk_agent = ADKAgent.from_app(
     adk_app,
     user_id="server_user",
-    execution_timeout_seconds=1200,  # 20 min — pipeline needs time for 3 loop iterations + synthesis
+    execution_timeout_seconds=86400,  # 24h — AG-UI is a transport layer, not an execution controller.  The pipeline controls its own lifecycle via LoopAgent max_iterations and the EVIDENCE_SUFFICIENT sentinel.
 )
 
 # Mount the AG-UI SSE endpoint at root

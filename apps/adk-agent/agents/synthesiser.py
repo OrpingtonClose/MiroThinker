@@ -19,6 +19,8 @@ from __future__ import annotations
 from google.adk import Agent
 
 from agents.model_config import build_model
+from callbacks.before_model import before_model_callback
+from callbacks.after_model import after_model_callback
 
 SYNTHESISER_INSTRUCTION = """\
 You are the final-stage synthesiser for an intelligence-gathering \
@@ -68,4 +70,6 @@ synthesiser_agent = Agent(
     ),
     instruction=SYNTHESISER_INSTRUCTION,
     tools=[],
+    before_model_callback=before_model_callback,
+    after_model_callback=after_model_callback,
 )

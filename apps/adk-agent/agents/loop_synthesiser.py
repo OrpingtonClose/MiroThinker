@@ -26,6 +26,8 @@ from __future__ import annotations
 from google.adk import Agent
 
 from agents.model_config import build_model
+from callbacks.before_model import before_model_callback
+from callbacks.after_model import after_model_callback
 from callbacks.condition_manager import synthesis_condition_callback
 
 LOOP_SYNTHESISER_INSTRUCTION = """\
@@ -72,5 +74,7 @@ loop_synthesiser_agent = Agent(
     instruction=LOOP_SYNTHESISER_INSTRUCTION,
     tools=[],
     output_key="loop_synthesis",
+    before_model_callback=before_model_callback,
+    after_model_callback=after_model_callback,
     after_agent_callback=synthesis_condition_callback,
 )

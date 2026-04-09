@@ -33,6 +33,8 @@ from __future__ import annotations
 from google.adk import Agent
 
 from agents.model_config import build_model
+from callbacks.before_model import before_model_callback
+from callbacks.after_model import after_model_callback
 from callbacks.thinker_escalate import thinker_escalate_callback
 from tools.mcp_tools import get_tools
 
@@ -139,5 +141,7 @@ thinker_agent = Agent(
     instruction=THINKER_INSTRUCTION,
     tools=get_tools(["qualitative-research"]),
     output_key="research_strategy",
+    before_model_callback=before_model_callback,
+    after_model_callback=after_model_callback,
     after_agent_callback=thinker_escalate_callback,
 )
