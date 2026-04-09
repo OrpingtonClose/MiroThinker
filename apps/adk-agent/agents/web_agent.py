@@ -140,10 +140,6 @@ your next search based on what you learned. This is intentional — sequential \
 execution lets you adapt queries based on prior results, avoiding redundant \
 or poorly-scoped parallel searches.
 
-For legitimate multi-query needs (e.g. "compare these 6 companies"), use \
-the `exa_multi_search` batch tool which runs queries in parallel internally \
-but returns a single unified result.
-
 CONTEXT BUDGET:
 Older invocations are automatically trimmed from context by ContextFilterPlugin. \
 Results are NOT compressed — you receive raw tool output. This means YOU must \
