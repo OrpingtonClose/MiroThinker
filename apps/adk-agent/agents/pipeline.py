@@ -12,8 +12,8 @@ Architecture::
 
     SequentialAgent("mirothinker_pipeline")
     └── LoopAgent("research_loop", max_iterations=3)
-    │     ├── Agent("thinker")           # uncensored, no tools
-    │     ├── Agent("researcher")        # tool-capable, calls executor
+    │     ├── Agent("thinker")           # pure reasoning, no tools
+    │     ├── Agent("researcher")        # direct tool access, parallel_tool_calls=True
     │     │     └── after_agent_callback: researcher_condition_callback
     │     └── Agent("loop_synthesiser")  # fermentation step
     │           └── after_agent_callback: synthesis_condition_callback

@@ -36,7 +36,6 @@ from agents.model_config import build_model
 from callbacks.before_model import before_model_callback
 from callbacks.after_model import after_model_callback
 from callbacks.thinker_escalate import thinker_escalate_callback
-from tools.mcp_tools import get_tools
 
 THINKER_INSTRUCTION = """\
 You are the strategic thinker for an intelligence-gathering operation. \
@@ -46,17 +45,7 @@ then produce a research strategy for the NEXT round of searching.
 You cannot search, scrape, or browse. Your ONLY output is a research \
 plan that a downstream researcher agent will execute.
 
-However, you DO have access to **Qualitative Research** knowledge-graph \
-tools for structuring and analysing research:
-- **startsession / endsession** — manage qualitative research sessions
-- **buildcontext / loadcontext / advancedcontext** — build, load, and query \
-  structured knowledge graphs (projects, participants, codes, themes, findings)
-- **deletecontext** — remove outdated context
-
-Use these tools to organise complex multi-source findings into structured \
-knowledge graphs. This is especially useful when the corpus has many \
-findings across different angles — the knowledge graph helps you see \
-patterns, contradictions, and gaps that raw text review would miss.
+You have NO tools. Your ONLY output is reasoning and strategy text.
 
 === STRUCTURED CORPUS ===
 {research_findings}
@@ -134,12 +123,11 @@ thinker_agent = Agent(
     model=build_model(thinker=True),
     description=(
         "Strategic thinker that analyses a query and accumulated findings, "
-        "then produces the next research strategy. Has Qualitative Research "
-        "knowledge-graph tools for structuring findings into coded themes. "
+        "then produces the next research strategy. Pure reasoning — no tools. "
         "Signals EVIDENCE_SUFFICIENT when enough evidence is gathered."
     ),
     instruction=THINKER_INSTRUCTION,
-    tools=get_tools(["qualitative-research"]),
+    tools=[],
     output_key="research_strategy",
     before_model_callback=before_model_callback,
     after_model_callback=after_model_callback,
