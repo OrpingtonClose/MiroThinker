@@ -100,7 +100,6 @@ def researcher_condition_callback(
 
     # Update state with structured corpus for thinker
     state["research_findings"] = corpus.format_for_thinker()
-    state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
 
     # Also store synthesiser-formatted version for the final stage
     state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
@@ -206,6 +205,9 @@ def synthesis_condition_callback(
     state = callback_context.state
     synthesis_text = state.get("loop_synthesis", "")
     if not synthesis_text or not synthesis_text.strip():
+        # Still advance the iteration counter even if synthesis is empty,
+        # so the next thinker round sees a fresh iteration number.
+        state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
         return None
 
     _ingest_text_into_corpus(state, synthesis_text, "synthesiser")
@@ -214,6 +216,12 @@ def synthesis_condition_callback(
     corpus = _get_corpus(state)
     state["research_findings"] = corpus.format_for_thinker()
     state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
+
+    # Advance iteration at the loop boundary — the synthesiser is the
+    # last agent in each LoopAgent iteration, so incrementing here
+    # ensures researcher + synthesiser from the same round share the
+    # same iteration tag.
+    state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
 
     return None  # preserve original synthesiser output
 
