@@ -17,6 +17,10 @@ What remains:
 2. **Context-length safety net** — if the estimated token count exceeds
    ``MAX_CONTEXT_TOKENS``, sets ``force_end=True`` in session state and
    injects a wrap-up instruction so the agent produces a final answer.
+3. **Hard context truncation** — if the estimated token count exceeds
+   ``HARD_CONTEXT_LIMIT``, truncates old function_response parts to stay
+   within the model's actual context window.  This prevents 400 errors
+   from providers when the model ignores the soft wrap-up instruction.
 """
 
 from __future__ import annotations
@@ -48,11 +52,26 @@ def release_llm_semaphore_if_held(state: dict) -> None:
         state["_llm_sem_held"] = False
 
 
-# Rough chars-per-token ratio for estimating context size
-_CHARS_PER_TOKEN = 4
+# Rough chars-per-token ratio for estimating context size.
+# GLM / Qwen / most modern tokenizers average ~2.8 chars/token for mixed
+# content (English prose + JSON + tool schemas).  The old value of 4 was
+# too generous and led to 400 errors when actual token counts exceeded
+# our estimate by ~1.4×.
+_CHARS_PER_TOKEN = 2.8
+
+# Fixed overhead for system prompt, tool definitions, and message framing
+# that isn't captured in the contents list.  ~15K tokens is conservative
+# for MiroThinker's multi-tool setup.
+_OVERHEAD_TOKENS = int(os.environ.get("CONTEXT_OVERHEAD_TOKENS", "15000"))
 
 # Maximum estimated tokens before forcing a final answer
 MAX_CONTEXT_TOKENS = int(os.environ.get("MAX_CONTEXT_TOKENS", "128000"))
+
+# Hard limit: truncate old function responses to stay within the model's
+# actual context window.  Set well below the provider's hard limit to
+# leave headroom for system prompt, tool definitions, and model response.
+# GLM-5.1 has a 202K hard limit; 120K target keeps us safe.
+HARD_CONTEXT_LIMIT = int(os.environ.get("HARD_CONTEXT_LIMIT", "120000"))
 
 
 def _estimate_tokens(contents: List[genai_types.Content]) -> int:
@@ -80,7 +99,7 @@ def _estimate_tokens(contents: List[genai_types.Content]) -> int:
                     resp = getattr(fr, "response", None)
                     if resp:
                         total_chars += len(str(resp))
-    return total_chars // _CHARS_PER_TOKEN
+    return int(total_chars / _CHARS_PER_TOKEN) + _OVERHEAD_TOKENS
 
 
 async def before_model_callback(
@@ -150,6 +169,22 @@ async def before_model_callback(
         )
         contents.append(force_end_msg)
 
+    # ── Hard context truncation ────────────────────────────────────────
+    # If the model ignored the soft wrap-up and context is still growing,
+    # truncate old function_response parts so the LLM call doesn't 400.
+    # Strategy: walk backwards through contents, find function_response
+    # parts, and replace their response text with a short summary marker.
+    # We keep the most recent responses intact and only trim older ones.
+    if estimated > HARD_CONTEXT_LIMIT:
+        _truncate_old_responses(contents, HARD_CONTEXT_LIMIT)
+        new_est = _estimate_tokens(contents)
+        logger.warning(
+            "Hard context truncation: %d -> %d estimated tokens "
+            "(limit %d)",
+            estimated, new_est, HARD_CONTEXT_LIMIT,
+        )
+        estimated = new_est
+
     # Record LLM start in dashboard
     _c = get_active_collector()
     if _c:
@@ -157,3 +192,52 @@ async def before_model_callback(
         _c.llm_start(agent_name, estimated)
 
     return None  # proceed with the (modified) request
+
+
+def _truncate_old_responses(
+    contents: List[genai_types.Content],
+    target_tokens: int,
+) -> None:
+    """Truncate old function_response parts to fit within *target_tokens*.
+
+    Walks backwards through the contents list, collecting indices of
+    function_response parts.  Skips the most recent 4 responses (so the
+    model has immediate context), then truncates older ones from oldest
+    to newest until the estimated token count is below the target.
+    """
+    # Collect (content_idx, part_idx, char_count) for all function_response parts
+    fr_parts: list[tuple[int, int, int]] = []
+    for ci, content in enumerate(contents):
+        if not content.parts:
+            continue
+        for pi, part in enumerate(content.parts):
+            if hasattr(part, "function_response") and part.function_response:
+                resp = getattr(part.function_response, "response", None)
+                char_count = len(str(resp)) if resp else 0
+                fr_parts.append((ci, pi, char_count))
+
+    if len(fr_parts) <= 4:
+        # Too few responses to truncate — keep them all
+        return
+
+    # Truncate from oldest, skipping the 4 most recent
+    truncatable = fr_parts[:-4]
+    current_est = _estimate_tokens(contents)
+
+    _TRUNCATION_MARKER = "[content truncated to fit context window]"
+
+    for ci, pi, char_count in truncatable:
+        if current_est <= target_tokens:
+            break
+        part = contents[ci].parts[pi]
+        fr = part.function_response
+        if fr and getattr(fr, "response", None):
+            saved_chars = char_count - len(_TRUNCATION_MARKER)
+            if saved_chars > 100:  # only truncate if meaningful savings
+                fr.response = {"result": _TRUNCATION_MARKER}
+                current_est -= saved_chars // _CHARS_PER_TOKEN
+                logger.debug(
+                    "Truncated function_response at content[%d].parts[%d] "
+                    "(saved ~%d tokens)",
+                    ci, pi, saved_chars // _CHARS_PER_TOKEN,
+                )
