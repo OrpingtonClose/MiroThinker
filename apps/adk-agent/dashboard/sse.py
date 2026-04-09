@@ -231,6 +231,110 @@ async def dashboard_html_latest(request: Request) -> HTMLResponse:
     return HTMLResponse(generate_dashboard_html(data))
 
 
+# ── Tracing REST endpoints ────────────────────────────────────────────
+
+
+async def dashboard_trace_summary(request: Request) -> JSONResponse:
+    """GET /dashboard/traces/{session_id} — compact trace summary.
+
+    Returns counts of algorithm traces, LLM traces, corpus snapshots,
+    quality regressions, and per-iteration algorithm breakdowns.
+    Designed for the improvement-loop consumer.
+    """
+    loop = asyncio.get_running_loop()
+    session_id = request.path_params.get("session_id", "")
+    try:
+        summary = await loop.run_in_executor(
+            _db_executor, event_store.get_trace_summary, session_id,
+        )
+    except Exception:
+        summary = None
+    if summary:
+        return JSONResponse(summary)
+    return JSONResponse({"error": f"No traces for {session_id}"}, status_code=404)
+
+
+async def dashboard_algorithm_traces(request: Request) -> JSONResponse:
+    """GET /dashboard/traces/{session_id}/algorithms — per-algorithm traces.
+
+    Optional query param: ?iteration=N to filter by iteration.
+    Returns the full before/after snapshots and details for each algorithm.
+    """
+    loop = asyncio.get_running_loop()
+    session_id = request.path_params.get("session_id", "")
+    iteration_str = request.query_params.get("iteration")
+    iteration = int(iteration_str) if iteration_str is not None else None
+    try:
+        traces = await loop.run_in_executor(
+            _db_executor,
+            lambda: event_store.get_algorithm_traces(session_id, iteration),
+        )
+    except Exception:
+        traces = []
+    return JSONResponse({"session_id": session_id, "traces": traces})
+
+
+async def dashboard_llm_traces(request: Request) -> JSONResponse:
+    """GET /dashboard/traces/{session_id}/llm — Flock LLM prompt/response log.
+
+    Optional query params: ?iteration=N&limit=500
+    Returns captured prompts, responses, callers, and durations.
+    """
+    loop = asyncio.get_running_loop()
+    session_id = request.path_params.get("session_id", "")
+    iteration_str = request.query_params.get("iteration")
+    iteration = int(iteration_str) if iteration_str is not None else None
+    limit = int(request.query_params.get("limit", "500"))
+    try:
+        traces = await loop.run_in_executor(
+            _db_executor,
+            lambda: event_store.get_llm_traces(session_id, iteration, limit),
+        )
+    except Exception:
+        traces = []
+    return JSONResponse({"session_id": session_id, "traces": traces})
+
+
+async def dashboard_corpus_snapshots(request: Request) -> JSONResponse:
+    """GET /dashboard/traces/{session_id}/corpus — corpus state snapshots.
+
+    Optional query param: ?iteration=N
+    Returns iteration-level corpus snapshots with status counts,
+    score summaries, and condition lists for iteration-over-iteration diffs.
+    """
+    loop = asyncio.get_running_loop()
+    session_id = request.path_params.get("session_id", "")
+    iteration_str = request.query_params.get("iteration")
+    iteration = int(iteration_str) if iteration_str is not None else None
+    try:
+        snaps = await loop.run_in_executor(
+            _db_executor,
+            lambda: event_store.get_corpus_snapshots(session_id, iteration),
+        )
+    except Exception:
+        snaps = []
+    return JSONResponse({"session_id": session_id, "snapshots": snaps})
+
+
+async def dashboard_quality_regressions(request: Request) -> JSONResponse:
+    """GET /dashboard/traces/{session_id}/regressions — quality regression flags.
+
+    Optional query param: ?severity=warning (filters to warning+critical)
+    Returns flagged quality decreases after algorithm runs.
+    """
+    loop = asyncio.get_running_loop()
+    session_id = request.path_params.get("session_id", "")
+    severity = request.query_params.get("severity", "info")
+    try:
+        regs = await loop.run_in_executor(
+            _db_executor,
+            lambda: event_store.get_quality_regressions(session_id, severity),
+        )
+    except Exception:
+        regs = []
+    return JSONResponse({"session_id": session_id, "regressions": regs})
+
+
 def mount_dashboard_routes(app: FastAPI) -> None:
     """Mount all dashboard endpoints on the FastAPI app."""
     app.add_api_route("/dashboard/stream", dashboard_stream, methods=["GET"])
@@ -239,4 +343,26 @@ def mount_dashboard_routes(app: FastAPI) -> None:
     app.add_api_route("/dashboard/run/{session_id}", dashboard_run_detail, methods=["GET"])
     app.add_api_route("/dashboard/html/{session_id}", dashboard_html, methods=["GET"])
     app.add_api_route("/dashboard/html", dashboard_html_latest, methods=["GET"])
-    logger.info("Dashboard routes mounted at /dashboard/*")
+
+    # Tracing endpoints (for after-run improvement loops)
+    app.add_api_route(
+        "/dashboard/traces/{session_id}",
+        dashboard_trace_summary, methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/traces/{session_id}/algorithms",
+        dashboard_algorithm_traces, methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/traces/{session_id}/llm",
+        dashboard_llm_traces, methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/traces/{session_id}/corpus",
+        dashboard_corpus_snapshots, methods=["GET"],
+    )
+    app.add_api_route(
+        "/dashboard/traces/{session_id}/regressions",
+        dashboard_quality_regressions, methods=["GET"],
+    )
+    logger.info("Dashboard routes mounted at /dashboard/* (including tracing endpoints)")

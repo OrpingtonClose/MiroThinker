@@ -45,6 +45,15 @@ def _ingest_text_into_corpus(
     corpus = _get_corpus(state)
     iteration = state.get("_corpus_iteration", 0)
 
+    # Set tracing context so Flock LLM calls and algorithm traces
+    # are tagged with the correct session and iteration.
+    _c = get_active_collector()
+    if _c:
+        corpus.set_trace_context(
+            session_id=_c.session_id,
+            iteration=iteration,
+        )
+
     ids = corpus.ingest_raw(
         raw_text=text,
         source_type=source_type,
@@ -60,7 +69,6 @@ def _ingest_text_into_corpus(
             "(iteration %d, total %d)",
             admitted_count, source_type, iteration, total_count,
         )
-        _c = get_active_collector()
         if _c:
             _c.corpus_update(admitted_count, total_count, iteration)
 
@@ -80,15 +88,19 @@ def _ingest_text_into_corpus(
     )
     logger.info(
         "Algorithm battery: %d ready, %d for expansion, "
-        "%d merged, %d cluster reps",
+        "%d merged, %d cluster reps (%.0fms)",
         battery_results.get("ready", 0),
         battery_results.get("expansion_targets", 0),
         battery_results.get("merged", 0),
         battery_results.get("cluster_reps", 0),
+        battery_results.get("battery_duration_ms", 0),
     )
 
+    # Emit battery results as a dashboard event for live observability
+    if _c:
+        _c._emit("algorithm_battery", "", battery_results)
+
     # Report expansion targets to dashboard
-    _c = get_active_collector()
     if _c and battery_results.get("expansion_targets", 0):
         expansion_targets = corpus.get_expansion_targets()
         logger.info(
@@ -215,9 +227,9 @@ def get_corpus_text(state: dict) -> str:
 def run_swarm_synthesis(state: dict) -> str:
     """Run Flock gossip-based swarm synthesis on the corpus.
 
-    For small corpora (≤GOSSIP_THRESHOLD conditions), runs a single
+    For small corpora (<=GOSSIP_THRESHOLD conditions), runs a single
     Flock synthesis pass.  For larger corpora, runs the 3-phase gossip
-    swarm: per-angle workers → peer refinement → queen merge.
+    swarm: per-angle workers -> peer refinement -> queen merge.
 
     Returns the synthesised report text, or empty string if the corpus
     is empty or Flock is unavailable.
@@ -229,6 +241,14 @@ def run_swarm_synthesis(state: dict) -> str:
 
     corpus = _corpus_stores[key]
     user_query = state.get("user_query", "")
+
+    # Ensure trace context is set for swarm LLM calls
+    _c = get_active_collector()
+    if _c:
+        corpus.set_trace_context(
+            session_id=_c.session_id,
+            iteration=state.get("_corpus_iteration", 0),
+        )
 
     logger.info(
         "Starting swarm synthesis (corpus has %d conditions, query=%.80s)",
@@ -269,6 +289,9 @@ def synthesis_condition_callback(
     corpus = _get_corpus(state)
     state["research_findings"] = corpus.format_for_thinker()
     state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
+
+    # Save post-synthesis corpus snapshot for iteration diffs
+    corpus._save_corpus_snapshot("post_synthesis")
 
     # Advance iteration at the loop boundary — the synthesiser is the
     # last agent in each LoopAgent iteration, so incrementing here
