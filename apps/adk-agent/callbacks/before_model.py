@@ -68,10 +68,12 @@ _OVERHEAD_TOKENS = int(os.environ.get("CONTEXT_OVERHEAD_TOKENS", "15000"))
 MAX_CONTEXT_TOKENS = int(os.environ.get("MAX_CONTEXT_TOKENS", "128000"))
 
 # Hard limit: truncate old function responses to stay within the model's
-# actual context window.  Set well below the provider's hard limit to
-# leave headroom for system prompt, tool definitions, and model response.
-# GLM-5.1 has a 202K hard limit; 120K target keeps us safe.
-HARD_CONTEXT_LIMIT = int(os.environ.get("HARD_CONTEXT_LIMIT", "120000"))
+# actual context window.  Must be ABOVE MAX_CONTEXT_TOKENS so the soft
+# wrap-up fires first; hard truncation is the fallback when the model
+# ignores the wrap-up and keeps making tool calls.
+# GLM-5.1 has a 202K hard limit; 160K keeps us safe while staying above
+# the 128K soft limit.
+HARD_CONTEXT_LIMIT = int(os.environ.get("HARD_CONTEXT_LIMIT", "160000"))
 
 
 def _estimate_tokens(contents: List[genai_types.Content]) -> int:
@@ -235,9 +237,9 @@ def _truncate_old_responses(
             saved_chars = char_count - len(_TRUNCATION_MARKER)
             if saved_chars > 100:  # only truncate if meaningful savings
                 fr.response = {"result": _TRUNCATION_MARKER}
-                current_est -= saved_chars // _CHARS_PER_TOKEN
+                current_est -= int(saved_chars / _CHARS_PER_TOKEN)
                 logger.debug(
                     "Truncated function_response at content[%d].parts[%d] "
                     "(saved ~%d tokens)",
-                    ci, pi, saved_chars // _CHARS_PER_TOKEN,
+                    ci, pi, int(saved_chars / _CHARS_PER_TOKEN),
                 )
