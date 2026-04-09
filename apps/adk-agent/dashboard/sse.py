@@ -53,7 +53,7 @@ async def _sse_generator(request: Request):
     works even when the async event loop is saturated by LLM calls.
     Falls back to the in-memory collector if SQLite has no data.
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     while True:
         if await request.is_disconnected():
             break
@@ -127,7 +127,7 @@ def _load_run_by_id(session_prefix: str) -> dict[str, Any] | None:
 
 async def dashboard_runs(request: Request) -> JSONResponse:
     """GET /dashboard/runs — list all saved dashboard JSONs + SQLite runs."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     # Get runs from SQLite (includes currently running ones)
     db_runs = await loop.run_in_executor(_db_executor, event_store.get_all_runs)
@@ -144,7 +144,7 @@ async def dashboard_runs(request: Request) -> JSONResponse:
 
 async def dashboard_latest(request: Request) -> JSONResponse:
     """GET /dashboard/latest — most recent snapshot (from SQLite or memory)."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     # Try SQLite first (works even under load)
     snapshot = await loop.run_in_executor(
