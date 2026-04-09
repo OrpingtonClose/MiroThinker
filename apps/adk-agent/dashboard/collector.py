@@ -353,6 +353,17 @@ class PipelineCollector:
             self.corpus_updates.append(entry)
             self._emit("corpus_update", data=entry)
 
+    def emit_event(
+        self, event_type: str, agent: str = "", data: dict[str, Any] | None = None,
+    ) -> None:
+        """Public API to emit an arbitrary event (thread-safe).
+
+        Use this instead of calling _emit() directly from outside the
+        collector — it acquires the lock first.
+        """
+        with self._lock:
+            self._emit(event_type, agent=agent, data=data)
+
     def stall_detected(self, agent: str, event_count: int, timeout: float) -> None:
         with self._lock:
             entry = {

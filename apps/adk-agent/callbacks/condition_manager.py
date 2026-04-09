@@ -98,7 +98,7 @@ def _ingest_text_into_corpus(
 
     # Emit battery results as a dashboard event for live observability
     if _c:
-        _c._emit("algorithm_battery", "", battery_results)
+        _c.emit_event("algorithm_battery", data=battery_results)
 
     # Report expansion targets to dashboard
     if _c and battery_results.get("expansion_targets", 0):
