@@ -9,9 +9,13 @@ the collector thread; all reads happen from a separate connection in a
 thread-pool executor so the async event loop is never blocked.
 
 Schema:
-    runs    — one row per pipeline invocation
-    events  — append-only log of every collector event
-    snapshots — periodic KPI snapshots written by the collector
+    runs    -- one row per pipeline invocation
+    events  -- append-only log of every collector event
+    snapshots -- periodic KPI snapshots written by the collector
+    algorithm_traces -- per-algorithm before/after trace from Flock battery
+    llm_traces -- Flock LLM prompt/response capture
+    corpus_snapshots -- iteration-level corpus state snapshots
+    quality_regressions -- flagged quality decreases after algorithm runs
 
 The SSE endpoint reads the latest snapshot + recent events from SQLite
 instead of polling the in-memory collector, so it works even when the
@@ -96,6 +100,76 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_snapshots_session
             ON snapshots(session_id, id DESC);
+
+        -- Per-algorithm trace: what each Flock battery algorithm did
+        CREATE TABLE IF NOT EXISTS algorithm_traces (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT NOT NULL,
+            iteration       INTEGER NOT NULL DEFAULT 0,
+            algorithm_name  TEXT NOT NULL,
+            affected_count  INTEGER NOT NULL DEFAULT 0,
+            before_snapshot TEXT NOT NULL DEFAULT '{}',  -- JSON: score distributions before
+            after_snapshot  TEXT NOT NULL DEFAULT '{}',   -- JSON: score distributions after
+            details_json    TEXT NOT NULL DEFAULT '{}',   -- algorithm-specific decisions
+            duration_ms     REAL NOT NULL DEFAULT 0.0,
+            timestamp       REAL NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES runs(session_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_algo_traces_session
+            ON algorithm_traces(session_id, iteration, algorithm_name);
+
+        -- Flock LLM prompt/response capture
+        CREATE TABLE IF NOT EXISTS llm_traces (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT NOT NULL,
+            iteration       INTEGER NOT NULL DEFAULT 0,
+            caller          TEXT NOT NULL DEFAULT '',     -- e.g. 'score_single', 'detect_contradictions'
+            prompt          TEXT NOT NULL,
+            response        TEXT NOT NULL DEFAULT '',
+            model           TEXT NOT NULL DEFAULT '',
+            duration_ms     REAL NOT NULL DEFAULT 0.0,
+            timestamp       REAL NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES runs(session_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_llm_traces_session
+            ON llm_traces(session_id, iteration);
+
+        -- Corpus state snapshots at iteration boundaries
+        CREATE TABLE IF NOT EXISTS corpus_snapshots (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT NOT NULL,
+            iteration       INTEGER NOT NULL,
+            phase           TEXT NOT NULL DEFAULT '',      -- 'pre_battery', 'post_battery', 'post_synthesis'
+            total_conditions INTEGER NOT NULL DEFAULT 0,
+            status_counts   TEXT NOT NULL DEFAULT '{}',   -- JSON: {ready: N, merged: N, ...}
+            score_summary   TEXT NOT NULL DEFAULT '{}',   -- JSON: {mean_quality: X, median: X, ...}
+            conditions_json  TEXT NOT NULL DEFAULT '[]',  -- JSON array of condition summaries
+            timestamp       REAL NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES runs(session_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_corpus_snap_session
+            ON corpus_snapshots(session_id, iteration);
+
+        -- Quality regression flags
+        CREATE TABLE IF NOT EXISTS quality_regressions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT NOT NULL,
+            iteration       INTEGER NOT NULL,
+            algorithm_name  TEXT NOT NULL,
+            metric_name     TEXT NOT NULL,                -- e.g. 'mean_composite_quality'
+            before_value    REAL NOT NULL,
+            after_value     REAL NOT NULL,
+            delta           REAL NOT NULL,
+            severity        TEXT NOT NULL DEFAULT 'info', -- info | warning | critical
+            timestamp       REAL NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES runs(session_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_quality_reg_session
+            ON quality_regressions(session_id, iteration);
     """)
     conn.commit()
 
@@ -333,5 +407,316 @@ def get_event_count(session_id: str) -> int:
             (session_id,),
         ).fetchone()
         return row[0] if row else 0
+    finally:
+        conn.close()
+
+
+# ── Tracing writer API ────────────────────────────────────────────
+
+
+def insert_algorithm_trace(
+    session_id: str,
+    iteration: int,
+    algorithm_name: str,
+    affected_count: int,
+    before_snapshot: dict[str, Any],
+    after_snapshot: dict[str, Any],
+    details: dict[str, Any],
+    duration_ms: float,
+) -> None:
+    """Record a single algorithm's execution trace."""
+    conn = _get_writer()
+    with _writer_lock:
+        conn.execute(
+            "INSERT INTO algorithm_traces "
+            "(session_id, iteration, algorithm_name, affected_count, "
+            "before_snapshot, after_snapshot, details_json, duration_ms, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                session_id, iteration, algorithm_name, affected_count,
+                json.dumps(before_snapshot, default=str),
+                json.dumps(after_snapshot, default=str),
+                json.dumps(details, default=str),
+                duration_ms, time.time(),
+            ),
+        )
+        conn.commit()
+
+
+def insert_llm_trace(
+    session_id: str,
+    iteration: int,
+    caller: str,
+    prompt: str,
+    response: str,
+    model: str,
+    duration_ms: float,
+) -> None:
+    """Record a Flock LLM prompt/response pair."""
+    conn = _get_writer()
+    with _writer_lock:
+        conn.execute(
+            "INSERT INTO llm_traces "
+            "(session_id, iteration, caller, prompt, response, model, "
+            "duration_ms, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                session_id, iteration, caller, prompt, response,
+                model, duration_ms, time.time(),
+            ),
+        )
+        conn.commit()
+
+
+def insert_corpus_snapshot(
+    session_id: str,
+    iteration: int,
+    phase: str,
+    total_conditions: int,
+    status_counts: dict[str, int],
+    score_summary: dict[str, float],
+    conditions: list[dict[str, Any]],
+) -> None:
+    """Record a corpus state snapshot at an iteration boundary."""
+    conn = _get_writer()
+    with _writer_lock:
+        conn.execute(
+            "INSERT INTO corpus_snapshots "
+            "(session_id, iteration, phase, total_conditions, "
+            "status_counts, score_summary, conditions_json, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                session_id, iteration, phase, total_conditions,
+                json.dumps(status_counts, default=str),
+                json.dumps(score_summary, default=str),
+                json.dumps(conditions, default=str),
+                time.time(),
+            ),
+        )
+        conn.commit()
+
+
+def insert_quality_regression(
+    session_id: str,
+    iteration: int,
+    algorithm_name: str,
+    metric_name: str,
+    before_value: float,
+    after_value: float,
+    severity: str = "info",
+) -> None:
+    """Flag a quality regression after an algorithm run."""
+    conn = _get_writer()
+    with _writer_lock:
+        conn.execute(
+            "INSERT INTO quality_regressions "
+            "(session_id, iteration, algorithm_name, metric_name, "
+            "before_value, after_value, delta, severity, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                session_id, iteration, algorithm_name, metric_name,
+                before_value, after_value, after_value - before_value,
+                severity, time.time(),
+            ),
+        )
+        conn.commit()
+
+
+# ── Tracing reader API ────────────────────────────────────────────
+
+
+def get_algorithm_traces(
+    session_id: str, iteration: int | None = None,
+) -> list[dict[str, Any]]:
+    """Read algorithm traces for a session, optionally filtered by iteration."""
+    conn = _get_reader()
+    try:
+        if iteration is not None:
+            rows = conn.execute(
+                "SELECT id, iteration, algorithm_name, affected_count, "
+                "before_snapshot, after_snapshot, details_json, "
+                "duration_ms, timestamp "
+                "FROM algorithm_traces WHERE session_id = ? AND iteration = ? "
+                "ORDER BY id ASC",
+                (session_id, iteration),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, iteration, algorithm_name, affected_count, "
+                "before_snapshot, after_snapshot, details_json, "
+                "duration_ms, timestamp "
+                "FROM algorithm_traces WHERE session_id = ? "
+                "ORDER BY id ASC",
+                (session_id,),
+            ).fetchall()
+        return [
+            {
+                "id": r[0], "iteration": r[1],
+                "algorithm_name": r[2], "affected_count": r[3],
+                "before": json.loads(r[4]), "after": json.loads(r[5]),
+                "details": json.loads(r[6]),
+                "duration_ms": r[7], "timestamp": r[8],
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def get_llm_traces(
+    session_id: str, iteration: int | None = None, limit: int = 500,
+) -> list[dict[str, Any]]:
+    """Read Flock LLM traces for a session."""
+    conn = _get_reader()
+    try:
+        if iteration is not None:
+            rows = conn.execute(
+                "SELECT id, iteration, caller, prompt, response, model, "
+                "duration_ms, timestamp "
+                "FROM llm_traces WHERE session_id = ? AND iteration = ? "
+                "ORDER BY id ASC LIMIT ?",
+                (session_id, iteration, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, iteration, caller, prompt, response, model, "
+                "duration_ms, timestamp "
+                "FROM llm_traces WHERE session_id = ? "
+                "ORDER BY id ASC LIMIT ?",
+                (session_id, limit),
+            ).fetchall()
+        return [
+            {
+                "id": r[0], "iteration": r[1], "caller": r[2],
+                "prompt": r[3], "response": r[4], "model": r[5],
+                "duration_ms": r[6], "timestamp": r[7],
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def get_corpus_snapshots(
+    session_id: str, iteration: int | None = None,
+) -> list[dict[str, Any]]:
+    """Read corpus snapshots for a session."""
+    conn = _get_reader()
+    try:
+        if iteration is not None:
+            rows = conn.execute(
+                "SELECT id, iteration, phase, total_conditions, "
+                "status_counts, score_summary, conditions_json, timestamp "
+                "FROM corpus_snapshots WHERE session_id = ? AND iteration = ? "
+                "ORDER BY id ASC",
+                (session_id, iteration),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, iteration, phase, total_conditions, "
+                "status_counts, score_summary, conditions_json, timestamp "
+                "FROM corpus_snapshots WHERE session_id = ? "
+                "ORDER BY id ASC",
+                (session_id,),
+            ).fetchall()
+        return [
+            {
+                "id": r[0], "iteration": r[1], "phase": r[2],
+                "total_conditions": r[3],
+                "status_counts": json.loads(r[4]),
+                "score_summary": json.loads(r[5]),
+                "conditions": json.loads(r[6]),
+                "timestamp": r[7],
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def get_quality_regressions(
+    session_id: str, min_severity: str = "info",
+) -> list[dict[str, Any]]:
+    """Read quality regression flags for a session."""
+    severities = ["info", "warning", "critical"]
+    min_idx = severities.index(min_severity) if min_severity in severities else 0
+    allowed = severities[min_idx:]
+    placeholders = ",".join("?" * len(allowed))
+    conn = _get_reader()
+    try:
+        rows = conn.execute(
+            f"SELECT id, iteration, algorithm_name, metric_name, "
+            f"before_value, after_value, delta, severity, timestamp "
+            f"FROM quality_regressions WHERE session_id = ? "
+            f"AND severity IN ({placeholders}) "
+            f"ORDER BY id ASC",
+            (session_id, *allowed),
+        ).fetchall()
+        return [
+            {
+                "id": r[0], "iteration": r[1],
+                "algorithm_name": r[2], "metric_name": r[3],
+                "before_value": r[4], "after_value": r[5],
+                "delta": r[6], "severity": r[7], "timestamp": r[8],
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def get_trace_summary(session_id: str) -> dict[str, Any]:
+    """Return a compact summary of all traces for a session.
+
+    Designed for the improvement-loop consumer: one JSON object with
+    counts, regressions, and per-iteration algorithm summaries.
+    """
+    conn = _get_reader()
+    try:
+        algo_count = conn.execute(
+            "SELECT COUNT(*) FROM algorithm_traces WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()[0]
+        llm_count = conn.execute(
+            "SELECT COUNT(*) FROM llm_traces WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()[0]
+        snap_count = conn.execute(
+            "SELECT COUNT(*) FROM corpus_snapshots WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()[0]
+        reg_count = conn.execute(
+            "SELECT COUNT(*) FROM quality_regressions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()[0]
+
+        # Per-iteration algorithm summaries
+        iter_rows = conn.execute(
+            "SELECT iteration, algorithm_name, affected_count, duration_ms "
+            "FROM algorithm_traces WHERE session_id = ? ORDER BY id ASC",
+            (session_id,),
+        ).fetchall()
+        iterations: dict[int, list[dict[str, Any]]] = {}
+        for r in iter_rows:
+            it = r[0]
+            iterations.setdefault(it, []).append({
+                "algorithm": r[1], "affected": r[2], "duration_ms": r[3],
+            })
+
+        # Total Flock LLM time
+        total_llm_ms = conn.execute(
+            "SELECT COALESCE(SUM(duration_ms), 0) FROM llm_traces "
+            "WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()[0]
+
+        return {
+            "session_id": session_id,
+            "algorithm_trace_count": algo_count,
+            "llm_trace_count": llm_count,
+            "corpus_snapshot_count": snap_count,
+            "quality_regression_count": reg_count,
+            "total_flock_llm_ms": total_llm_ms,
+            "iterations": iterations,
+        }
     finally:
         conn.close()

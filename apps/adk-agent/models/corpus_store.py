@@ -23,9 +23,10 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from collections import Counter
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 import duckdb
 
 from models.atomic_condition import AtomicCondition
@@ -98,6 +99,11 @@ class CorpusStore:
 
         self._setup_tables()
         self._next_id = self._compute_next_id()
+
+        # -- Tracing context (set by caller before battery runs) --
+        self._trace_session_id: str = ""
+        self._trace_iteration: int = 0
+        self._trace_enabled: bool = False
 
     # ------------------------------------------------------------------
     # Flock configuration
@@ -337,15 +343,53 @@ class CorpusStore:
     # Flock-powered scoring
     # ------------------------------------------------------------------
 
-    def _flock_complete(self, prompt: str) -> str:
-        """Run a single Flock llm_complete call and return text."""
+    def set_trace_context(
+        self, session_id: str, iteration: int,
+    ) -> None:
+        """Set the tracing context for subsequent operations.
+
+        Called by the condition_manager before scoring/battery runs so
+        that all Flock LLM calls and algorithm traces are tagged with
+        the correct session and iteration.
+        """
+        self._trace_session_id = session_id
+        self._trace_iteration = iteration
+        self._trace_enabled = bool(session_id)
+
+    def _flock_complete(
+        self, prompt: str, caller: str = "",
+    ) -> str:
+        """Run a single Flock llm_complete call and return text.
+
+        When tracing is enabled, captures the prompt, response, and
+        duration to the dashboard SQLite for after-run analysis.
+        """
+        t0 = time.monotonic()
         row = self.conn.execute(
             "SELECT llm_complete("
             "{'model_name': 'corpus_model'}, "
             "{'prompt': ?})",
             [prompt],
         ).fetchone()
-        return str(row[0]) if row and row[0] is not None else ""
+        result = str(row[0]) if row and row[0] is not None else ""
+        duration_ms = (time.monotonic() - t0) * 1000
+
+        if self._trace_enabled and caller:
+            try:
+                from dashboard import event_store
+                event_store.insert_llm_trace(
+                    session_id=self._trace_session_id,
+                    iteration=self._trace_iteration,
+                    caller=caller,
+                    prompt=prompt[:4000],
+                    response=result[:2000],
+                    model=_FLOCK_MODEL,
+                    duration_ms=duration_ms,
+                )
+            except Exception:
+                pass  # never block pipeline for tracing
+
+        return result
 
     def score_new_conditions(self, user_query: str = "") -> int:
         """Score all unscored conditions using Flock. Returns count."""
@@ -380,7 +424,8 @@ class CorpusStore:
             "from 0.0 to 1.0. Consider: Is it specific? Does it cite "
             "sources? Is the language hedged or definitive? Return "
             "ONLY a decimal number, nothing else. "
-            "Finding: " + fact
+            "Finding: " + fact,
+            caller="score_confidence",
         ), 0.5)
 
         trust = self._parse_float(self._flock_complete(
@@ -388,7 +433,8 @@ class CorpusStore:
             "from 0.0 to 1.0. Academic/government = high, established "
             "news = medium-high, forums/social = medium, unknown/no "
             "URL = low. Return ONLY a decimal number. "
-            "URL: " + url_text
+            "URL: " + url_text,
+            caller="score_trust",
         ), 0.5)
 
         specificity = self._parse_float(self._flock_complete(
@@ -396,7 +442,8 @@ class CorpusStore:
             "1.0. 1.0 = contains exact names, numbers, dates, URLs. "
             "0.0 = vague generality with no concrete data. Return "
             "ONLY a decimal number. "
-            "Finding: " + fact
+            "Finding: " + fact,
+            caller="score_specificity",
         ), 0.5)
 
         fabrication = self._parse_float(self._flock_complete(
@@ -406,7 +453,8 @@ class CorpusStore:
             "1.0 = likely made up, no verifiable details. Consider: "
             "Does it cite a real URL? Are the claims verifiable? "
             "Return ONLY a decimal number. "
-            "Finding: " + fact + " Source: " + url_text
+            "Finding: " + fact + " Source: " + url_text,
+            caller="score_fabrication",
         ), 0.0)
 
         relevance = 0.5
@@ -414,7 +462,8 @@ class CorpusStore:
             relevance = self._parse_float(self._flock_complete(
                 "Rate how relevant this finding is to the user query "
                 "on 0.0 to 1.0. Return ONLY a decimal number. "
-                "Query: " + user_query + " Finding: " + fact
+                "Query: " + user_query + " Finding: " + fact,
+                caller="score_relevance",
             ), 0.5)
 
         novelty = self._parse_float(self._flock_complete(
@@ -422,7 +471,8 @@ class CorpusStore:
             "1.0 = completely new information not commonly known. "
             "0.0 = widely known, obvious, or trivial. "
             "Return ONLY a decimal number. "
-            "Finding: " + fact
+            "Finding: " + fact,
+            caller="score_novelty",
         ), 0.5)
 
         actionability = self._parse_float(self._flock_complete(
@@ -430,7 +480,8 @@ class CorpusStore:
             "1.0 = directly usable, contains specific steps or data. "
             "0.0 = purely informational with no actionable content. "
             "Return ONLY a decimal number. "
-            "Finding: " + fact
+            "Finding: " + fact,
+            caller="score_actionability",
         ), 0.5)
 
         now = datetime.now(timezone.utc).isoformat()
@@ -519,7 +570,8 @@ class CorpusStore:
             "same thing? Return a similarity score: 0.0 "
             "(completely different) to 1.0 (identical meaning). "
             "Return ONLY a decimal number. "
-            "A: " + fact_a + " B: " + fact_b
+            "A: " + fact_a + " B: " + fact_b,
+            caller="compare_pair",
         )
         sim = self._parse_float(sim_raw, 0.0)
         sim = min(max(sim, 0.0), 1.0)
@@ -815,7 +867,8 @@ class CorpusStore:
                     "Return a contradiction score: 0.0 (no "
                     "contradiction) to 1.0 (direct contradiction). "
                     "Return ONLY a decimal number. "
-                    "A: " + fact_a + " B: " + fact_b
+                    "A: " + fact_a + " B: " + fact_b,
+                    caller="detect_contradictions",
                 )
                 score = self._parse_float(result, 0.0)
                 if score > 0.6:
@@ -877,7 +930,8 @@ class CorpusStore:
                     "numbers, names, URLs per sentence. Low density "
                     "= verbose, repetitive, or filler text. Return "
                     "ONLY a decimal number. "
-                    "Text: " + fact
+                    "Text: " + fact,
+                    caller="info_density",
                 )
                 density = self._parse_float(result, 0.5)
                 self.conn.execute(
@@ -1029,7 +1083,8 @@ class CorpusStore:
                     "ALL specific data from both. If one has a URL "
                     "and the other doesn't, keep the URL. Return "
                     "ONLY the merged statement, nothing else. "
-                    "A: " + fact_a + " B: " + fact_b
+                    "A: " + fact_a + " B: " + fact_b,
+                    caller="compress_redundant",
                 )
                 if not merged_fact or not merged_fact.strip():
                     continue
@@ -1153,6 +1208,164 @@ class CorpusStore:
             for r in rows
         ]
 
+    # ------------------------------------------------------------------
+    # Tracing helpers
+    # ------------------------------------------------------------------
+
+    def _score_snapshot(self) -> dict[str, Any]:
+        """Capture a snapshot of score distributions for tracing.
+
+        Returns a dict with mean/min/max for key score dimensions
+        plus status counts.  Designed to be small enough to store
+        as JSON in the algorithm_traces table.
+        """
+        row = self.conn.execute(
+            "SELECT COUNT(*), "
+            "  AVG(composite_quality), MIN(composite_quality), MAX(composite_quality), "
+            "  AVG(confidence), AVG(trust_score), AVG(novelty_score), "
+            "  AVG(specificity_score), AVG(fabrication_risk), "
+            "  AVG(staleness_penalty), AVG(cross_ref_boost), "
+            "  AVG(information_density) "
+            "FROM conditions WHERE scored_at != ''"
+        ).fetchone()
+        if not row or row[0] == 0:
+            return {"count": 0}
+        return {
+            "count": row[0],
+            "mean_quality": round(float(row[1] or 0), 4),
+            "min_quality": round(float(row[2] or 0), 4),
+            "max_quality": round(float(row[3] or 0), 4),
+            "mean_confidence": round(float(row[4] or 0), 4),
+            "mean_trust": round(float(row[5] or 0), 4),
+            "mean_novelty": round(float(row[6] or 0), 4),
+            "mean_specificity": round(float(row[7] or 0), 4),
+            "mean_fabrication_risk": round(float(row[8] or 0), 4),
+            "mean_staleness": round(float(row[9] or 0), 4),
+            "mean_cross_ref": round(float(row[10] or 0), 4),
+            "mean_info_density": round(float(row[11] or 0), 4),
+        }
+
+    def _status_snapshot(self) -> dict[str, int]:
+        """Capture processing_status counts for tracing."""
+        rows = self.conn.execute(
+            "SELECT processing_status, COUNT(*) "
+            "FROM conditions GROUP BY processing_status"
+        ).fetchall()
+        return {str(r[0] or "raw"): int(r[1]) for r in rows}
+
+    def _trace_algorithm(
+        self,
+        name: str,
+        func: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> int:
+        """Run an algorithm function with before/after tracing.
+
+        Captures score snapshots before and after, measures duration,
+        detects quality regressions, and writes trace to SQLite.
+        Returns the algorithm's result count.
+        """
+        before = self._score_snapshot() if self._trace_enabled else {}
+        t0 = time.monotonic()
+
+        result = func(*args, **kwargs)
+
+        duration_ms = (time.monotonic() - t0) * 1000
+        after = self._score_snapshot() if self._trace_enabled else {}
+
+        if self._trace_enabled:
+            try:
+                from dashboard import event_store
+
+                event_store.insert_algorithm_trace(
+                    session_id=self._trace_session_id,
+                    iteration=self._trace_iteration,
+                    algorithm_name=name,
+                    affected_count=result,
+                    before_snapshot=before,
+                    after_snapshot=after,
+                    details={},
+                    duration_ms=duration_ms,
+                )
+
+                # Quality regression detection
+                before_q = before.get("mean_quality", 0.0)
+                after_q = after.get("mean_quality", 0.0)
+                if before_q > 0 and after_q < before_q:
+                    delta = after_q - before_q
+                    severity = (
+                        "critical" if delta < -0.10
+                        else "warning" if delta < -0.03
+                        else "info"
+                    )
+                    event_store.insert_quality_regression(
+                        session_id=self._trace_session_id,
+                        iteration=self._trace_iteration,
+                        algorithm_name=name,
+                        metric_name="mean_composite_quality",
+                        before_value=before_q,
+                        after_value=after_q,
+                        severity=severity,
+                    )
+                    if severity != "info":
+                        logger.warning(
+                            "Quality regression after %s: "
+                            "%.4f -> %.4f (delta=%.4f, %s)",
+                            name, before_q, after_q, delta, severity,
+                        )
+            except Exception:
+                pass  # never block pipeline for tracing
+
+        return result
+
+    def _save_corpus_snapshot(
+        self, phase: str,
+    ) -> None:
+        """Save a corpus state snapshot for iteration-over-iteration diffs.
+
+        Captures total counts, status distribution, score summary, and
+        a compact list of conditions (id, fact preview, key scores).
+        """
+        if not self._trace_enabled:
+            return
+        try:
+            from dashboard import event_store
+
+            total = self.count()
+            status_counts = self._status_snapshot()
+            score_summary = self._score_snapshot()
+
+            # Compact condition list: id + first 120 chars + key scores
+            rows = self.conn.execute(
+                "SELECT id, SUBSTR(fact, 1, 120), composite_quality, "
+                "confidence, processing_status, cluster_id, cluster_rank "
+                "FROM conditions WHERE scored_at != '' "
+                "ORDER BY composite_quality DESC LIMIT 200"
+            ).fetchall()
+            conditions = [
+                {
+                    "id": r[0], "fact_preview": str(r[1]),
+                    "quality": round(float(r[2] or 0), 3),
+                    "confidence": round(float(r[3] or 0), 3),
+                    "status": str(r[4]), "cluster_id": r[5],
+                    "cluster_rank": r[6],
+                }
+                for r in rows
+            ]
+
+            event_store.insert_corpus_snapshot(
+                session_id=self._trace_session_id,
+                iteration=self._trace_iteration,
+                phase=phase,
+                total_conditions=total,
+                status_counts=status_counts,
+                score_summary=score_summary,
+                conditions=conditions,
+            )
+        except Exception:
+            pass  # never block pipeline
+
     def run_algorithm_battery(
         self, user_query: str = "", iteration: int = 0,
     ) -> dict[str, int]:
@@ -1162,34 +1375,70 @@ class CorpusStore:
         after scoring and dedup.  Returns a dict of algorithm names
         to their result counts for logging.
 
+        When tracing is enabled (set_trace_context was called), each
+        algorithm is wrapped with before/after score snapshots, duration
+        measurement, and quality regression detection.  A corpus snapshot
+        is taken before and after the full battery for iteration diffs.
+
         Pipeline order:
-        1. Staleness decay (SQL) — penalise old iterations
-        2. Cross-reference boost (SQL) — reward corroborated findings
-        3. Source diversity (SQL) — reward unique sources
-        4. Composite quality (SQL) — compute weighted score
-        5. Quality gate (SQL) — flag low-quality for expansion
-        6. Specificity gate (SQL) — flag vague for deep search
-        7. Information density (Flock LLM) — score info-per-char
-        8. Contradiction detection (Flock LLM) — find conflicts
-        9. Clustering (SQL) — group similar conditions
-        10. Redundancy compression (Flock LLM) — merge duplicates
-        11. Mark ready (SQL) — final processing status
+        1. Staleness decay (SQL)
+        2. Cross-reference boost (SQL)
+        3. Source diversity (SQL)
+        4. Composite quality (SQL)
+        5. Quality gate (SQL)
+        6. Specificity gate (SQL)
+        7. Information density (Flock LLM)
+        8. Contradiction detection (Flock LLM)
+        9. Clustering (SQL)
+        10. Redundancy compression (Flock LLM)
+        11. Mark ready (SQL)
         """
+        self._trace_iteration = iteration
+        battery_start = time.monotonic()
+
+        # Pre-battery corpus snapshot
+        self._save_corpus_snapshot("pre_battery")
+
         results: dict[str, int] = {}
 
-        results["staleness_decay"] = self.compute_staleness_decay(
-            iteration
+        results["staleness_decay"] = self._trace_algorithm(
+            "staleness_decay", self.compute_staleness_decay, iteration,
         )
-        results["cross_ref_boost"] = self.compute_cross_ref_boost()
-        results["source_diversity"] = self.compute_source_diversity()
-        results["composite_quality"] = self.compute_composite_quality()
-        results["quality_gate"] = self.apply_quality_gate()
-        results["specificity_gate"] = self.apply_specificity_gate()
-        results["info_density"] = self.compute_information_density()
-        results["contradictions"] = self.detect_contradictions()
-        results["clusters"] = self.cluster_conditions()
-        results["redundancy_merges"] = self.compress_redundant()
-        results["marked_ready"] = self.mark_ready()
+        results["cross_ref_boost"] = self._trace_algorithm(
+            "cross_ref_boost", self.compute_cross_ref_boost,
+        )
+        results["source_diversity"] = self._trace_algorithm(
+            "source_diversity", self.compute_source_diversity,
+        )
+        results["composite_quality"] = self._trace_algorithm(
+            "composite_quality", self.compute_composite_quality,
+        )
+        results["quality_gate"] = self._trace_algorithm(
+            "quality_gate", self.apply_quality_gate,
+        )
+        results["specificity_gate"] = self._trace_algorithm(
+            "specificity_gate", self.apply_specificity_gate,
+        )
+        results["info_density"] = self._trace_algorithm(
+            "info_density", self.compute_information_density,
+        )
+        results["contradictions"] = self._trace_algorithm(
+            "contradictions", self.detect_contradictions,
+        )
+        results["clusters"] = self._trace_algorithm(
+            "clusters", self.cluster_conditions,
+        )
+        results["redundancy_merges"] = self._trace_algorithm(
+            "redundancy_merges", self.compress_redundant,
+        )
+        results["marked_ready"] = self._trace_algorithm(
+            "mark_ready", self.mark_ready,
+        )
+
+        # Post-battery corpus snapshot
+        self._save_corpus_snapshot("post_battery")
+
+        battery_duration_ms = (time.monotonic() - battery_start) * 1000
 
         # Summary stats
         total = self.count()
@@ -1208,9 +1457,10 @@ class CorpusStore:
         cluster_reps = len(self.get_cluster_representatives())
 
         logger.info(
-            "Algorithm battery complete: %d total, %d ready, "
+            "Algorithm battery complete in %.0fms: %d total, %d ready, "
             "%d for expansion, %d merged, %d cluster reps "
             "(swarm will process %d instead of %d)",
+            battery_duration_ms,
             total, ready, expansion, merged, cluster_reps,
             cluster_reps, total,
         )
@@ -1220,6 +1470,7 @@ class CorpusStore:
         results["expansion_targets"] = expansion
         results["merged"] = merged
         results["cluster_reps"] = cluster_reps
+        results["battery_duration_ms"] = int(battery_duration_ms)
 
         return results
 
@@ -1457,7 +1708,8 @@ class CorpusStore:
                 "- Short facts (names, prices, dates) are valid "
                 "- If the text is a single atomic fact already, return "
                 "it as-is "
-                "Text to decompose: " + raw_text
+                "Text to decompose: " + raw_text,
+                caller="ingest_atomise",
             )
         except Exception:
             logger.warning(
@@ -1582,7 +1834,8 @@ class CorpusStore:
             "- duplication_score > 0.8: merge with "
             "higher-confidence duplicate"
             "\nUser query: " + user_query
-            + "\n\n" + corpus_text
+            + "\n\n" + corpus_text,
+            caller="synthesise_single",
         )
 
     def _synthesise_gossip(
@@ -1623,7 +1876,8 @@ class CorpusStore:
                 "under 6000 characters."
                 "\nResearch angle: " + angle
                 + "\nUser query: " + user_query
-                + "\n\n" + facts_text
+                + "\n\n" + facts_text,
+                caller="gossip_phase1_worker",
             )
             angle_summaries[angle] = summary
 
@@ -1653,7 +1907,8 @@ class CorpusStore:
                 + "\nUser query: " + user_query
                 + "\n\nYour current summary:\n"
                 + angle_summaries[angle]
-                + "\n\nPeer summaries:\n" + peer_text
+                + "\n\nPeer summaries:\n" + peer_text,
+                caller="gossip_phase2_refine",
             )
             angle_summaries[angle] = refined
 
@@ -1681,7 +1936,8 @@ class CorpusStore:
             "- The report should be self-contained and readable "
             "by someone with no prior context"
             "\nUser query: " + user_query
-            + "\n\n" + all_summaries
+            + "\n\n" + all_summaries,
+            caller="gossip_phase3_queen",
         )
 
         logger.info("Gossip Phase 3: queen synthesis complete")
