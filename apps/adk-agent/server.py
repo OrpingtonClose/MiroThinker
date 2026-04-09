@@ -147,8 +147,10 @@ class AGUIRunCollectorMiddleware(BaseHTTPMiddleware):
     2. Register it as the active collector (so ``/dashboard/stream``
        immediately starts broadcasting its snapshots).
     3. Let the AG-UI endpoint handle the request normally.
-    4. Finalize the collector when the response completes (so
-       ``/dashboard/runs`` and ``/dashboard/html`` pick it up).
+    4. **Wrap the SSE response body iterator** so that finalization
+       happens only after the full stream has been consumed — not when
+       ``call_next()`` returns (which is just response headers for
+       ``StreamingResponse``).
     """
 
     async def dispatch(self, request: Request, call_next) -> Response:
@@ -195,24 +197,49 @@ class AGUIRunCollectorMiddleware(BaseHTTPMiddleware):
             )
             raise
 
-        elapsed = time.perf_counter() - start
-        collector.phase_end("ag_ui_request", "ok")
-        dashboard_data = collector.finalize(result_text="")
-        set_active_collector(None)
+        # For StreamingResponse (SSE), call_next returns as soon as the
+        # response *headers* are ready — the body streams afterwards.
+        # We must defer finalization until the body iterator is fully
+        # consumed, otherwise the collector will be empty.
+        original_iterator = response.body_iterator
 
-        kpi = dashboard_data.get("kpi", {})
-        logger.info(
-            "AG-UI RUN END session=%s elapsed=%.1fs "
-            "tool_calls=%d llm_calls=%d adk_events=%d "
-            "prompt_tokens=%d completion_tokens=%d",
-            session_id,
-            elapsed,
-            kpi.get("tool_calls", 0),
-            kpi.get("llm_calls", 0),
-            kpi.get("adk_events", 0),
-            kpi.get("prompt_tokens_est", 0),
-            kpi.get("completion_tokens_est", 0),
-        )
+        async def _finalizing_iterator():
+            """Yield all chunks from the original body, then finalize."""
+            try:
+                async for chunk in original_iterator:
+                    yield chunk
+            except Exception:
+                collector.phase_end("ag_ui_request", "error")
+                collector.finalize(result_text="")
+                set_active_collector(None)
+                elapsed = time.perf_counter() - start
+                logger.error(
+                    "AG-UI RUN STREAM ERROR session=%s elapsed=%.1fs",
+                    session_id,
+                    elapsed,
+                )
+                raise
+            else:
+                elapsed = time.perf_counter() - start
+                collector.phase_end("ag_ui_request", "ok")
+                dashboard_data = collector.finalize(result_text="")
+                set_active_collector(None)
+
+                kpi = dashboard_data.get("kpi", {})
+                logger.info(
+                    "AG-UI RUN END session=%s elapsed=%.1fs "
+                    "tool_calls=%d llm_calls=%d adk_events=%d "
+                    "prompt_tokens=%d completion_tokens=%d",
+                    session_id,
+                    elapsed,
+                    kpi.get("tool_calls", 0),
+                    kpi.get("llm_calls", 0),
+                    kpi.get("adk_events", 0),
+                    kpi.get("prompt_tokens_est", 0),
+                    kpi.get("completion_tokens_est", 0),
+                )
+
+        response.body_iterator = _finalizing_iterator()
         return response
 
 
