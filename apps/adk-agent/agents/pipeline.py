@@ -11,7 +11,7 @@ run the synthesiser after the loop exits.
 Architecture::
 
     SequentialAgent("mirothinker_pipeline")
-    └── LoopAgent("research_loop", max_iterations=5)
+    └── LoopAgent("research_loop", max_iterations=3)
     │     ├── Agent("thinker")       # uncensored, no tools
     │     └── Agent("researcher")    # tool-capable, calls executor
     │           └── after_agent_callback: condition_manager
@@ -56,7 +56,7 @@ from google.genai import types as genai_types
 from agents.thinker import thinker_agent
 from agents.researcher import researcher_agent
 from agents.synthesiser import synthesiser_agent
-from callbacks.condition_manager import build_corpus_state, init_corpus
+from callbacks.condition_manager import build_corpus_state, cleanup_corpus, init_corpus
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +78,20 @@ def _init_pipeline_state(
         init_corpus(state)
         logger.info("Pipeline state initialised: corpus_key=%s", state["_corpus_key"])
     return None
+
+
+def _cleanup_pipeline_state(
+    callback_context: CallbackContext,
+) -> Optional[genai_types.Content]:
+    """Release the CorpusStore after the pipeline finishes.
+
+    Mirrors :func:`_init_pipeline_state` — closes the DuckDB connection
+    and removes the store from the module-level ``_corpus_stores`` dict
+    so memory and connections are not leaked across runs.
+    """
+    cleanup_corpus(callback_context.state)
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Inner loop: thinker reasons → researcher executes → repeat
@@ -101,4 +115,5 @@ pipeline_agent = SequentialAgent(
     ),
     sub_agents=[research_loop, synthesiser_agent],
     before_agent_callback=_init_pipeline_state,
+    after_agent_callback=_cleanup_pipeline_state,
 )

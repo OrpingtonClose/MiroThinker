@@ -10,7 +10,7 @@ the agent via Server-Sent Events streaming.
 The pipeline architecture separates reasoning from tool execution:
 
     SequentialAgent("mirothinker_pipeline")
-    └── LoopAgent("research_loop", max_iterations=5)
+    └── LoopAgent("research_loop", max_iterations=3)
     │     ├── thinker   → uncensored reasoning, no web tools
     │     └── researcher → tool-capable, calls executor
     └── synthesiser  → uncensored report writing, no tools
