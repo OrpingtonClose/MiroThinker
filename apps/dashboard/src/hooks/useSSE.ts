@@ -12,6 +12,10 @@ export function useSSE() {
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const connect = useCallback(() => {
+    if (retryRef.current) {
+      clearTimeout(retryRef.current);
+      retryRef.current = null;
+    }
     if (esRef.current) {
       esRef.current.close();
     }
