@@ -33,6 +33,7 @@ import {
   Area,
 } from "recharts";
 import "./App.css";
+import { PipelineGraph } from "./components/PipelineGraph";
 import { useSSE, fetchRuns, fetchRunDetail } from "./hooks/useSSE";
 import type {
   ConnectionStatus,
@@ -726,6 +727,21 @@ function App() {
               </AlertBanner>
             )}
 
+            {/* Pipeline Execution Graph */}
+            {snap && !isIdle && (
+              <div className="space-y-2">
+                <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2">
+                  <Activity size={16} className="text-blue-400" /> Pipeline Execution
+                </h3>
+                <PipelineGraph
+                  phases={snap.phases || []}
+                  currentPhase={snap.current_phase || ""}
+                  finalized={!!snap.finalized}
+                  isIdle={false}
+                />
+              </div>
+            )}
+
             {/* KPI Grid */}
             {snap && !isIdle && (
               <>
@@ -910,6 +926,26 @@ function RunDetailView({ detail }: { detail: RunDetail }) {
           color={COLORS.accent}
         />
       </div>
+
+      {/* Pipeline Execution Graph */}
+      {detail.phases?.length > 0 && (
+        <div className="space-y-2">
+          <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2">
+            <Activity size={16} className="text-blue-400" /> Pipeline Execution
+          </h3>
+          <PipelineGraph
+            phases={detail.phases.map((p) => ({
+              phase: p.phase,
+              agent: p.agent,
+              elapsed: (p.end_time || detail.finalized_at) - p.start_time,
+              outcome: p.outcome,
+            }))}
+            currentPhase=""
+            finalized={true}
+            isIdle={false}
+          />
+        </div>
+      )}
 
       {/* Phase timeline */}
       {detail.phases?.length > 0 && (
