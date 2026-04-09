@@ -64,12 +64,23 @@ class CorpusStore:
         db = _DB_PATH or ":memory:"
         self.conn = duckdb.connect(db)
 
-        # -- Load Flock extension --
-        self.conn.execute("INSTALL flock FROM community")
-        self.conn.execute("LOAD flock")
+        # -- Load Flock extension (graceful: unavailable on some DuckDB builds) --
+        self._flock_available = False
+        try:
+            self.conn.execute("INSTALL flock FROM community")
+            self.conn.execute("LOAD flock")
+            self._flock_available = True
+        except Exception:
+            logger.warning(
+                "Flock extension unavailable -- corpus will store "
+                "conditions but skip LLM-powered scoring/atomisation. "
+                "The pipeline still works; findings are stored as-is.",
+                exc_info=True,
+            )
 
         # -- Configure Flock secrets & model --
-        self._setup_flock()
+        if self._flock_available:
+            self._setup_flock()
 
         self._setup_tables()
         self._next_id = self._compute_next_id()
@@ -264,6 +275,8 @@ class CorpusStore:
 
     def _flock_complete(self, prompt: str) -> str:
         """Run a single Flock llm_complete call and return text."""
+        if not self._flock_available:
+            return ""
         row = self.conn.execute(
             "SELECT llm_complete("
             "{'model_name': 'corpus_model'}, "

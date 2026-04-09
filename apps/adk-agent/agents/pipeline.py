@@ -45,12 +45,39 @@ researcher and executor need tool-calling capability.
 
 from __future__ import annotations
 
+import logging
+from typing import Optional
+
 from google.adk.agents import SequentialAgent
+from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.loop_agent import LoopAgent
+from google.genai import types as genai_types
 
 from agents.thinker import thinker_agent
 from agents.researcher import researcher_agent
 from agents.synthesiser import synthesiser_agent
+from callbacks.condition_manager import build_corpus_state, init_corpus
+
+logger = logging.getLogger(__name__)
+
+
+def _init_pipeline_state(
+    callback_context: CallbackContext,
+) -> Optional[genai_types.Content]:
+    """Ensure session state has corpus keys before the pipeline starts.
+
+    AG-UI creates sessions without initial state, so the first time the
+    pipeline runs we inject the keys that thinker/researcher/synthesiser
+    read via ``{research_findings}`` / ``{corpus_for_synthesis}`` template
+    variables.  Also registers the CorpusStore singleton for DuckDB.
+    """
+    state = callback_context.state
+    if "_corpus_key" not in state:
+        for k, v in build_corpus_state().items():
+            state[k] = v
+        init_corpus(state)
+        logger.info("Pipeline state initialised: corpus_key=%s", state["_corpus_key"])
+    return None
 
 # ---------------------------------------------------------------------------
 # Inner loop: thinker reasons → researcher executes → repeat
@@ -73,4 +100,5 @@ pipeline_agent = SequentialAgent(
         "EVIDENCE_SUFFICIENT, then the synthesiser writes the final report."
     ),
     sub_agents=[research_loop, synthesiser_agent],
+    before_agent_callback=_init_pipeline_state,
 )
