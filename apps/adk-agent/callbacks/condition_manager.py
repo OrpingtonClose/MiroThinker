@@ -73,6 +73,29 @@ def _ingest_text_into_corpus(
     if deduped:
         logger.info("Evaluated %d dedup pairs via Flock", deduped)
 
+    # Run the full algorithm battery (SQL gates + LLM enrichment)
+    battery_results = corpus.run_algorithm_battery(
+        user_query=user_query,
+        iteration=iteration,
+    )
+    logger.info(
+        "Algorithm battery: %d ready, %d for expansion, "
+        "%d merged, %d cluster reps",
+        battery_results.get("ready", 0),
+        battery_results.get("expansion_targets", 0),
+        battery_results.get("merged", 0),
+        battery_results.get("cluster_reps", 0),
+    )
+
+    # Report expansion targets to dashboard
+    _c = get_active_collector()
+    if _c and battery_results.get("expansion_targets", 0):
+        expansion_targets = corpus.get_expansion_targets()
+        logger.info(
+            "Expansion targets for next iteration: %s",
+            [t["strategy"] for t in expansion_targets[:5]],
+        )
+
     return admitted_count
 
 

@@ -26,7 +26,6 @@ import re
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Optional
-
 import duckdb
 
 from models.atomic_condition import AtomicCondition
@@ -209,7 +208,35 @@ class CorpusStore:
 
                 -- Scoring metadata
                 scored_at TEXT DEFAULT '',
-                score_version INTEGER DEFAULT 0
+                score_version INTEGER DEFAULT 0,
+
+                -- Composite & derived scores (computed by algorithms)
+                composite_quality FLOAT DEFAULT -1.0,
+                information_density FLOAT DEFAULT -1.0,
+                cross_ref_boost FLOAT DEFAULT 0.0,
+
+                -- Enum-style processing columns
+                processing_status TEXT DEFAULT 'raw',
+                    -- raw → scored → analysed → clustered → ready
+                expansion_strategy TEXT DEFAULT 'none',
+                    -- none | exa_search | brave_deep | kagi_enrich
+                expansion_hint TEXT DEFAULT '',
+                cluster_id INTEGER DEFAULT -1,
+                cluster_rank INTEGER DEFAULT 0,
+                contradiction_flag BOOLEAN DEFAULT FALSE,
+                contradiction_partner INTEGER DEFAULT -1,
+                staleness_penalty FLOAT DEFAULT 0.0
+            )
+        """)
+
+        # -- Contradiction pairs table --
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS contradiction_pairs (
+                condition_a INTEGER,
+                condition_b INTEGER,
+                contradiction_score FLOAT DEFAULT 0.0,
+                description TEXT DEFAULT '',
+                PRIMARY KEY (condition_a, condition_b)
             )
         """)
 
@@ -414,7 +441,8 @@ class CorpusStore:
                    relevance_score = ?, novelty_score = ?,
                    actionability_score = ?,
                    scored_at = ?,
-                   score_version = score_version + 1
+                   score_version = score_version + 1,
+                   processing_status = 'scored'
                WHERE id = ?""",
             [confidence, trust, specificity, fabrication, relevance,
              novelty, actionability, now, cid],
@@ -510,6 +538,690 @@ class CorpusStore:
                 [id_a, id_b, sim, rel],
             )
         return sim
+
+    # ------------------------------------------------------------------
+    # Algorithm battery — each is a small, composable processing step
+    # ------------------------------------------------------------------
+
+    def compute_composite_quality(self) -> int:
+        """Compute a weighted composite quality score for all scored
+        conditions.  Pure SQL — no LLM calls.
+
+        Formula: 0.25*confidence + 0.20*relevance + 0.15*trust
+                 + 0.15*novelty + 0.10*specificity + 0.10*actionability
+                 - 0.15*fabrication_risk - staleness_penalty
+                 + cross_ref_boost
+
+        Recomputes every battery run so that changes to staleness_penalty
+        and cross_ref_boost from earlier algorithms are reflected.
+
+        Returns number of conditions updated.
+        """
+        # Count how many will be updated before running
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM conditions WHERE scored_at != ''"
+        ).fetchone()[0]
+        if count == 0:
+            return 0
+        self.conn.execute(
+            """UPDATE conditions
+               SET composite_quality = (
+                   0.25 * confidence
+                   + 0.20 * relevance_score
+                   + 0.15 * trust_score
+                   + 0.15 * novelty_score
+                   + 0.10 * specificity_score
+                   + 0.10 * actionability_score
+                   - 0.15 * fabrication_risk
+                   - staleness_penalty
+                   + cross_ref_boost
+               ),
+               processing_status = CASE
+                   WHEN processing_status IN ('raw', 'scored') THEN 'analysed'
+                   ELSE processing_status
+               END
+               WHERE scored_at != ''
+            """
+        )
+        logger.info("Composite quality: updated %d conditions", count)
+        return count
+
+    def apply_quality_gate(self, threshold: float = 0.25) -> int:
+        """Mark low-quality conditions for expansion instead of
+        passing them to the swarm.  Pure SQL.
+
+        Conditions below *threshold* get expansion_strategy set to
+        'exa_search' so the researcher's next iteration can enrich
+        them rather than starting from scratch.
+
+        Returns number of conditions flagged for expansion.
+        """
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE composite_quality >= 0.0 AND composite_quality < ? "
+            "AND expansion_strategy = 'none'",
+            [threshold],
+        ).fetchone()[0]
+        if count == 0:
+            return 0
+        self.conn.execute(
+            """UPDATE conditions
+               SET expansion_strategy = 'exa_search',
+                   expansion_hint = 'Low composite quality ('
+                       || ROUND(composite_quality, 2) || ') — '
+                       || 'search for more specific data on: '
+                       || SUBSTR(fact, 1, 120)
+               WHERE composite_quality >= 0.0
+                 AND composite_quality < ?
+                 AND expansion_strategy = 'none'
+            """,
+            [threshold],
+        )
+        if count:
+            logger.info(
+                "Quality gate: flagged %d conditions for expansion "
+                "(threshold=%.2f)", count, threshold,
+            )
+        return count
+
+    def apply_specificity_gate(self) -> int:
+        """Flag vague/generic conditions for enrichment via search.
+
+        A condition is vague if specificity_score < 0.3 AND it has no
+        source URL.  These get expansion_strategy = 'brave_deep' to
+        trigger a deep search for concrete data.  Pure SQL.
+
+        Returns number flagged.
+        """
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE specificity_score < 0.3 "
+            "AND (source_url = '' OR source_url IS NULL) "
+            "AND expansion_strategy = 'none' AND scored_at != ''"
+        ).fetchone()[0]
+        if count == 0:
+            return 0
+        self.conn.execute(
+            """UPDATE conditions
+               SET expansion_strategy = 'brave_deep',
+                   expansion_hint = 'Vague finding — search for '
+                       || 'specific names/numbers/dates: '
+                       || SUBSTR(fact, 1, 120)
+               WHERE specificity_score < 0.3
+                 AND (source_url = '' OR source_url IS NULL)
+                 AND expansion_strategy = 'none'
+                 AND scored_at != ''
+            """
+        )
+        if count:
+            logger.info(
+                "Specificity gate: flagged %d vague conditions "
+                "for deep search", count,
+            )
+        return count
+
+    def compute_cross_ref_boost(self) -> int:
+        """Boost conditions that are confirmed by multiple angles.
+
+        If a condition has similarity_flags entries with relationship
+        = 'confirms' from different angles, its cross_ref_boost
+        increases.  Pure SQL.
+
+        Returns number of conditions boosted.
+        """
+        # Find conditions with confirming pairs from different angles
+        self.conn.execute(
+            """UPDATE conditions SET cross_ref_boost = (
+                   SELECT COALESCE(
+                       MIN(0.2, COUNT(*) * 0.05), 0.0
+                   )
+                   FROM similarity_flags sf
+                   JOIN conditions c2
+                       ON (sf.condition_b = c2.id
+                           OR sf.condition_a = c2.id)
+                   WHERE (sf.condition_a = conditions.id
+                          OR sf.condition_b = conditions.id)
+                     AND sf.relationship IN ('confirms', 'related')
+                     AND c2.angle != conditions.angle
+                     AND c2.id != conditions.id
+               )
+               WHERE scored_at != ''
+            """
+        )
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE cross_ref_boost > 0.0"
+        ).fetchone()[0]
+        if count:
+            logger.info(
+                "Cross-reference boost: %d conditions boosted", count,
+            )
+        return count
+
+    def compute_staleness_decay(self, current_iteration: int = 0) -> int:
+        """Apply a small penalty to conditions from older iterations.
+
+        Newer conditions are fresher; older ones decay slightly so
+        the swarm prioritises recent findings.  Pure SQL.
+
+        Decay = 0.02 * (current_iteration - condition.iteration)
+        Capped at 0.10 so old conditions aren't killed, just deprioritised.
+
+        Returns number of conditions with non-zero penalty.
+        """
+        if current_iteration <= 0:
+            return 0
+        self.conn.execute(
+            """UPDATE conditions
+               SET staleness_penalty = MIN(
+                   0.10,
+                   0.02 * (? - iteration)
+               )
+               WHERE iteration < ?
+                 AND scored_at != ''
+            """,
+            [current_iteration, current_iteration],
+        )
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE staleness_penalty > 0.0"
+        ).fetchone()[0]
+        if count:
+            logger.info(
+                "Staleness decay: %d conditions penalised "
+                "(current_iteration=%d)", count, current_iteration,
+            )
+        return count
+
+    def compute_source_diversity(self) -> int:
+        """Boost conditions that have a source URL from a unique domain.
+
+        If many conditions cite the same domain, each gets a smaller
+        boost.  Conditions with unique domains get a larger boost.
+        This encourages source diversity in the final synthesis.
+        Pure SQL.
+
+        Returns number of conditions with updated boost.
+        """
+        # Extract domain from source_url and count occurrences
+        # DuckDB doesn't have a built-in domain extractor, so we
+        # use string functions to approximate it.
+        self.conn.execute(
+            """UPDATE conditions
+               SET cross_ref_boost = cross_ref_boost + CASE
+                   WHEN source_url != '' AND source_url IS NOT NULL THEN
+                       -- Unique domain bonus: 0.05 / count of same domain
+                       0.05 / GREATEST(1, (
+                           SELECT COUNT(*)
+                           FROM conditions c2
+                           WHERE c2.source_url != ''
+                             AND SPLIT_PART(
+                                 REPLACE(REPLACE(c2.source_url,
+                                     'https://', ''), 'http://', ''),
+                                 '/', 1
+                             ) = SPLIT_PART(
+                                 REPLACE(REPLACE(conditions.source_url,
+                                     'https://', ''), 'http://', ''),
+                                 '/', 1
+                             )
+                       ))
+                   ELSE 0.0
+               END
+               WHERE scored_at != ''
+                 AND source_url != ''
+                 AND source_url IS NOT NULL
+            """
+        )
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE scored_at != '' AND source_url != '' "
+            "AND source_url IS NOT NULL"
+        ).fetchone()[0]
+        if count:
+            logger.info(
+                "Source diversity: adjusted %d conditions", count,
+            )
+        return count
+
+    def detect_contradictions(self) -> int:
+        """Detect contradicting condition pairs via Flock LLM.
+
+        Only checks pairs that are already flagged as 'related' in
+        similarity_flags (sim > 0.3) — these are the most likely
+        candidates for contradiction.
+
+        Returns number of contradiction pairs found.
+        """
+        candidates = self.conn.execute(
+            """SELECT sf.condition_a, c1.fact,
+                      sf.condition_b, c2.fact
+               FROM similarity_flags sf
+               JOIN conditions c1 ON sf.condition_a = c1.id
+               JOIN conditions c2 ON sf.condition_b = c2.id
+               WHERE sf.relationship = 'related'
+                 AND sf.similarity_score BETWEEN 0.3 AND 0.7
+                 AND c1.contradiction_flag = FALSE
+                 AND c2.contradiction_flag = FALSE
+            """
+        ).fetchall()
+        if not candidates:
+            return 0
+
+        contradiction_count = 0
+        for id_a, fact_a, id_b, fact_b in candidates:
+            try:
+                result = self._flock_complete(
+                    "Do these two statements contradict each other? "
+                    "Return a contradiction score: 0.0 (no "
+                    "contradiction) to 1.0 (direct contradiction). "
+                    "Return ONLY a decimal number. "
+                    "A: " + fact_a + " B: " + fact_b
+                )
+                score = self._parse_float(result, 0.0)
+                if score > 0.6:
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO contradiction_pairs "
+                        "(condition_a, condition_b, "
+                        "contradiction_score, description) "
+                        "VALUES (?, ?, ?, 'auto-detected')",
+                        [id_a, id_b, score],
+                    )
+                    self.conn.execute(
+                        "UPDATE conditions "
+                        "SET contradiction_flag = TRUE, "
+                        "    contradiction_partner = ? "
+                        "WHERE id = ?",
+                        [id_b, id_a],
+                    )
+                    self.conn.execute(
+                        "UPDATE conditions "
+                        "SET contradiction_flag = TRUE, "
+                        "    contradiction_partner = ? "
+                        "WHERE id = ?",
+                        [id_a, id_b],
+                    )
+                    contradiction_count += 1
+            except Exception:
+                logger.warning(
+                    "Contradiction check failed for (%d, %d)",
+                    id_a, id_b, exc_info=True,
+                )
+
+        if contradiction_count:
+            logger.info(
+                "Contradiction detection: %d pairs found",
+                contradiction_count,
+            )
+        return contradiction_count
+
+    def compute_information_density(self) -> int:
+        """Score conditions by information density via Flock LLM.
+
+        High-density conditions pack many facts/data points per
+        character.  Low-density conditions are verbose or repetitive.
+
+        Returns number of conditions scored.
+        """
+        unscored = self.conn.execute(
+            "SELECT id, fact FROM conditions "
+            "WHERE information_density < 0.0 AND scored_at != ''"
+        ).fetchall()
+        if not unscored:
+            return 0
+
+        for cid, fact in unscored:
+            try:
+                result = self._flock_complete(
+                    "Rate the information density of this text on "
+                    "0.0 to 1.0. High density = many concrete facts, "
+                    "numbers, names, URLs per sentence. Low density "
+                    "= verbose, repetitive, or filler text. Return "
+                    "ONLY a decimal number. "
+                    "Text: " + fact
+                )
+                density = self._parse_float(result, 0.5)
+                self.conn.execute(
+                    "UPDATE conditions "
+                    "SET information_density = ? WHERE id = ?",
+                    [density, cid],
+                )
+            except Exception:
+                logger.warning(
+                    "Info density scoring failed for #%d", cid,
+                    exc_info=True,
+                )
+
+        logger.info(
+            "Information density: scored %d conditions",
+            len(unscored),
+        )
+        return len(unscored)
+
+    def cluster_conditions(self) -> int:
+        """Cluster similar conditions and rank within each cluster.
+
+        Uses the existing similarity_flags to build clusters via a
+        simple union-find approach.  Within each cluster, the
+        condition with the highest composite_quality becomes rank 0
+        (representative).  Others get rank 1+ (supplementary).
+
+        The swarm can then process only cluster representatives
+        (rank 0) and fold in supplementary context, dramatically
+        reducing LLM calls.
+
+        Returns number of clusters formed.
+        """
+        # Get all conditions and their similarity edges
+        conditions = self.conn.execute(
+            "SELECT id FROM conditions WHERE scored_at != ''"
+        ).fetchall()
+        if not conditions:
+            return 0
+
+        # Union-find for clustering
+        parent: dict[int, int] = {row[0]: row[0] for row in conditions}
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: int, b: int) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        # Build clusters from high-similarity pairs
+        edges = self.conn.execute(
+            "SELECT condition_a, condition_b "
+            "FROM similarity_flags "
+            "WHERE similarity_score > 0.5"
+        ).fetchall()
+        for a, b in edges:
+            if a in parent and b in parent:
+                union(a, b)
+
+        # Group by cluster root
+        clusters: dict[int, list[int]] = {}
+        for cid in parent:
+            root = find(cid)
+            clusters.setdefault(root, []).append(cid)
+
+        # Assign cluster IDs and ranks
+        cluster_count = 0
+        for cluster_idx, (_, members) in enumerate(
+            sorted(clusters.items())
+        ):
+            if len(members) < 2:
+                # Singleton — no clustering needed
+                self.conn.execute(
+                    "UPDATE conditions SET cluster_id = ?, "
+                    "cluster_rank = 0 WHERE id = ?",
+                    [cluster_idx, members[0]],
+                )
+                continue
+
+            cluster_count += 1
+            # Rank by composite_quality within cluster
+            scored = self.conn.execute(
+                "SELECT id, composite_quality FROM conditions "
+                "WHERE id IN ({}) "
+                "ORDER BY composite_quality DESC".format(
+                    ",".join("?" * len(members))
+                ),
+                members,
+            ).fetchall()
+            for rank, (cid, _) in enumerate(scored):
+                self.conn.execute(
+                    "UPDATE conditions SET cluster_id = ?, "
+                    "cluster_rank = ? WHERE id = ?",
+                    [cluster_idx, rank, cid],
+                )
+
+        # Update processing status
+        self.conn.execute(
+            """UPDATE conditions
+               SET processing_status = 'clustered'
+               WHERE processing_status = 'analysed'
+                 AND cluster_id >= 0
+            """
+        )
+
+        logger.info(
+            "Clustering: formed %d multi-member clusters from %d "
+            "conditions", cluster_count, len(parent),
+        )
+        return cluster_count
+
+    def compress_redundant(self) -> int:
+        """Merge near-duplicate conditions via Flock LLM.
+
+        For pairs with duplication_score > 0.85, asks Flock to merge
+        them into a single stronger condition.  The merged condition
+        inherits the best scores from both parents.
+
+        Returns number of merges performed.
+        """
+        dupes = self.conn.execute(
+            """SELECT sf.condition_a, c1.fact, c1.source_url,
+                      c1.composite_quality AS quality_a,
+                      sf.condition_b, c2.fact, c2.source_url,
+                      c2.composite_quality AS quality_b
+               FROM similarity_flags sf
+               JOIN conditions c1 ON sf.condition_a = c1.id
+               JOIN conditions c2 ON sf.condition_b = c2.id
+               WHERE sf.relationship = 'duplicate'
+                 AND sf.similarity_score > 0.85
+                 AND c1.processing_status != 'merged'
+                 AND c2.processing_status != 'merged'
+            """
+        ).fetchall()
+        if not dupes:
+            return 0
+
+        merge_count = 0
+        for id_a, fact_a, url_a, q_a, id_b, fact_b, url_b, q_b in dupes:
+            try:
+                merged_fact = self._flock_complete(
+                    "Merge these two near-duplicate findings into "
+                    "one stronger, more complete statement. Keep "
+                    "ALL specific data from both. If one has a URL "
+                    "and the other doesn't, keep the URL. Return "
+                    "ONLY the merged statement, nothing else. "
+                    "A: " + fact_a + " B: " + fact_b
+                )
+                if not merged_fact or not merged_fact.strip():
+                    continue
+
+                # Keep the higher-scored condition, merge away the lower
+                if (q_b or 0.0) > (q_a or 0.0):
+                    survivor_id, merged_id = id_b, id_a
+                    best_url = url_b or url_a
+                else:
+                    survivor_id, merged_id = id_a, id_b
+                    best_url = url_a or url_b
+
+                self.conn.execute(
+                    "UPDATE conditions SET fact = ?, "
+                    "source_url = CASE "
+                    "  WHEN source_url = '' THEN ? "
+                    "  ELSE source_url END "
+                    "WHERE id = ?",
+                    [merged_fact.strip(), best_url, survivor_id],
+                )
+                self.conn.execute(
+                    "UPDATE conditions "
+                    "SET processing_status = 'merged', "
+                    "    duplication_score = 1.0 "
+                    "WHERE id = ?",
+                    [merged_id],
+                )
+                merge_count += 1
+            except Exception:
+                logger.warning(
+                    "Redundancy merge failed for (%d, %d)",
+                    id_a, id_b, exc_info=True,
+                )
+
+        if merge_count:
+            logger.info(
+                "Redundancy compression: merged %d pairs",
+                merge_count,
+            )
+        return merge_count
+
+    def mark_ready(self) -> int:
+        """Mark all fully-processed conditions as 'ready' for the
+        swarm.  Pure SQL.
+
+        A condition is ready if:
+        - It's been scored (scored_at != '')
+        - It hasn't been merged away (processing_status != 'merged')
+        - It's not flagged for expansion (expansion_strategy = 'none')
+
+        Returns number marked ready.
+        """
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE scored_at != '' "
+            "AND processing_status NOT IN ('merged', 'ready') "
+            "AND expansion_strategy = 'none'"
+        ).fetchone()[0]
+        self.conn.execute(
+            """UPDATE conditions
+               SET processing_status = 'ready'
+               WHERE scored_at != ''
+                 AND processing_status NOT IN ('merged', 'ready')
+                 AND expansion_strategy = 'none'
+            """
+        )
+        logger.info("Marked %d conditions as ready for swarm", count)
+        return count
+
+    def get_expansion_targets(self) -> list[dict]:
+        """Return conditions flagged for expansion with their hints.
+
+        The researcher can use these to guide its next iteration's
+        search strategy instead of starting from scratch.
+        """
+        rows = self.conn.execute(
+            """SELECT id, fact, expansion_strategy, expansion_hint,
+                      specificity_score, composite_quality
+               FROM conditions
+               WHERE expansion_strategy != 'none'
+               ORDER BY composite_quality ASC
+            """
+        ).fetchall()
+        return [
+            {
+                "id": r[0], "fact": r[1],
+                "strategy": r[2], "hint": r[3],
+                "specificity": r[4], "quality": r[5],
+            }
+            for r in rows
+        ]
+
+    def get_cluster_representatives(self) -> list[dict]:
+        """Return only cluster representatives (rank 0) for the swarm.
+
+        This is the key optimisation: instead of processing all 97
+        conditions, the swarm only processes ~20-30 cluster reps.
+        """
+        rows = self.conn.execute(
+            """SELECT id, fact, source_url, confidence, trust_score,
+                      novelty_score, specificity_score,
+                      composite_quality, cluster_id,
+                      (SELECT COUNT(*) FROM conditions c2
+                       WHERE c2.cluster_id = conditions.cluster_id)
+                       AS cluster_size
+               FROM conditions
+               WHERE cluster_rank = 0
+                 AND processing_status NOT IN ('merged')
+                 AND scored_at != ''
+               ORDER BY composite_quality DESC
+            """
+        ).fetchall()
+        return [
+            {
+                "id": r[0], "fact": r[1], "source_url": r[2],
+                "confidence": r[3], "trust_score": r[4],
+                "novelty_score": r[5], "specificity_score": r[6],
+                "composite_quality": r[7], "cluster_id": r[8],
+                "cluster_size": r[9],
+            }
+            for r in rows
+        ]
+
+    def run_algorithm_battery(
+        self, user_query: str = "", iteration: int = 0,
+    ) -> dict[str, int]:
+        """Run the full battery of algorithms in sequence.
+
+        This is the main entry point called by the condition manager
+        after scoring and dedup.  Returns a dict of algorithm names
+        to their result counts for logging.
+
+        Pipeline order:
+        1. Staleness decay (SQL) — penalise old iterations
+        2. Cross-reference boost (SQL) — reward corroborated findings
+        3. Source diversity (SQL) — reward unique sources
+        4. Composite quality (SQL) — compute weighted score
+        5. Quality gate (SQL) — flag low-quality for expansion
+        6. Specificity gate (SQL) — flag vague for deep search
+        7. Information density (Flock LLM) — score info-per-char
+        8. Contradiction detection (Flock LLM) — find conflicts
+        9. Clustering (SQL) — group similar conditions
+        10. Redundancy compression (Flock LLM) — merge duplicates
+        11. Mark ready (SQL) — final processing status
+        """
+        results: dict[str, int] = {}
+
+        results["staleness_decay"] = self.compute_staleness_decay(
+            iteration
+        )
+        results["cross_ref_boost"] = self.compute_cross_ref_boost()
+        results["source_diversity"] = self.compute_source_diversity()
+        results["composite_quality"] = self.compute_composite_quality()
+        results["quality_gate"] = self.apply_quality_gate()
+        results["specificity_gate"] = self.apply_specificity_gate()
+        results["info_density"] = self.compute_information_density()
+        results["contradictions"] = self.detect_contradictions()
+        results["clusters"] = self.cluster_conditions()
+        results["redundancy_merges"] = self.compress_redundant()
+        results["marked_ready"] = self.mark_ready()
+
+        # Summary stats
+        total = self.count()
+        ready = self.conn.execute(
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE processing_status = 'ready'"
+        ).fetchone()[0]
+        expansion = self.conn.execute(
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE expansion_strategy != 'none'"
+        ).fetchone()[0]
+        merged = self.conn.execute(
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE processing_status = 'merged'"
+        ).fetchone()[0]
+        cluster_reps = len(self.get_cluster_representatives())
+
+        logger.info(
+            "Algorithm battery complete: %d total, %d ready, "
+            "%d for expansion, %d merged, %d cluster reps "
+            "(swarm will process %d instead of %d)",
+            total, ready, expansion, merged, cluster_reps,
+            cluster_reps, total,
+        )
+
+        results["total"] = total
+        results["ready"] = ready
+        results["expansion_targets"] = expansion
+        results["merged"] = merged
+        results["cluster_reps"] = cluster_reps
+
+        return results
 
     # ------------------------------------------------------------------
     # Query methods (consumer-specific)
