@@ -79,7 +79,12 @@ from agents.thinker import thinker_agent
 from agents.researcher import researcher_agent
 from agents.synthesiser import synthesiser_agent
 from agents.loop_synthesiser import loop_synthesiser_agent
-from callbacks.condition_manager import build_corpus_state, cleanup_corpus, init_corpus
+from callbacks.condition_manager import (
+    build_corpus_state,
+    cleanup_corpus,
+    init_corpus,
+    run_swarm_synthesis,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +105,37 @@ def _init_pipeline_state(
             state[k] = v
         init_corpus(state)
         logger.info("Pipeline state initialised: corpus_key=%s", state["_corpus_key"])
+    return None
+
+
+def _pre_synthesiser_swarm(
+    callback_context: CallbackContext,
+) -> Optional[genai_types.Content]:
+    """Run Flock gossip swarm synthesis before the final synthesiser.
+
+    Replaces the raw corpus of atomic conditions in
+    ``state["corpus_for_synthesis"]`` with the swarm-synthesised report.
+    The swarm uses a 3-phase gossip protocol for large corpora:
+    per-angle workers → peer refinement → queen merge.
+
+    The final synthesiser agent then polishes and restructures this
+    swarm output — it works on a pre-synthesised narrative, not terse
+    atomic facts.
+    """
+    state = callback_context.state
+    swarm_report = run_swarm_synthesis(state)
+    if swarm_report and swarm_report.strip():
+        state["corpus_for_synthesis"] = swarm_report
+        logger.info(
+            "Swarm synthesis injected into corpus_for_synthesis "
+            "(%d chars)",
+            len(swarm_report),
+        )
+    else:
+        logger.warning(
+            "Swarm synthesis returned empty — final synthesiser "
+            "will read the raw corpus format instead"
+        )
     return None
 
 
@@ -133,15 +169,32 @@ research_loop = LoopAgent(
 # ---------------------------------------------------------------------------
 # Outer pipeline: run the research loop, then synthesise once.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Wrap the final synthesiser with a before_agent_callback that runs the
+# Flock gossip swarm.  ADK Agent() doesn't accept before_agent_callback
+# directly, so we wrap it in a SequentialAgent of one.
+# ---------------------------------------------------------------------------
+_synthesiser_with_swarm = SequentialAgent(
+    name="swarm_then_synthesise",
+    description=(
+        "Runs Flock gossip swarm synthesis on the corpus, then the "
+        "final synthesiser agent polishes the swarm output into a "
+        "coherent, readable report."
+    ),
+    sub_agents=[synthesiser_agent],
+    before_agent_callback=_pre_synthesiser_swarm,
+)
+
 pipeline_agent = SequentialAgent(
     name="mirothinker_pipeline",
     description=(
         "Blackboard research pipeline: LoopAgent(thinker → researcher → "
         "loop_synthesiser) runs iteratively with ever-expanding context. "
         "Each round: brute expansion → intelligent fermentation → strategy. "
-        "The final synthesiser writes the definitive report after the loop."
+        "Flock gossip swarm synthesises the corpus, then the final "
+        "synthesiser writes the definitive report."
     ),
-    sub_agents=[research_loop, synthesiser_agent],
+    sub_agents=[research_loop, _synthesiser_with_swarm],
     before_agent_callback=_init_pipeline_state,
     after_agent_callback=_cleanup_pipeline_state,
 )

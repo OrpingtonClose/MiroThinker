@@ -22,7 +22,9 @@ from __future__ import annotations
 from google.adk import Agent
 
 from agents.model_config import build_model
+from callbacks.after_model import after_model_callback
 from callbacks.after_tool import after_tool_callback
+from callbacks.before_model import before_model_callback
 from callbacks.before_tool import before_tool_callback
 from tools.mcp_tools import get_tools
 
@@ -65,6 +67,8 @@ executor_agent = Agent(
     ),
     instruction=EXECUTOR_INSTRUCTION,
     tools=get_tools(["brave-search", "firecrawl", "exa", "tool-python"]),
+    before_model_callback=before_model_callback,
+    after_model_callback=after_model_callback,
     before_tool_callback=before_tool_callback,
     after_tool_callback=after_tool_callback,
 )
