@@ -19,6 +19,7 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import glob
 import json
 import logging
@@ -29,6 +30,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from dashboard import get_any_active_collector
+from dashboard import event_store
 from dashboard.html_report import generate_dashboard_html
 
 logger = logging.getLogger(__name__)
@@ -38,18 +40,44 @@ _DASHBOARD_LOGS_DIR = os.environ.get(
     os.path.join(os.path.dirname(os.path.dirname(__file__)), "dashboard_logs"),
 )
 
+# Thread pool for SQLite reads — completely decoupled from the async event loop
+_db_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="dashboard-db"
+)
+
 
 async def _sse_generator(request: Request):
-    """Yield SSE events with collector snapshots every 500ms."""
+    """Yield SSE events with snapshots every 500ms.
+
+    Reads from SQLite via a thread-pool executor so the SSE stream
+    works even when the async event loop is saturated by LLM calls.
+    Falls back to the in-memory collector if SQLite has no data.
+    """
+    loop = asyncio.get_running_loop()
     while True:
         if await request.is_disconnected():
             break
-        collector = get_any_active_collector()
-        if collector:
-            snapshot = collector.snapshot()
+
+        # Try SQLite first — only_running=True so we don't return stale
+        # completed-run data when no pipeline is active
+        try:
+            snapshot = await loop.run_in_executor(
+                _db_executor,
+                lambda: event_store.get_latest_snapshot(None, only_running=True),
+            )
+        except Exception:
+            snapshot = None
+
+        if snapshot:
             yield f"data: {json.dumps(snapshot, default=str)}\n\n"
         else:
-            yield f"data: {json.dumps({'status': 'idle', 'message': 'No active pipeline run'})}\n\n"
+            # Fall back to in-memory collector
+            collector = get_any_active_collector()
+            if collector:
+                snapshot = collector.snapshot()
+                yield f"data: {json.dumps(snapshot, default=str)}\n\n"
+            else:
+                yield f"data: {json.dumps({'status': 'idle', 'message': 'No active pipeline run'})}\n\n"
         await asyncio.sleep(0.5)
 
 
@@ -103,13 +131,40 @@ def _load_run_by_id(session_prefix: str) -> dict[str, Any] | None:
 
 
 async def dashboard_runs(request: Request) -> JSONResponse:
-    """GET /dashboard/runs — list all saved dashboard JSONs."""
-    return JSONResponse({"runs": _load_runs()})
+    """GET /dashboard/runs — list all saved dashboard JSONs + SQLite runs."""
+    loop = asyncio.get_running_loop()
+
+    # Get runs from SQLite (includes currently running ones)
+    try:
+        db_runs = await loop.run_in_executor(_db_executor, event_store.get_all_runs)
+    except Exception:
+        db_runs = []
+
+    # Also get legacy JSON file runs
+    file_runs = _load_runs()
+
+    # Merge: SQLite runs take priority, add file-only runs
+    seen_ids = {r["session_id"] for r in db_runs}
+    merged = db_runs + [r for r in file_runs if r.get("session_id") not in seen_ids]
+
+    return JSONResponse({"runs": merged})
 
 
 async def dashboard_latest(request: Request) -> JSONResponse:
-    """GET /dashboard/latest — most recent finalized run."""
-    # First check if there's an active collector with data
+    """GET /dashboard/latest — most recent snapshot (from SQLite or memory)."""
+    loop = asyncio.get_running_loop()
+
+    # Try SQLite first (works even under load)
+    try:
+        snapshot = await loop.run_in_executor(
+            _db_executor, event_store.get_latest_snapshot, None
+        )
+    except Exception:
+        snapshot = None
+    if snapshot:
+        return JSONResponse(snapshot)
+
+    # Fall back to in-memory collector
     collector = get_any_active_collector()
     if collector:
         return JSONResponse(collector.snapshot())
@@ -128,8 +183,17 @@ async def dashboard_latest(request: Request) -> JSONResponse:
 
 async def dashboard_run_detail(request: Request) -> JSONResponse:
     """GET /dashboard/run/{session_id} — fetch a specific run."""
+    loop = asyncio.get_running_loop()
     session_id = request.path_params.get("session_id", "")
     data = _load_run_by_id(session_id)
+    if data is None:
+        # Fall back to SQLite (covers currently-running and finalized runs)
+        try:
+            data = await loop.run_in_executor(
+                _db_executor, event_store.get_run_detail, session_id
+            )
+        except Exception:
+            data = None
     if data:
         return JSONResponse(data)
     return JSONResponse({"error": f"Run {session_id} not found"}, status_code=404)
@@ -137,8 +201,17 @@ async def dashboard_run_detail(request: Request) -> JSONResponse:
 
 async def dashboard_html(request: Request) -> HTMLResponse:
     """GET /dashboard/html/{session_id} — render a run as HTML."""
+    loop = asyncio.get_running_loop()
     session_id = request.path_params.get("session_id", "")
     data = _load_run_by_id(session_id)
+    if not data:
+        # Fall back to SQLite
+        try:
+            data = await loop.run_in_executor(
+                _db_executor, event_store.get_run_detail, session_id
+            )
+        except Exception:
+            data = None
     if not data:
         return HTMLResponse(
             f"<h1>Run {session_id} not found</h1>", status_code=404
