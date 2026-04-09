@@ -28,7 +28,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
-from dashboard import get_active_collector
+from dashboard import get_any_active_collector
 from dashboard.html_report import generate_dashboard_html
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ async def _sse_generator(request: Request):
     while True:
         if await request.is_disconnected():
             break
-        collector = get_active_collector()
+        collector = get_any_active_collector()
         if collector:
             snapshot = collector.snapshot()
             yield f"data: {json.dumps(snapshot, default=str)}\n\n"
@@ -110,7 +110,7 @@ async def dashboard_runs(request: Request) -> JSONResponse:
 async def dashboard_latest(request: Request) -> JSONResponse:
     """GET /dashboard/latest — most recent finalized run."""
     # First check if there's an active collector with data
-    collector = get_active_collector()
+    collector = get_any_active_collector()
     if collector:
         return JSONResponse(collector.snapshot())
 
