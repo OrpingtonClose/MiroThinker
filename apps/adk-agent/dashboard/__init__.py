@@ -44,13 +44,19 @@ def set_active_collector(collector: PipelineCollector | None) -> None:
 
     Updates both the per-request ``ContextVar`` (for ADK callbacks) and
     the shared registry (for dashboard SSE/REST endpoints).
+
+    When *clearing* (``collector is None``), the previous collector for
+    this context is automatically removed from the shared registry so
+    callers like ``main.py`` don't need to call ``unregister_collector``
+    separately.
     """
+    old = _active_collector.get()
     _active_collector.set(collector)
     with _registry_lock:
         if collector is not None:
             _active_collectors[collector.session_id] = collector
-        # When clearing, remove the collector that matches
-        # the current context (if any) from the registry.
+        elif old is not None:
+            _active_collectors.pop(old.session_id, None)
 
 
 def unregister_collector(session_id: str) -> None:
