@@ -59,9 +59,12 @@ async def _sse_generator(request: Request):
             break
 
         # Try SQLite first (works even when event loop is busy)
-        snapshot = await loop.run_in_executor(
-            _db_executor, event_store.get_latest_snapshot, None
-        )
+        try:
+            snapshot = await loop.run_in_executor(
+                _db_executor, event_store.get_latest_snapshot, None
+            )
+        except Exception:
+            snapshot = None
 
         if snapshot:
             yield f"data: {json.dumps(snapshot, default=str)}\n\n"
@@ -130,7 +133,10 @@ async def dashboard_runs(request: Request) -> JSONResponse:
     loop = asyncio.get_running_loop()
 
     # Get runs from SQLite (includes currently running ones)
-    db_runs = await loop.run_in_executor(_db_executor, event_store.get_all_runs)
+    try:
+        db_runs = await loop.run_in_executor(_db_executor, event_store.get_all_runs)
+    except Exception:
+        db_runs = []
 
     # Also get legacy JSON file runs
     file_runs = _load_runs()
@@ -147,9 +153,12 @@ async def dashboard_latest(request: Request) -> JSONResponse:
     loop = asyncio.get_running_loop()
 
     # Try SQLite first (works even under load)
-    snapshot = await loop.run_in_executor(
-        _db_executor, event_store.get_latest_snapshot, None
-    )
+    try:
+        snapshot = await loop.run_in_executor(
+            _db_executor, event_store.get_latest_snapshot, None
+        )
+    except Exception:
+        snapshot = None
     if snapshot:
         return JSONResponse(snapshot)
 

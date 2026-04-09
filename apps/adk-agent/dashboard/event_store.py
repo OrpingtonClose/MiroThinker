@@ -170,10 +170,12 @@ def _get_reader() -> sqlite3.Connection:
     """Create a new read-only connection for the current thread.
 
     Each reader gets its own connection so there's no contention with
-    the writer.  WAL mode allows concurrent reads.
+    the writer.  WAL mode allows concurrent reads.  We also ensure the
+    schema exists so readers work even if no pipeline has run yet.
     """
     conn = sqlite3.connect(_DB_PATH, timeout=5)
     conn.execute("PRAGMA journal_mode=WAL")
+    _init_schema(conn)
     conn.execute("PRAGMA query_only=ON")
     conn.row_factory = sqlite3.Row
     return conn
