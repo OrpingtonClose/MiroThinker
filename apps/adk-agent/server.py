@@ -52,7 +52,7 @@ from ag_ui_adk import ADKAgent, add_adk_fastapi_endpoint
 from google.adk.apps import App
 
 from agents.pipeline import pipeline_agent
-from dashboard import set_active_collector
+from dashboard import set_active_collector, unregister_collector
 from dashboard.collector import PipelineCollector
 from dashboard.sse import mount_dashboard_routes
 from plugins import setup_otel, build_plugins
@@ -189,6 +189,7 @@ class AGUIRunCollectorMiddleware(BaseHTTPMiddleware):
             elapsed = time.perf_counter() - start
             collector.phase_end("ag_ui_request", "error")
             collector.finalize(result_text="")
+            unregister_collector(session_id)
             set_active_collector(None)
             logger.error(
                 "AG-UI RUN ERROR session=%s elapsed=%.1fs",
@@ -254,6 +255,7 @@ class AGUIRunCollectorMiddleware(BaseHTTPMiddleware):
                         session_id,
                         elapsed,
                     )
+                unregister_collector(session_id)
                 set_active_collector(None)
 
         response.body_iterator = _finalizing_iterator()
