@@ -33,6 +33,49 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _ingest_text_into_corpus(
+    state: dict,
+    text: str,
+    source_type: str,
+) -> int:
+    """Shared helper: atomise *text* and ingest into the session corpus.
+
+    Returns the number of newly admitted conditions.
+    """
+    corpus = _get_corpus(state)
+    iteration = state.get("_corpus_iteration", 0)
+
+    ids = corpus.ingest_raw(
+        raw_text=text,
+        source_type=source_type,
+        source_ref="",
+        angle=f"iteration_{iteration}",
+        iteration=iteration,
+    )
+    admitted_count = len(ids)
+    total_count = corpus.count()
+    if admitted_count:
+        logger.info(
+            "Condition manager: ingested %d conditions from %s "
+            "(iteration %d, total %d)",
+            admitted_count, source_type, iteration, total_count,
+        )
+        _c = get_active_collector()
+        if _c:
+            _c.corpus_update(admitted_count, total_count, iteration)
+
+    # Score & dedup
+    user_query = state.get("user_query", "")
+    scored = corpus.score_new_conditions(user_query)
+    if scored:
+        logger.info("Scored %d conditions via Flock", scored)
+    deduped = corpus.compute_duplications()
+    if deduped:
+        logger.info("Evaluated %d dedup pairs via Flock", deduped)
+
+    return admitted_count
+
+
 def researcher_condition_callback(
     callback_context: CallbackContext,
 ) -> Optional[genai_types.Content]:
@@ -53,41 +96,10 @@ def researcher_condition_callback(
         state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
         return None
 
-    # Track iteration number
-    iteration = state.get("_corpus_iteration", 0)
-
-    # Ingest raw findings via Flock atomisation (replaces regex parsing)
-    ids = corpus.ingest_raw(
-        raw_text=findings_text,
-        source_type="researcher",
-        source_ref="",
-        angle=f"iteration_{iteration}",
-        iteration=iteration,
-    )
-    admitted_count = len(ids)
-    total_count = corpus.count()
-    if admitted_count:
-        logger.info(
-            "Condition manager: ingested %d conditions "
-            "(iteration %d, total %d)",
-            admitted_count, iteration, total_count,
-        )
-        _c = get_active_collector()
-        if _c:
-            _c.corpus_update(admitted_count, total_count, iteration)
-
-    # Score newly ingested conditions and compute dedup flags
-    user_query = state.get("user_query", "")
-    scored = corpus.score_new_conditions(user_query)
-    if scored:
-        logger.info("Scored %d conditions via Flock", scored)
-    deduped = corpus.compute_duplications()
-    if deduped:
-        logger.info("Evaluated %d dedup pairs via Flock", deduped)
+    _ingest_text_into_corpus(state, findings_text, "researcher")
 
     # Update state with structured corpus for thinker
     state["research_findings"] = corpus.format_for_thinker()
-    state["_corpus_iteration"] = iteration + 1
 
     # Also store synthesiser-formatted version for the final stage
     state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
@@ -177,15 +189,61 @@ def get_corpus_text(state: dict) -> str:
     return ""
 
 
+def synthesis_condition_callback(
+    callback_context: CallbackContext,
+) -> Optional[genai_types.Content]:
+    """After-agent callback for the in-loop synthesiser.
+
+    Reads the synthesiser's output (``state["loop_synthesis"]``),
+    ingests it back into the CorpusStore via Flock atomisation so
+    the synthesised insights are treated equally to raw findings.
+
+    This implements the *fermentation* step: brute expansion
+    (researcher) → intelligent structuring (synthesiser) → corpus
+    re-ingestion → fuels the next round of expansion.
+    """
+    state = callback_context.state
+    synthesis_text = state.get("loop_synthesis", "")
+    if not synthesis_text or not synthesis_text.strip():
+        # Still advance the iteration counter even if synthesis is empty,
+        # so the next thinker round sees a fresh iteration number.
+        state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
+        return None
+
+    _ingest_text_into_corpus(state, synthesis_text, "synthesiser")
+
+    # Refresh corpus views so the thinker sees the enriched corpus
+    corpus = _get_corpus(state)
+    state["research_findings"] = corpus.format_for_thinker()
+    state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
+
+    # Advance iteration at the loop boundary — the synthesiser is the
+    # last agent in each LoopAgent iteration, so incrementing here
+    # ensures researcher + synthesiser from the same round share the
+    # same iteration tag.
+    state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
+
+    return None  # preserve original synthesiser output
+
+
 def cleanup_corpus(state: dict) -> None:
     """Close and remove the CorpusStore for a completed pipeline run.
 
     Call this after ``run_pipeline`` returns to release the DuckDB
     connection and its in-memory data.  Without this, each pipeline
     run leaks a CorpusStore in the module-level ``_corpus_stores`` dict.
+
+    Also removes corpus-related keys from *state* so that
+    :func:`_init_pipeline_state` properly re-initialises on the next
+    pipeline run within the same session.
     """
     key = state.get("_corpus_key")
     if key and key in _corpus_stores:
         _corpus_stores[key].close()
         del _corpus_stores[key]
         logger.info("Cleaned up CorpusStore for key=%s", key)
+    # Clear corpus-related state keys so _init_pipeline_state
+    # re-initialises cleanly on session reuse.
+    for k in ("_corpus_key", "_corpus_iteration", "research_findings",
+              "corpus_for_synthesis", "loop_synthesis"):
+        state.pop(k, None)

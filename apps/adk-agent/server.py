@@ -3,9 +3,18 @@
 
 """AG-UI FastAPI server for MiroThinker.
 
-Wraps the MiroThinker research_agent with the AG-UI protocol middleware,
+Wraps the MiroThinker pipeline_agent with the AG-UI protocol middleware,
 enabling rich frontends (CopilotKit, custom React, etc.) to interact with
 the agent via Server-Sent Events streaming.
+
+The pipeline architecture separates reasoning from tool execution:
+
+    SequentialAgent("mirothinker_pipeline")
+    └── LoopAgent("research_loop", max_iterations=3)
+    │     ├── thinker           → uncensored reasoning, no web tools
+    │     ├── researcher        → tool-capable, calls executor
+    │     └── loop_synthesiser  → fermentation, output re-ingested into corpus
+    └── synthesiser  → final uncensored report writing, no tools
 
 Usage:
     uvicorn server:app --host 0.0.0.0 --port 8000 --reload
@@ -27,7 +36,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from ag_ui_adk import ADKAgent, add_adk_fastapi_endpoint
 
-from agents.research import research_agent
+from agents.pipeline import pipeline_agent
 from dashboard.sse import mount_dashboard_routes
 
 logging.basicConfig(level=logging.INFO)
@@ -53,8 +62,9 @@ app.add_middleware(
 # ── AG-UI agent wrapper ────────────────────────────────────────────
 
 adk_agent = ADKAgent(
-    adk_agent=research_agent,
+    adk_agent=pipeline_agent,
     app_name="mirothinker_adk",
+    execution_timeout_seconds=1200,  # 20 min — pipeline needs time for 3 loop iterations + synthesis
 )
 
 # Mount the AG-UI SSE endpoint at root

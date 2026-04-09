@@ -64,12 +64,23 @@ class CorpusStore:
         db = _DB_PATH or ":memory:"
         self.conn = duckdb.connect(db)
 
-        # -- Load Flock extension --
-        self.conn.execute("INSTALL flock FROM community")
-        self.conn.execute("LOAD flock")
+        # -- Load Flock extension (graceful: unavailable on some DuckDB builds) --
+        self._flock_available = False
+        try:
+            self.conn.execute("INSTALL flock FROM community")
+            self.conn.execute("LOAD flock")
+            self._flock_available = True
+        except Exception:
+            logger.warning(
+                "Flock extension unavailable -- corpus will store "
+                "conditions but skip LLM-powered scoring/atomisation. "
+                "The pipeline still works; findings are stored as-is.",
+                exc_info=True,
+            )
 
         # -- Configure Flock secrets & model --
-        self._setup_flock()
+        if self._flock_available:
+            self._setup_flock()
 
         self._setup_tables()
         self._next_id = self._compute_next_id()
@@ -264,6 +275,8 @@ class CorpusStore:
 
     def _flock_complete(self, prompt: str) -> str:
         """Run a single Flock llm_complete call and return text."""
+        if not self._flock_available:
+            return ""
         row = self.conn.execute(
             "SELECT llm_complete("
             "{'model_name': 'corpus_model'}, "
@@ -707,6 +720,11 @@ class CorpusStore:
             )
             atomised = raw_text
 
+        # Fallback: if Flock returned empty (e.g. unavailable or blank
+        # response), use the raw text so findings are never silently lost.
+        if not atomised or not atomised.strip():
+            atomised = raw_text
+
         ids: list[int] = []
         for line in atomised.split("\n"):
             line = re.sub(r'^\s*(?:\d+[.)\]]\s*|[-*\u2022]\s+)', '', line.strip())
@@ -776,10 +794,20 @@ class CorpusStore:
 
     def synthesise(self, user_query: str) -> str:
         """Produce a synthesis of the corpus.
-        Uses gossip for large corpora."""
+        Uses gossip for large corpora.  Falls back to plain
+        concatenation when Flock is unavailable."""
         conditions = self.get_for_synthesiser()
         if not conditions:
             return "(no findings)"
+
+        if not self._flock_available:
+            # Simple concatenation fallback — the synthesiser LLM agent
+            # will still structure the final report from these findings.
+            return "\n".join(
+                f"- {c['fact']}"
+                + (f" [Source: {c['source_url']}]" if c["source_url"] else "")
+                for c in conditions
+            )
 
         if len(conditions) <= GOSSIP_THRESHOLD:
             return self._synthesise_single(conditions, user_query)
