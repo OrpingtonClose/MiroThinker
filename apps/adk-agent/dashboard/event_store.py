@@ -181,8 +181,16 @@ def _get_reader() -> sqlite3.Connection:
     return conn
 
 
-def get_latest_snapshot(session_id: str | None = None) -> dict[str, Any] | None:
-    """Read the most recent snapshot for a session (or the most recent run)."""
+def get_latest_snapshot(
+    session_id: str | None = None,
+    only_running: bool = False,
+) -> dict[str, Any] | None:
+    """Read the most recent snapshot for a session (or the most recent run).
+
+    If *only_running* is True, only return snapshots from sessions whose
+    status is 'running'.  This prevents the SSE stream from returning
+    stale completed-run data when no pipeline is active.
+    """
     conn = _get_reader()
     try:
         if session_id:
@@ -199,7 +207,7 @@ def get_latest_snapshot(session_id: str | None = None) -> dict[str, Any] | None:
                 "WHERE r.status = 'running' "
                 "ORDER BY s.id DESC LIMIT 1",
             ).fetchone()
-            if row is None:
+            if row is None and not only_running:
                 # Fall back to most recent session regardless of status
                 row = conn.execute(
                     "SELECT snapshot_json FROM snapshots "
@@ -253,24 +261,39 @@ def get_active_session_id() -> str | None:
 
 
 def get_all_runs() -> list[dict[str, Any]]:
-    """List all runs, newest first."""
+    """List all runs, newest first.  Includes KPI data from latest snapshot."""
     conn = _get_reader()
     try:
         rows = conn.execute(
             "SELECT session_id, query, started_at, finalized_at, "
             "elapsed_secs, status FROM runs ORDER BY started_at DESC",
         ).fetchall()
-        return [
-            {
-                "session_id": r[0],
+        result = []
+        for r in rows:
+            sid = r[0]
+            run: dict[str, Any] = {
+                "session_id": sid,
                 "query": r[1],
                 "started_at": r[2],
                 "finalized_at": r[3],
                 "elapsed_secs": r[4],
                 "status": r[5],
+                "kpi": {},
             }
-            for r in rows
-        ]
+            # Enrich with KPI from latest snapshot
+            snap_row = conn.execute(
+                "SELECT snapshot_json FROM snapshots "
+                "WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+                (sid,),
+            ).fetchone()
+            if snap_row:
+                try:
+                    snap = json.loads(snap_row[0])
+                    run["kpi"] = snap.get("kpi", {})
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            result.append(run)
+        return result
     finally:
         conn.close()
 

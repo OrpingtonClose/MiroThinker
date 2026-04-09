@@ -58,10 +58,12 @@ async def _sse_generator(request: Request):
         if await request.is_disconnected():
             break
 
-        # Try SQLite first (works even when event loop is busy)
+        # Try SQLite first — only_running=True so we don't return stale
+        # completed-run data when no pipeline is active
         try:
             snapshot = await loop.run_in_executor(
-                _db_executor, event_store.get_latest_snapshot, None
+                _db_executor,
+                lambda: event_store.get_latest_snapshot(None, only_running=True),
             )
         except Exception:
             snapshot = None
@@ -181,8 +183,17 @@ async def dashboard_latest(request: Request) -> JSONResponse:
 
 async def dashboard_run_detail(request: Request) -> JSONResponse:
     """GET /dashboard/run/{session_id} — fetch a specific run."""
+    loop = asyncio.get_running_loop()
     session_id = request.path_params.get("session_id", "")
     data = _load_run_by_id(session_id)
+    if data is None:
+        # Fall back to SQLite (covers currently-running and finalized runs)
+        try:
+            data = await loop.run_in_executor(
+                _db_executor, event_store.get_run_detail, session_id
+            )
+        except Exception:
+            data = None
     if data:
         return JSONResponse(data)
     return JSONResponse({"error": f"Run {session_id} not found"}, status_code=404)
@@ -190,8 +201,17 @@ async def dashboard_run_detail(request: Request) -> JSONResponse:
 
 async def dashboard_html(request: Request) -> HTMLResponse:
     """GET /dashboard/html/{session_id} — render a run as HTML."""
+    loop = asyncio.get_running_loop()
     session_id = request.path_params.get("session_id", "")
     data = _load_run_by_id(session_id)
+    if not data:
+        # Fall back to SQLite
+        try:
+            data = await loop.run_in_executor(
+                _db_executor, event_store.get_run_detail, session_id
+            )
+        except Exception:
+            data = None
     if not data:
         return HTMLResponse(
             f"<h1>Run {session_id} not found</h1>", status_code=404
