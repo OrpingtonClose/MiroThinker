@@ -204,14 +204,19 @@ class AGUIRunCollectorMiddleware(BaseHTTPMiddleware):
         original_iterator = response.body_iterator
 
         async def _finalizing_iterator():
-            """Yield all chunks from the original body, then finalize."""
+            """Yield all chunks from the original body, then finalize.
+
+            Uses try/except/else/finally so that cleanup happens even on
+            ``GeneratorExit`` (client disconnect).  ``GeneratorExit``
+            inherits from ``BaseException``, so a bare ``except Exception``
+            would miss it — the ``finally`` block is the safety net.
+            """
             try:
                 async for chunk in original_iterator:
                     yield chunk
             except Exception:
                 collector.phase_end("ag_ui_request", "error")
                 collector.finalize(result_text="")
-                set_active_collector(None)
                 elapsed = time.perf_counter() - start
                 logger.error(
                     "AG-UI RUN STREAM ERROR session=%s elapsed=%.1fs",
@@ -223,7 +228,6 @@ class AGUIRunCollectorMiddleware(BaseHTTPMiddleware):
                 elapsed = time.perf_counter() - start
                 collector.phase_end("ag_ui_request", "ok")
                 dashboard_data = collector.finalize(result_text="")
-                set_active_collector(None)
 
                 kpi = dashboard_data.get("kpi", {})
                 logger.info(
@@ -238,6 +242,19 @@ class AGUIRunCollectorMiddleware(BaseHTTPMiddleware):
                     kpi.get("prompt_tokens_est", 0),
                     kpi.get("completion_tokens_est", 0),
                 )
+            finally:
+                # Safety net for GeneratorExit (client disconnect) and
+                # any other BaseException that bypasses except/else.
+                if not collector._finalized:
+                    collector.phase_end("ag_ui_request", "disconnected")
+                    collector.finalize(result_text="")
+                    elapsed = time.perf_counter() - start
+                    logger.warning(
+                        "AG-UI RUN DISCONNECTED session=%s elapsed=%.1fs",
+                        session_id,
+                        elapsed,
+                    )
+                set_active_collector(None)
 
         response.body_iterator = _finalizing_iterator()
         return response
