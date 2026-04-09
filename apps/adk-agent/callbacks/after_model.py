@@ -17,7 +17,6 @@ import logging
 from typing import Any, Optional
 
 from google.adk.agents.callback_context import CallbackContext
-from google.genai import types as genai_types
 
 from callbacks.before_model import release_llm_semaphore_if_held
 from dashboard import get_active_collector
@@ -47,22 +46,51 @@ def after_model_callback(
     if "intermediate_boxed_answers" not in state:
         state["intermediate_boxed_answers"] = []
 
-    # Extract text from LlmResponse.content (not .candidates)
+    # Extract text and reasoning from LlmResponse.content
     response_text = ""
+    reasoning_text = ""
     if llm_response and getattr(llm_response, "content", None):
         content = llm_response.content
         if hasattr(content, "parts") and content.parts:
             for part in content.parts:
-                if hasattr(part, "text") and part.text:
+                # Capture reasoning/thinking content from reasoning models.
+                # When part.thought is True, the part's .text contains
+                # reasoning content — capture it separately so it doesn't
+                # bloat the conversation context.
+                if hasattr(part, "thought") and part.thought:
+                    if hasattr(part, "text") and part.text:
+                        reasoning_text += part.text
+                elif hasattr(part, "thinking") and part.thinking:
+                    reasoning_text += str(part.thinking)
+                elif hasattr(part, "text") and part.text:
                     response_text += part.text
 
-    if not response_text:
+    if not response_text and not reasoning_text:
         return None
 
-    boxed = extract_boxed_content(response_text)
-    if boxed:
-        state["intermediate_boxed_answers"].append(boxed)
-        logger.info("Intermediate boxed answer captured: %s", boxed[:200])
+    # ── Reasoning content capture ────────────────────────────────────
+    # Save reasoning traces to state for observability, but do NOT feed
+    # them back into the conversation context (that wastes tokens).
+    if reasoning_text:
+        if "reasoning_traces" not in state:
+            state["reasoning_traces"] = []
+        agent_name = getattr(callback_context, "agent_name", "unknown")
+        state["reasoning_traces"].append({
+            "agent": agent_name,
+            "reasoning": reasoning_text[:5000],  # cap to avoid state bloat
+            "response_preview": response_text[:500],
+        })
+        logger.info(
+            "Reasoning content captured from %s: %d chars",
+            agent_name, len(reasoning_text),
+        )
+
+    # ── Boxed answer extraction ──────────────────────────────────────
+    if response_text:
+        boxed = extract_boxed_content(response_text)
+        if boxed:
+            state["intermediate_boxed_answers"].append(boxed)
+            logger.info("Intermediate boxed answer captured: %s", boxed[:200])
 
     # Record LLM end in dashboard
     _c = get_active_collector()

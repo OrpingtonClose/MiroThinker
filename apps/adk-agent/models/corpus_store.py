@@ -4,11 +4,11 @@
 """
 DuckDB-backed corpus store for AtomicConditions -- Flock edition.
 
-Replaces brittle programmatic text processing (regex parsing, len checks,
-keyword heuristics, hard filters, 1000-char truncation) with DuckDB's Flock
-community extension -- LLM calls executed directly in SQL.
+Replaces brittle programmatic text processing with DuckDB's Flock community
+extension -- LLM calls executed directly in SQL.  Flock is MANDATORY for
+pipeline operation; the pipeline will refuse to start without it.
 
-Key changes from the original:
+Key features:
   - Gradient-flag columns on every row (nothing is ever dropped, only scored)
   - Flock-powered scoring (confidence, trust, specificity, fabrication risk, etc.)
   - Gossip-based synthesis via Flock for large corpora
@@ -30,15 +30,29 @@ from typing import Optional
 import duckdb
 
 from models.atomic_condition import AtomicCondition
+from utils.flock_proxy import start_flock_proxy
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Flock model configuration (env-driven)
 # ---------------------------------------------------------------------------
+def _strip_litellm_prefix(model_str: str) -> str:
+    """Strip the leading ``litellm/`` prefix if present.
+
+    ADK_MODEL is typically ``litellm/openai/zai-org-glm-5-1``.  LiteLLM
+    itself needs ``openai/zai-org-glm-5-1`` (no ``litellm/`` wrapper).
+    We keep the provider prefix (openai/, ollama/, etc.) so LiteLLM
+    routes to the right backend.
+    """
+    if model_str.startswith("litellm/"):
+        model_str = model_str[len("litellm/"):]
+    return model_str
+
+
 _FLOCK_MODEL = os.environ.get(
     "FLOCK_MODEL",
-    os.environ.get("ADK_MODEL", "openai/gpt-4o").replace("litellm/", ""),
+    _strip_litellm_prefix(os.environ.get("ADK_MODEL", "gpt-4o")),
 )
 _FLOCK_KEY = os.environ.get(
     "FLOCK_API_KEY", os.environ.get("OPENAI_API_KEY", "")
@@ -64,19 +78,20 @@ class CorpusStore:
         db = _DB_PATH or ":memory:"
         self.conn = duckdb.connect(db)
 
-        # -- Load Flock extension (graceful: unavailable on some DuckDB builds) --
+        # -- Load Flock extension (MANDATORY) --
         self._flock_available = False
         try:
             self.conn.execute("INSTALL flock FROM community")
             self.conn.execute("LOAD flock")
             self._flock_available = True
-        except Exception:
-            logger.warning(
-                "Flock extension unavailable -- corpus will store "
-                "conditions but skip LLM-powered scoring/atomisation. "
-                "The pipeline still works; findings are stored as-is.",
-                exc_info=True,
-            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Flock DuckDB extension is required but failed to load. "
+                "Flock is only available for DuckDB <1.5.0. Current "
+                f"DuckDB version: {duckdb.__version__}. "
+                "Pin duckdb>=1.4.0,<1.5.0 in pyproject.toml. "
+                f"Original error: {exc}"
+            ) from exc
 
         # -- Configure Flock secrets & model --
         if self._flock_available:
@@ -90,34 +105,56 @@ class CorpusStore:
     # ------------------------------------------------------------------
 
     def _setup_flock(self) -> None:
-        """Create the DuckDB SECRET and MODEL that Flock needs."""
+        """Create the DuckDB SECRET and MODEL that Flock needs.
+
+        Flock sends ``response_format: json_schema`` on every request,
+        which many providers (Venice, Ollama, vLLM) reject.  We route
+        Flock through a LiteLLM-backed proxy on localhost that:
+        - strips ``response_format`` before calling the real provider
+        - uses ``litellm.acompletion()`` for provider-agnostic routing
+        - wraps plain-text responses in JSON for Flock's C++ parser
+
+        The proxy accepts the model/key/base from env vars
+        (``FLOCK_MODEL``, ``FLOCK_API_KEY``, ``FLOCK_API_BASE``).
+        """
         def _sql_escape(val: str) -> str:
             return val.replace("'", "''")
 
-        secret_parts = ["TYPE OPENAI"]
-        if _FLOCK_KEY:
-            secret_parts.append(f"API_KEY '{_sql_escape(_FLOCK_KEY)}'")
-        if _FLOCK_BASE:
-            secret_parts.append(f"BASE_URL '{_sql_escape(_FLOCK_BASE)}'")
+        # Start the LiteLLM-backed Flock proxy.  It handles:
+        # - response_format stripping
+        # - provider-specific request/response translation via LiteLLM
+        # - JSON wrapping for Flock compatibility
+        proxy_url = start_flock_proxy(
+            litellm_model=_FLOCK_MODEL,
+            litellm_api_key=_FLOCK_KEY,
+            litellm_api_base=_FLOCK_BASE,
+        )
+        logger.info(
+            "Flock LiteLLM proxy started: %s  model=%s  base=%s",
+            proxy_url, _FLOCK_MODEL,
+            _FLOCK_BASE or "(provider default)",
+        )
 
-        if _FLOCK_KEY:
-            try:
-                self.conn.execute("DROP SECRET IF EXISTS flock_secret")
-            except Exception:
-                pass
-            try:
-                self.conn.execute(
-                    f"CREATE SECRET flock_secret "
-                    f"({', '.join(secret_parts)})"
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to CREATE SECRET -- Flock will be "
-                    "unavailable (bad API key format?).",
-                    exc_info=True,
-                )
+        # Point Flock's SECRET at our local proxy.  The proxy handles
+        # real auth to the provider, so we use a dummy key here.
+        # Flock's llm_complete looks for the unnamed default secret
+        # (__default_openai), NOT a named secret.
+        try:
+            self.conn.execute(
+                f"CREATE SECRET "
+                f"(TYPE OPENAI, "
+                f"API_KEY 'flock-proxy', "
+                f"BASE_URL '{_sql_escape(proxy_url)}')"
+            )
+        except Exception:
+            logger.warning(
+                "Failed to CREATE SECRET -- Flock will be "
+                "unavailable.",
+                exc_info=True,
+            )
 
-        model_name = _sql_escape(_FLOCK_MODEL or "gpt-4o")
+        # CREATE MODEL — the model name is just a label here; the proxy
+        # overrides it with FLOCK_MODEL via LiteLLM.
         provider = _sql_escape(_FLOCK_PROVIDER)
         try:
             self.conn.execute("DROP MODEL IF EXISTS 'corpus_model'")
@@ -125,14 +162,14 @@ class CorpusStore:
             pass
         try:
             self.conn.execute(
-                f"CREATE MODEL('corpus_model', '{model_name}', "
+                f"CREATE MODEL('corpus_model', 'flock-model', "
                 f"'{provider}')"
             )
         except Exception:
             logger.warning(
                 "Failed to CREATE MODEL -- Flock ingestion and "
                 "scoring will be unavailable. Ensure the flock "
-                "extension is installed and a valid API key is set.",
+                "extension is installed.",
                 exc_info=True,
             )
 
@@ -275,8 +312,6 @@ class CorpusStore:
 
     def _flock_complete(self, prompt: str) -> str:
         """Run a single Flock llm_complete call and return text."""
-        if not self._flock_available:
-            return ""
         row = self.conn.execute(
             "SELECT llm_complete("
             "{'model_name': 'corpus_model'}, "
@@ -793,21 +828,11 @@ class CorpusStore:
     # ------------------------------------------------------------------
 
     def synthesise(self, user_query: str) -> str:
-        """Produce a synthesis of the corpus.
-        Uses gossip for large corpora.  Falls back to plain
-        concatenation when Flock is unavailable."""
+        """Produce a Flock synthesis of the corpus.
+        Uses gossip for large corpora (above GOSSIP_THRESHOLD)."""
         conditions = self.get_for_synthesiser()
         if not conditions:
             return "(no findings)"
-
-        if not self._flock_available:
-            # Simple concatenation fallback — the synthesiser LLM agent
-            # will still structure the final report from these findings.
-            return "\n".join(
-                f"- {c['fact']}"
-                + (f" [Source: {c['source_url']}]" if c["source_url"] else "")
-                for c in conditions
-            )
 
         if len(conditions) <= GOSSIP_THRESHOLD:
             return self._synthesise_single(conditions, user_query)

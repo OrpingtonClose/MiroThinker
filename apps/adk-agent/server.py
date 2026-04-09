@@ -264,12 +264,51 @@ class AGUIRunCollectorMiddleware(BaseHTTPMiddleware):
 
 # ── Application lifecycle ─────────────────────────────────────────
 
+def _validate_env() -> None:
+    """Check API keys and critical env vars at startup.
+
+    Logs warnings for missing keys so operators know immediately which
+    tool providers will be unavailable — rather than discovering it
+    mid-pipeline when a tool call fails.
+    """
+    checks = {
+        "OPENAI_API_KEY": "LLM provider (Venice/OpenAI)",
+        "BRAVE_API_KEY": "Brave Search tools",
+        "EXA_API_KEY": "Exa search/crawl tools",
+        "FIRECRAWL_API_KEY": "Firecrawl scrape tools",
+    }
+    optional = {
+        "TRANSCRIPTAPI_KEY": "TranscriptAPI (video transcription)",
+        "KAGI_API_KEY": "Kagi search",
+    }
+    all_ok = True
+    for key, description in checks.items():
+        val = os.environ.get(key, "")
+        if not val:
+            logger.warning("  MISSING  %-22s → %s will be unavailable", key, description)
+            all_ok = False
+        else:
+            logger.info("  OK       %-22s → %s", key, description)
+    for key, description in optional.items():
+        val = os.environ.get(key, "")
+        if val:
+            logger.info("  OK       %-22s → %s", key, description)
+        else:
+            logger.info("  SKIP     %-22s → %s (optional)", key, description)
+    if all_ok:
+        logger.info("  All required API keys present")
+    else:
+        logger.warning(
+            "  Some API keys are missing — affected tools will fail at runtime"
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Log startup and shutdown with environment summary."""
     phoenix = "enabled" if os.environ.get("PHOENIX_ENABLED") == "1" else "disabled"
-    model = os.environ.get("MODEL_NAME", "unknown")
-    base_url = os.environ.get("BASE_URL", "unknown")
+    model = os.environ.get("ADK_MODEL", os.environ.get("MODEL_NAME", "unknown"))
+    base_url = os.environ.get("OPENAI_API_BASE", os.environ.get("BASE_URL", "unknown"))
 
     logger.info("=" * 60)
     logger.info("MiroThinker AG-UI server starting")
@@ -278,6 +317,9 @@ async def lifespan(app: FastAPI):
     logger.info("  Phoenix     : %s", phoenix)
     logger.info("  ADK debug   : %s", os.environ.get("ADK_DEBUG", "0"))
     logger.info("  CORS        : allow_origins=['*']")
+    logger.info("  DuckDB+Flock: required (duckdb <1.5.0)")
+    logger.info("-" * 60)
+    _validate_env()
     logger.info("=" * 60)
     yield
     logger.info("MiroThinker AG-UI server shutting down")
@@ -322,7 +364,7 @@ adk_app = App(
 adk_agent = ADKAgent.from_app(
     adk_app,
     user_id="server_user",
-    execution_timeout_seconds=1200,  # 20 min — pipeline needs time for 3 loop iterations + synthesis
+    execution_timeout_seconds=86400,  # 24h — AG-UI is a transport layer, not an execution controller.  The pipeline controls its own lifecycle via LoopAgent max_iterations and the EVIDENCE_SUFFICIENT sentinel.
 )
 
 # Mount the AG-UI SSE endpoint at root
