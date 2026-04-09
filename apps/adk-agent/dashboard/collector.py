@@ -22,6 +22,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from dashboard import event_store
+
 logger = logging.getLogger(__name__)
 
 _DASHBOARD_LOGS_DIR = os.environ.get(
@@ -64,6 +66,16 @@ class PipelineCollector:
         self.query = query
         self.session_id = session_id
         self.started_at = time.time()
+
+        # Register this run in SQLite immediately
+        try:
+            event_store.insert_run(session_id, query)
+        except Exception:
+            logger.warning("Failed to register run in SQLite", exc_info=True)
+
+        # Snapshot interval tracking
+        self._last_snapshot_time: float = 0.0
+        self._snapshot_interval: float = 0.5  # write snapshot every 500ms
 
         # Phase tracking
         self.phases: list[dict[str, Any]] = []
@@ -354,48 +366,52 @@ class PipelineCollector:
 
     # ── Snapshot (for SSE) ────────────────────────────────────────────
 
+    def _snapshot_unlocked(self) -> dict[str, Any]:
+        """Build snapshot dict — caller must hold self._lock."""
+        elapsed = time.time() - self.started_at
+        return {
+            "session_id": self.session_id,
+            "query": self.query[:200],
+            "elapsed_secs": round(elapsed, 1),
+            "current_phase": self._current_phase,
+            "phases": [
+                {
+                    "phase": p["phase"],
+                    "agent": p["agent"],
+                    "elapsed": round(
+                        (p["end_time"] or time.time()) - p["start_time"], 1
+                    ),
+                    "outcome": p["outcome"],
+                }
+                for p in self.phases
+            ],
+            "kpi": {
+                "adk_events": self.total_adk_events,
+                "tool_calls": len(self.tool_calls),
+                "llm_calls": len(self.llm_calls),
+                "text_chars": self.total_text_chars,
+                "reasoning_chars": self.total_reasoning_chars,
+                "dedup_blocks": len(self.dedup_blocks),
+                "arg_fixes": len(self.arg_fixes),
+                "bad_results": len(self.bad_results),
+                "compressions": len(self.compressions),
+                "keep_k_trims": len(self.keep_k_trims),
+                "corpus_atoms": (
+                    self.corpus_updates[-1]["total"]
+                    if self.corpus_updates
+                    else 0
+                ),
+            },
+            "thinker_escalated": self.thinker_escalated,
+            "stalled": len(self.stall_events) > 0,
+            "finalized": self._finalized,
+            "event_count": len(self.events),
+        }
+
     def snapshot(self) -> dict[str, Any]:
         """Lightweight snapshot for real-time SSE streaming."""
         with self._lock:
-            elapsed = time.time() - self.started_at
-            return {
-                "session_id": self.session_id,
-                "query": self.query[:200],
-                "elapsed_secs": round(elapsed, 1),
-                "current_phase": self._current_phase,
-                "phases": [
-                    {
-                        "phase": p["phase"],
-                        "agent": p["agent"],
-                        "elapsed": round(
-                            (p["end_time"] or time.time()) - p["start_time"], 1
-                        ),
-                        "outcome": p["outcome"],
-                    }
-                    for p in self.phases
-                ],
-                "kpi": {
-                    "adk_events": self.total_adk_events,
-                    "tool_calls": len(self.tool_calls),
-                    "llm_calls": len(self.llm_calls),
-                    "text_chars": self.total_text_chars,
-                    "reasoning_chars": self.total_reasoning_chars,
-                    "dedup_blocks": len(self.dedup_blocks),
-                    "arg_fixes": len(self.arg_fixes),
-                    "bad_results": len(self.bad_results),
-                    "compressions": len(self.compressions),
-                    "keep_k_trims": len(self.keep_k_trims),
-                    "corpus_atoms": (
-                        self.corpus_updates[-1]["total"]
-                        if self.corpus_updates
-                        else 0
-                    ),
-                },
-                "thinker_escalated": self.thinker_escalated,
-                "stalled": len(self.stall_events) > 0,
-                "finalized": self._finalized,
-                "event_count": len(self.events),
-            }
+            return self._snapshot_unlocked()
 
     # ── Finalize ──────────────────────────────────────────────────────
 
@@ -474,8 +490,25 @@ class PipelineCollector:
                 "events": self.events,
             }
 
-            # Save to disk
+            # Save to disk (JSON file)
             self._save(data)
+
+            # Finalize in SQLite
+            try:
+                event_store.finalize_run(
+                    session_id=self.session_id,
+                    status="completed",
+                    elapsed_secs=elapsed,
+                    result_json=json.dumps(data, default=str),
+                )
+                # Write final snapshot
+                event_store.insert_snapshot(
+                    self.session_id,
+                    self._snapshot_unlocked(),
+                )
+            except Exception:
+                logger.warning("Failed to finalize run in SQLite", exc_info=True)
+
             return data
 
     # ── Internal helpers ──────────────────────────────────────────────
@@ -486,16 +519,46 @@ class PipelineCollector:
         agent: str = "",
         data: dict[str, Any] | None = None,
     ) -> None:
-        """Append a raw event (must be called under self._lock)."""
+        """Append a raw event (must be called under self._lock).
+
+        Also persists the event to SQLite and periodically writes
+        a snapshot so the SSE endpoint can read from the DB even
+        when the async event loop is saturated by LLM calls.
+        """
+        now = time.time()
+        event_data = data or {}
         self.events.append(
             {
                 "event_type": event_type,
-                "timestamp": time.time(),
+                "timestamp": now,
                 "agent": agent,
                 "phase": self._current_phase,
-                "data": data or {},
+                "data": event_data,
             }
         )
+
+        # Persist to SQLite (best-effort — never block the pipeline)
+        try:
+            event_store.insert_event(
+                session_id=self.session_id,
+                event_type=event_type,
+                agent=agent,
+                phase=self._current_phase,
+                data=event_data,
+                timestamp=now,
+            )
+        except Exception:
+            pass  # SQLite write failed — don't block pipeline
+
+        # Periodically write a snapshot to SQLite
+        if now - self._last_snapshot_time >= self._snapshot_interval:
+            self._last_snapshot_time = now
+            try:
+                # Build snapshot without re-acquiring lock (we're already under it)
+                snapshot = self._snapshot_unlocked()
+                event_store.insert_snapshot(self.session_id, snapshot)
+            except Exception:
+                pass  # Never block pipeline
 
     def _build_tool_summary(self) -> dict[str, Any]:
         summary: dict[str, Any] = {}
