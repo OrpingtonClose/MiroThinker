@@ -194,11 +194,20 @@ def get_latest_snapshot(
     conn = _get_reader()
     try:
         if session_id:
-            row = conn.execute(
-                "SELECT snapshot_json FROM snapshots "
-                "WHERE session_id = ? ORDER BY id DESC LIMIT 1",
-                (session_id,),
-            ).fetchone()
+            if only_running:
+                row = conn.execute(
+                    "SELECT s.snapshot_json FROM snapshots s "
+                    "JOIN runs r ON s.session_id = r.session_id "
+                    "WHERE s.session_id = ? AND r.status = 'running' "
+                    "ORDER BY s.id DESC LIMIT 1",
+                    (session_id,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT snapshot_json FROM snapshots "
+                    "WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+                    (session_id,),
+                ).fetchone()
         else:
             # Get the most recent running session's latest snapshot
             row = conn.execute(
@@ -302,10 +311,11 @@ def get_run_detail(session_id: str) -> dict[str, Any] | None:
     """Load full finalized data for a run."""
     conn = _get_reader()
     try:
+        escaped = session_id.replace("%", "\\%").replace("_", "\\_")
         row = conn.execute(
-            "SELECT result_json FROM runs WHERE session_id LIKE ? || '%' "
+            "SELECT result_json FROM runs WHERE session_id LIKE ? || '%' ESCAPE '\\' "
             "AND result_json IS NOT NULL ORDER BY started_at DESC LIMIT 1",
-            (session_id,),
+            (escaped,),
         ).fetchone()
         if row and row[0]:
             return json.loads(row[0])
