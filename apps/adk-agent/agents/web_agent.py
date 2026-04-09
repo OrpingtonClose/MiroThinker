@@ -15,12 +15,17 @@ ReflectAndRetryToolPlugin, and context trimming by ContextFilterPlugin.
 
 from __future__ import annotations
 
+import logging
+import os
+
 from google.adk import Agent
 
 from agents.model_config import build_model
 from callbacks.after_tool import after_tool_callback
 from callbacks.before_tool import before_tool_callback
 from tools.mcp_tools import get_tools
+
+logger = logging.getLogger(__name__)
 
 WEB_AGENT_INSTRUCTION = """\
 You are a web research specialist. Your ONLY job is to search, scrape, crawl, \
@@ -97,6 +102,28 @@ RULES:
 - Prefer structured factual data (names, numbers, URLs) over raw page dumps
 """
 
+# ── Conditional tool loading ─────────────────────────────────────────
+# Only load MCP toolsets whose required API keys are configured.
+# This prevents hard crashes when a key is missing or invalid —
+# the agent simply operates with fewer tool families.
+_TOOL_KEY_REQUIREMENTS: dict[str, str] = {
+    "brave-search": "BRAVE_API_KEY",
+    "firecrawl": "FIRECRAWL_API_KEY",
+    "exa": "EXA_API_KEY",
+    "kagi": "KAGI_API_KEY",
+    "transcriptapi": "TRANSCRIPTAPI_KEY",
+}
+
+_web_tool_names: list[str] = []
+for tool_name, env_var in _TOOL_KEY_REQUIREMENTS.items():
+    if os.environ.get(env_var):
+        _web_tool_names.append(tool_name)
+    else:
+        logger.warning("Skipping %s — %s not set", tool_name, env_var)
+
+if not _web_tool_names:
+    logger.warning("No web tools configured — web_agent will have no tools")
+
 web_agent = Agent(
     name="web_agent",
     model=build_model(parallel_tool_calls=False),
@@ -107,7 +134,7 @@ web_agent = Agent(
         "Delegate any web data retrieval task to this agent — it owns all web tools."
     ),
     instruction=WEB_AGENT_INSTRUCTION,
-    tools=get_tools(["brave-search", "firecrawl", "exa", "kagi", "transcriptapi"]),
+    tools=get_tools(_web_tool_names),
     before_tool_callback=before_tool_callback,
     after_tool_callback=after_tool_callback,
 )
