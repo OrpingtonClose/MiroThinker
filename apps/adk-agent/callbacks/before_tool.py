@@ -8,7 +8,7 @@ What this callback does:
 1. **Source-level context budget for Exa** — injects ``textMaxCharacters`` and
    ``numResults`` into every Exa tool call so results are bounded at the source.
 2. **Per-provider rate limiting** — separate threading.Semaphore per MCP provider
-   (Brave, Exa, Firecrawl) so one slow provider doesn't block others.
+   (Brave, Exa, Firecrawl, Kagi) so one slow provider doesn't block others.
 3. **Dashboard tool_start tracking** — records each tool call in the collector.
 """
 
@@ -35,11 +35,13 @@ logger = logging.getLogger(__name__)
 _BRAVE_CONCURRENCY = int(os.environ.get("BRAVE_CONCURRENCY", "3"))
 _EXA_CONCURRENCY = int(os.environ.get("EXA_CONCURRENCY", "3"))
 _FIRECRAWL_CONCURRENCY = int(os.environ.get("FIRECRAWL_CONCURRENCY", "3"))
+_KAGI_CONCURRENCY = int(os.environ.get("KAGI_CONCURRENCY", "3"))
 
 _provider_semaphores: Dict[str, threading.Semaphore] = {
     "brave": threading.Semaphore(_BRAVE_CONCURRENCY),
     "exa": threading.Semaphore(_EXA_CONCURRENCY),
     "firecrawl": threading.Semaphore(_FIRECRAWL_CONCURRENCY),
+    "kagi": threading.Semaphore(_KAGI_CONCURRENCY),
 }
 
 # Map tool names to provider keys
@@ -59,6 +61,11 @@ _TOOL_TO_PROVIDER: Dict[str, str] = {
     "firecrawl_crawl": "firecrawl",
     "firecrawl_map": "firecrawl",
     "firecrawl_extract": "firecrawl",
+    "kagi_search": "kagi",
+    "kagi_summarize": "kagi",
+    "kagi_fastgpt": "kagi",
+    "kagi_enrich_web": "kagi",
+    "kagi_enrich_news": "kagi",
 }
 
 

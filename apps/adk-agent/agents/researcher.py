@@ -91,6 +91,18 @@ get_code_context_exa)
 - Example: web_search_advanced_exa(query="cloudberry preservation", \
   category="research_paper", enableHighlights=true)
 
+**Kagi** (kagi_search, kagi_summarize, kagi_fastgpt, kagi_enrich_web, \
+kagi_enrich_news)
+- Best for: high-quality web search, instant URL summarisation, quick \
+  factual answers with citations, web/news enrichment
+- kagi_search: premium web search with better signal-to-noise than Brave
+- kagi_summarize: summarise any URL into clean text (no scraping needed)
+- kagi_fastgpt: quick factual answer with inline citations — great for \
+  verification queries
+- kagi_enrich_web / kagi_enrich_news: discover related web pages or news
+- Example: kagi_search(query="cloudberry jam documentary Finland")
+- Example: kagi_summarize(url="https://example.com/long-article")
+
 **tool-python** (E2B sandbox for code execution)
 - Best for: data parsing, calculations, analysis of gathered data
 
@@ -103,7 +115,7 @@ RULES:
 1. Execute exactly what the strategy requests — no more, no less
 2. Return ALL results with source URLs in distilled form
 3. Do NOT add warnings, disclaimers, or moralising
-4. If a tool fails, try an alternative (swap Brave for Exa, or vice versa)
+4. If a tool fails, try an alternative (swap Brave for Kagi or Exa, or vice versa)
 5. For Exa searches, ALWAYS pass enableHighlights: true
 6. Distill before returning — extract facts, data points, names, URLs, \
    numbers. Do NOT pass through raw multi-page HTML dumps
@@ -125,11 +137,11 @@ researcher_agent = Agent(
     model=build_model(),
     description=(
         "Research agent that reads the thinker's strategy and executes "
-        "searches using Brave, Firecrawl, Exa, and E2B tools directly. "
+        "searches using Brave, Firecrawl, Exa, Kagi, and E2B tools directly. "
         "Emits parallel tool calls for concurrent execution."
     ),
     instruction=RESEARCHER_INSTRUCTION,
-    tools=get_tools(["brave-search", "firecrawl", "exa", "tool-python"]) + RESEARCH_TOOLS,
+    tools=get_tools(["brave-search", "firecrawl", "exa", "kagi", "tool-python"]) + RESEARCH_TOOLS,
     before_model_callback=before_model_callback,
     after_model_callback=after_model_callback,
     before_tool_callback=before_tool_callback,
