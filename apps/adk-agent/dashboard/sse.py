@@ -234,6 +234,16 @@ async def dashboard_html_latest(request: Request) -> HTMLResponse:
 # ── Tracing REST endpoints ────────────────────────────────────────────
 
 
+def _parse_int_param(value: str | None, default: int | None = None) -> int | None:
+    """Safely parse an integer query parameter, returning *default* on failure."""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
 async def dashboard_trace_summary(request: Request) -> JSONResponse:
     """GET /dashboard/traces/{session_id} — compact trace summary.
 
@@ -262,8 +272,7 @@ async def dashboard_algorithm_traces(request: Request) -> JSONResponse:
     """
     loop = asyncio.get_running_loop()
     session_id = request.path_params.get("session_id", "")
-    iteration_str = request.query_params.get("iteration")
-    iteration = int(iteration_str) if iteration_str is not None else None
+    iteration = _parse_int_param(request.query_params.get("iteration"))
     try:
         traces = await loop.run_in_executor(
             _db_executor,
@@ -282,9 +291,8 @@ async def dashboard_llm_traces(request: Request) -> JSONResponse:
     """
     loop = asyncio.get_running_loop()
     session_id = request.path_params.get("session_id", "")
-    iteration_str = request.query_params.get("iteration")
-    iteration = int(iteration_str) if iteration_str is not None else None
-    limit = int(request.query_params.get("limit", "500"))
+    iteration = _parse_int_param(request.query_params.get("iteration"))
+    limit = _parse_int_param(request.query_params.get("limit"), default=500) or 500
     try:
         traces = await loop.run_in_executor(
             _db_executor,
@@ -304,8 +312,7 @@ async def dashboard_corpus_snapshots(request: Request) -> JSONResponse:
     """
     loop = asyncio.get_running_loop()
     session_id = request.path_params.get("session_id", "")
-    iteration_str = request.query_params.get("iteration")
-    iteration = int(iteration_str) if iteration_str is not None else None
+    iteration = _parse_int_param(request.query_params.get("iteration"))
     try:
         snaps = await loop.run_in_executor(
             _db_executor,
