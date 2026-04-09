@@ -58,12 +58,17 @@ Otherwise, execute the strategy by calling the executor agent.
 
 WORKFLOW:
 1. Read the strategy above carefully
-2. Prioritise the search tasks — start with the highest-value searches
+2. Prioritise the search tasks — pick the TOP 3 highest-value searches
 3. Call the executor with specific instructions for each search
 4. Review what the executor returns
-5. If you need follow-up searches (based on what you found), call the \
-   executor again with refined queries
-6. Continue until the strategy's tasks are completed
+5. If a result suggests a crucial follow-up, you may do ONE more search
+6. STOP after completing your top 3 picks + at most 1 follow-up
+
+CRITICAL TIME BUDGET: You are inside a loop. After you finish, the \
+thinker will review ALL findings and plan the NEXT round. Do NOT try \
+to execute the entire strategy in one pass — leave remaining tasks for \
+the next iteration. The synthesiser MUST run after the loop, so every \
+minute you spend searching is a minute stolen from the final report.
 
 HOW TO CALL THE EXECUTOR:
 The executor is a tool. Call it with a plain-text request describing \

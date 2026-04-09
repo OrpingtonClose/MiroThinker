@@ -85,7 +85,7 @@ def _init_pipeline_state(
 # ---------------------------------------------------------------------------
 research_loop = LoopAgent(
     name="research_loop",
-    max_iterations=5,
+    max_iterations=3,
     sub_agents=[thinker_agent, researcher_agent],
 )
 
