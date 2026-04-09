@@ -2,24 +2,37 @@
 # This source code is licensed under the Apache 2.0 License.
 
 """
-Lightweight reverse proxy for Flock ↔ Venice compatibility.
+LiteLLM-backed proxy for Flock <-> local-model compatibility.
 
-Flock sends ``response_format: {type: json_schema, ...}`` on every request,
-but Venice (and many OpenAI-compatible providers) reject this with
-"response_format is not supported by this model".
+Flock (the DuckDB community extension) makes OpenAI-compatible HTTP requests
+but always sends ``response_format: {type: json_schema, ...}`` which many
+providers (Venice, Ollama, vLLM, etc.) reject.
 
 This module runs a tiny aiohttp server on localhost that:
-1. Accepts Flock's HTTP requests
-2. Strips the ``response_format`` field from the JSON body
-3. Forwards the cleaned request to the real LLM API
-4. Returns the upstream response verbatim
 
-Usage in corpus_store.py:
-    Point Flock's BASE_URL at ``http://127.0.0.1:{FLOCK_PROXY_PORT}``
-    instead of the real API base URL.
+1. Accepts Flock's HTTP requests (``/v1/chat/completions``)
+2. Strips the ``response_format`` field
+3. Routes the call through **LiteLLM** (``acompletion``), which supports
+   dozens of providers out of the box -- Ollama, vLLM, OpenAI, Anthropic,
+   Venice, etc.
+4. Wraps the response content in JSON when Flock expects ``json_schema``
+   output (so Flock's C++ ``ExtractCompletionOutput`` parser succeeds).
 
-The proxy is started once via ``start_flock_proxy()`` and runs in a
-background thread for the lifetime of the process.
+Configuration (env vars):
+    ``FLOCK_MODEL``     LiteLLM model string, e.g. ``ollama/qwen3-80b``,
+                        ``openai/zai-org-glm-5-1``.  Defaults to
+                        ``ADK_MODEL`` with ``litellm/`` stripped.
+    ``FLOCK_API_KEY``   API key for the model provider (optional for
+                        local providers like Ollama).
+    ``FLOCK_API_BASE``  Base URL for the model provider (optional --
+                        LiteLLM infers it from the model prefix).
+    ``FLOCK_PROXY_PORT`` Localhost port (default 18199).
+
+Why LiteLLM instead of raw HTTP forwarding?
+    LiteLLM knows the request/response quirks of each provider, handles
+    auth, retries, and streaming translation.  We get Ollama + vLLM +
+    Venice + OpenAI support for free, instead of maintaining per-provider
+    hacks in a custom proxy.
 """
 
 from __future__ import annotations
@@ -30,7 +43,6 @@ import os
 import threading
 from typing import Optional
 
-import aiohttp
 from aiohttp import web
 
 logger = logging.getLogger(__name__)
@@ -40,30 +52,22 @@ _proxy_started = False
 _proxy_lock = threading.Lock()
 
 
-def _clean_request(data: dict) -> dict:
-    """Strip fields from the request that Venice/compatible providers reject.
+# ---------------------------------------------------------------------------
+# JSON wrapping for Flock compatibility
+# ---------------------------------------------------------------------------
 
-    Also stash the ``response_format`` schema so we can use it to wrap
-    plain-text responses back into the expected JSON structure.
-    Returns (cleaned_data, original_schema_or_None).
-    """
-    schema = data.pop("response_format", None)
-    return data, schema
-
-
-def _wrap_content_as_json(content: str, schema: dict | None) -> str:
-    """If Flock expected json_schema output, wrap plain-text into it.
+def _wrap_content_as_json(content: str, had_schema: bool) -> str:
+    """If Flock expected ``json_schema`` output, wrap plain-text into it.
 
     Flock's C++ ``ExtractCompletionOutput`` does
     ``nlohmann::json::parse(content)`` and then indexes into the result
     as an object.  Without ``response_format`` the model returns plain
-    text, which Flock can't parse.  We wrap it here.
+    text (or a bare number), which Flock can't parse.  We wrap it here.
     """
-    if not schema:
+    if not had_schema:
         return content
 
     # Already a JSON *object*?  Return as-is.
-    # (Flock needs an object — a bare number/string/array won't work.)
     try:
         parsed = json.loads(content)
         if isinstance(parsed, dict):
@@ -72,119 +76,120 @@ def _wrap_content_as_json(content: str, schema: dict | None) -> str:
         pass
 
     # Wrap in the expected schema: {"items": ["<content>"]}
-    # This matches the default Flock schema for llm_complete.
     return json.dumps({"items": [content]})
 
 
-def _clean_response(data: dict, schema: dict | None = None) -> dict:
-    """Normalise the response to strict OpenAI format for Flock.
-
-    Venice adds extra fields (venice_parameters, reasoning_content, etc.)
-    that Flock's C++ JSON parser chokes on.  We strip them here and
-    ensure the content matches the expected json_schema structure.
-    """
-    # Remove top-level Venice extensions
-    data.pop("venice_parameters", None)
-    data.pop("kv_transfer_params", None)
-
-    # Clean each choice
-    for choice in data.get("choices", []):
-        msg = choice.get("message", {})
-        # reasoning_content is Venice-specific; Flock doesn't expect it
-        msg.pop("reasoning_content", None)
-        # 'name' and 'tool_calls' should only be present if meaningful
-        if msg.get("name") is None:
-            msg.pop("name", None)
-        if not msg.get("tool_calls"):
-            msg.pop("tool_calls", None)
-
-        # Wrap plain-text content in expected JSON schema
-        if "content" in msg and isinstance(msg["content"], str):
-            msg["content"] = _wrap_content_as_json(msg["content"], schema)
-
-    # Ensure usage fields are integers (some providers return strings)
-    usage = data.get("usage", {})
-    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-        if key in usage and isinstance(usage[key], str):
-            try:
-                usage[key] = int(usage[key])
-            except (ValueError, TypeError):
-                pass
-    # Remove non-standard usage sub-fields
-    usage.pop("prompt_tokens_details", None)
-    usage.pop("cache_read_input_tokens", None)
-
-    return data
-
+# ---------------------------------------------------------------------------
+# aiohttp handler -- the only HTTP endpoint Flock talks to
+# ---------------------------------------------------------------------------
 
 async def _proxy_handler(request: web.Request) -> web.Response:
-    """Forward request to the real API, fixing request and response."""
-    real_base = request.app["real_base_url"].rstrip("/")
-    target_url = f"{real_base}{request.path}"
+    """Route Flock's chat-completion request through LiteLLM."""
+    import litellm  # lazy import -- avoid top-level slowdown
 
-    # Read and clean the request body
-    body = await request.read()
-    headers = {
-        k: v for k, v in request.headers.items()
-        if k.lower() not in ("host", "content-length", "transfer-encoding")
-    }
+    path = request.path.rstrip("/")
 
-    original_schema = None
-    if body:
+    # -- /v1/chat/completions (or /chat/completions) --------------------
+    if path.endswith("/chat/completions"):
         try:
-            data = json.loads(body)
-            logger.debug("Flock request to %s: %s", request.path, json.dumps(data)[:500])
-            data, original_schema = _clean_request(data)
-            body = json.dumps(data).encode()
-            headers["Content-Length"] = str(len(body))
-        except (json.JSONDecodeError, TypeError):
-            pass  # forward raw body if not JSON
-
-    # Forward to real API
-    async with aiohttp.ClientSession() as session:
-        async with session.request(
-            method=request.method,
-            url=target_url,
-            headers=headers,
-            data=body,
-            timeout=aiohttp.ClientTimeout(total=120),
-        ) as resp:
-            resp_body = await resp.read()
-
-            # Clean the response body for Flock compatibility
-            if resp.status == 200 and resp_body:
-                try:
-                    resp_data = json.loads(resp_body)
-                    logger.debug("Upstream response: %s", json.dumps(resp_data)[:500])
-                    resp_data = _clean_response(resp_data, original_schema)
-                    resp_body = json.dumps(resp_data).encode()
-                except (json.JSONDecodeError, TypeError):
-                    pass  # return raw body if not JSON
-
-            return web.Response(
-                status=resp.status,
-                body=resp_body,
-                content_type=resp.content_type,
+            data = await request.json()
+        except Exception:
+            return web.json_response(
+                {"error": {"message": "invalid JSON body", "type": "proxy_error"}},
+                status=400,
             )
 
+        logger.debug("Flock request: %s", json.dumps(data)[:500])
+
+        # Strip response_format -- Flock always sends it, many providers
+        # reject it.  Remember whether it was present so we can wrap the
+        # response content later.
+        had_schema = "response_format" in data
+        data.pop("response_format", None)
+
+        # Build LiteLLM kwargs.  The proxy's env-configured model always
+        # wins over whatever Flock sends in the request body.
+        litellm_model: str = request.app["litellm_model"]
+        litellm_api_key: str = request.app["litellm_api_key"]
+        litellm_api_base: str = request.app["litellm_api_base"]
+
+        kwargs: dict = {
+            "model": litellm_model,
+            "messages": data.get("messages", []),
+        }
+        if litellm_api_key:
+            kwargs["api_key"] = litellm_api_key
+        if litellm_api_base:
+            kwargs["api_base"] = litellm_api_base
+
+        # Forward safe optional params
+        for param in ("temperature", "max_tokens", "top_p", "stop", "seed"):
+            if param in data:
+                kwargs[param] = data[param]
+
+        try:
+            response = await litellm.acompletion(**kwargs)
+            resp_dict = response.model_dump()
+
+            # Wrap content for Flock's json_schema expectation
+            for choice in resp_dict.get("choices", []):
+                msg = choice.get("message", {})
+                if "content" in msg and isinstance(msg["content"], str):
+                    msg["content"] = _wrap_content_as_json(
+                        msg["content"], had_schema,
+                    )
+
+            logger.debug("Proxy response OK (model=%s)", litellm_model)
+            return web.json_response(resp_dict)
+
+        except Exception as exc:
+            logger.error("LiteLLM completion failed: %s", exc, exc_info=True)
+            return web.json_response(
+                {"error": {"message": str(exc), "type": "litellm_error"}},
+                status=502,
+            )
+
+    # -- /v1/models (Flock may probe this) ------------------------------
+    if path.endswith("/models"):
+        model_id = request.app.get("litellm_model", "flock-model")
+        return web.json_response({
+            "data": [{"id": model_id, "object": "model"}],
+            "object": "list",
+        })
+
+    return web.json_response(
+        {"error": {"message": "not found", "type": "proxy_error"}},
+        status=404,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Background thread lifecycle
+# ---------------------------------------------------------------------------
 
 def _run_proxy(
-    real_base_url: str, port: int, ready_event: threading.Event,
+    litellm_model: str,
+    litellm_api_key: str,
+    litellm_api_base: str,
+    port: int,
+    ready_event: threading.Event,
 ) -> None:
     """Run the proxy server in a background thread."""
     import asyncio
 
     async def _start() -> None:
         app = web.Application()
-        app["real_base_url"] = real_base_url
+        app["litellm_model"] = litellm_model
+        app["litellm_api_key"] = litellm_api_key
+        app["litellm_api_base"] = litellm_api_base
         app.router.add_route("*", "/{path_info:.*}", _proxy_handler)
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, "127.0.0.1", port)
         await site.start()
         logger.info(
-            "Flock proxy started on http://127.0.0.1:%d -> %s",
-            port, real_base_url,
+            "Flock LiteLLM proxy on http://127.0.0.1:%d  model=%s  base=%s",
+            port, litellm_model, litellm_api_base or "(provider default)",
         )
         # Signal the main thread that we're ready
         ready_event.set()
@@ -196,17 +201,33 @@ def _run_proxy(
         asyncio.set_event_loop(loop)
         loop.run_until_complete(_start())
     except Exception:
-        logger.exception("Flock proxy failed to start")
-        # Signal anyway so the main thread doesn't hang — it will check
-        # _proxy_started which remains False on failure.
+        logger.exception("Flock LiteLLM proxy failed to start")
+        # Signal anyway so the main thread doesn't hang
         ready_event.set()
 
 
-def start_flock_proxy(real_base_url: str) -> str:
-    """Start the Flock proxy if not already running.
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
-    Returns the proxy base URL (e.g. ``http://127.0.0.1:18199``).
-    Raises RuntimeError if the proxy fails to start within 5 seconds.
+def start_flock_proxy(
+    litellm_model: str,
+    litellm_api_key: str = "",
+    litellm_api_base: str = "",
+) -> str:
+    """Start the Flock LiteLLM proxy if not already running.
+
+    Args:
+        litellm_model: LiteLLM model string, e.g. ``ollama/qwen3-80b``,
+            ``openai/zai-org-glm-5-1``.
+        litellm_api_key: API key for the provider (optional for local).
+        litellm_api_base: Provider base URL (optional -- LiteLLM infers).
+
+    Returns:
+        The proxy base URL (e.g. ``http://127.0.0.1:18199``).
+
+    Raises:
+        RuntimeError: If the proxy fails to start within 5 seconds.
     """
     global _proxy_started
 
@@ -217,34 +238,32 @@ def start_flock_proxy(real_base_url: str) -> str:
         ready_event = threading.Event()
         t = threading.Thread(
             target=_run_proxy,
-            args=(real_base_url, _FLOCK_PROXY_PORT, ready_event),
+            args=(litellm_model, litellm_api_key, litellm_api_base,
+                  _FLOCK_PROXY_PORT, ready_event),
             daemon=True,
-            name="flock-proxy",
+            name="flock-litellm-proxy",
         )
         t.start()
 
         # Wait for the proxy to actually bind and be ready
         if not ready_event.wait(timeout=5.0):
-            logger.error(
-                "Flock proxy failed to start within 5 seconds"
-            )
+            logger.error("Flock LiteLLM proxy failed to start within 5s")
             raise RuntimeError(
-                "Flock proxy failed to start — check logs for details"
+                "Flock LiteLLM proxy failed to start -- check logs"
             )
 
         # Verify the thread is still alive (it might have crashed after
         # setting ready_event in the except handler)
         if not t.is_alive():
-            logger.error("Flock proxy thread died during startup")
+            logger.error("Flock LiteLLM proxy thread died during startup")
             raise RuntimeError(
-                "Flock proxy thread died during startup — "
-                "check logs for details"
+                "Flock LiteLLM proxy thread died -- check logs"
             )
 
         _proxy_started = True
 
     proxy_url = f"http://127.0.0.1:{_FLOCK_PROXY_PORT}"
-    logger.info("Flock proxy available at %s", proxy_url)
+    logger.info("Flock LiteLLM proxy available at %s", proxy_url)
     return proxy_url
 
 

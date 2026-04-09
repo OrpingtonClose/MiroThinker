@@ -37,22 +37,22 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Flock model configuration (env-driven)
 # ---------------------------------------------------------------------------
-def _extract_bare_model(model_str: str) -> str:
-    """Strip provider prefixes (litellm/, openai/) to get bare model name.
+def _strip_litellm_prefix(model_str: str) -> str:
+    """Strip the leading ``litellm/`` prefix if present.
 
-    ADK_MODEL is typically ``litellm/openai/zai-org-glm-5-1`` but Flock
-    (via Venice) needs just ``zai-org-glm-5-1``.
+    ADK_MODEL is typically ``litellm/openai/zai-org-glm-5-1``.  LiteLLM
+    itself needs ``openai/zai-org-glm-5-1`` (no ``litellm/`` wrapper).
+    We keep the provider prefix (openai/, ollama/, etc.) so LiteLLM
+    routes to the right backend.
     """
-    # Strip known prefixes
-    for prefix in ("litellm/", "openai/", "azure/", "anthropic/"):
-        if model_str.startswith(prefix):
-            model_str = model_str[len(prefix):]
+    if model_str.startswith("litellm/"):
+        model_str = model_str[len("litellm/"):]
     return model_str
 
 
 _FLOCK_MODEL = os.environ.get(
     "FLOCK_MODEL",
-    _extract_bare_model(os.environ.get("ADK_MODEL", "gpt-4o")),
+    _strip_litellm_prefix(os.environ.get("ADK_MODEL", "gpt-4o")),
 )
 _FLOCK_KEY = os.environ.get(
     "FLOCK_API_KEY", os.environ.get("OPENAI_API_KEY", "")
@@ -108,50 +108,53 @@ class CorpusStore:
         """Create the DuckDB SECRET and MODEL that Flock needs.
 
         Flock sends ``response_format: json_schema`` on every request,
-        which Venice (and many OpenAI-compatible providers) reject.
-        We route Flock through a lightweight local proxy that strips
-        ``response_format`` before forwarding to the real API.
+        which many providers (Venice, Ollama, vLLM) reject.  We route
+        Flock through a LiteLLM-backed proxy on localhost that:
+        - strips ``response_format`` before calling the real provider
+        - uses ``litellm.acompletion()`` for provider-agnostic routing
+        - wraps plain-text responses in JSON for Flock's C++ parser
+
+        The proxy accepts the model/key/base from env vars
+        (``FLOCK_MODEL``, ``FLOCK_API_KEY``, ``FLOCK_API_BASE``).
         """
         def _sql_escape(val: str) -> str:
             return val.replace("'", "''")
 
-        # Start the Flock proxy to strip response_format from requests.
-        # This is needed because Flock sends json_schema response_format
-        # which Venice and other OpenAI-compatible providers reject.
-        flock_base = _FLOCK_BASE
-        if flock_base:
-            proxy_url = start_flock_proxy(flock_base)
-            logger.info(
-                "Flock proxy started: %s -> %s", proxy_url, flock_base,
+        # Start the LiteLLM-backed Flock proxy.  It handles:
+        # - response_format stripping
+        # - provider-specific request/response translation via LiteLLM
+        # - JSON wrapping for Flock compatibility
+        proxy_url = start_flock_proxy(
+            litellm_model=_FLOCK_MODEL,
+            litellm_api_key=_FLOCK_KEY,
+            litellm_api_base=_FLOCK_BASE,
+        )
+        logger.info(
+            "Flock LiteLLM proxy started: %s  model=%s  base=%s",
+            proxy_url, _FLOCK_MODEL,
+            _FLOCK_BASE or "(provider default)",
+        )
+
+        # Point Flock's SECRET at our local proxy.  The proxy handles
+        # real auth to the provider, so we use a dummy key here.
+        # Flock's llm_complete looks for the unnamed default secret
+        # (__default_openai), NOT a named secret.
+        try:
+            self.conn.execute(
+                f"CREATE SECRET "
+                f"(TYPE OPENAI, "
+                f"API_KEY 'flock-proxy', "
+                f"BASE_URL '{_sql_escape(proxy_url)}')"
             )
-            flock_base = proxy_url
+        except Exception:
+            logger.warning(
+                "Failed to CREATE SECRET -- Flock will be "
+                "unavailable.",
+                exc_info=True,
+            )
 
-        secret_parts = ["TYPE OPENAI"]
-        if _FLOCK_KEY:
-            secret_parts.append(f"API_KEY '{_sql_escape(_FLOCK_KEY)}'")
-        if flock_base:
-            secret_parts.append(f"BASE_URL '{_sql_escape(flock_base)}'")
-        else:
-            # No base URL — use default OpenAI endpoint
-            pass
-
-        if _FLOCK_KEY:
-            # Flock's llm_complete looks for the unnamed default secret
-            # (__default_openai), NOT a named secret.  We must create it
-            # without a name so Flock can find it automatically.
-            try:
-                self.conn.execute(
-                    f"CREATE SECRET "
-                    f"({', '.join(secret_parts)})"
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to CREATE SECRET -- Flock will be "
-                    "unavailable (bad API key format?).",
-                    exc_info=True,
-                )
-
-        model_name = _sql_escape(_FLOCK_MODEL or "gpt-4o")
+        # CREATE MODEL — the model name is just a label here; the proxy
+        # overrides it with FLOCK_MODEL via LiteLLM.
         provider = _sql_escape(_FLOCK_PROVIDER)
         try:
             self.conn.execute("DROP MODEL IF EXISTS 'corpus_model'")
@@ -159,14 +162,14 @@ class CorpusStore:
             pass
         try:
             self.conn.execute(
-                f"CREATE MODEL('corpus_model', '{model_name}', "
+                f"CREATE MODEL('corpus_model', 'flock-model', "
                 f"'{provider}')"
             )
         except Exception:
             logger.warning(
                 "Failed to CREATE MODEL -- Flock ingestion and "
                 "scoring will be unavailable. Ensure the flock "
-                "extension is installed and a valid API key is set.",
+                "extension is installed.",
                 exc_info=True,
             )
 
