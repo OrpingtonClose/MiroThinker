@@ -3,33 +3,34 @@
 
 """Dashboard package — real-time pipeline run instrumentation.
 
-The ``_active_collector`` module-level reference is the rendezvous point
-between ADK callbacks (whose signatures are fixed by the framework) and
-the :class:`PipelineCollector`.  ``run_pipeline()`` sets it before the
-run starts and clears it when the run ends.  Callbacks check
-``if _active_collector:`` and call methods on it — zero overhead when
-no pipeline run is active.
+The active collector is stored in a :class:`contextvars.ContextVar` so
+that each async request (task) in the AG-UI server gets its own
+collector without interference from concurrent requests.  The CLI path
+(``main.py``) works identically — ``ContextVar`` falls back to a
+single implicit context when there is no event-loop task switching.
+
+ADK callbacks call ``get_active_collector()`` and interact with it;
+zero overhead when no pipeline run is active (returns ``None``).
 """
 
 from __future__ import annotations
 
-import threading
+from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from dashboard.collector import PipelineCollector
 
-_active_collector: PipelineCollector | None = None
-_collector_lock = threading.Lock()
+_active_collector: ContextVar[PipelineCollector | None] = ContextVar(
+    "_active_collector", default=None
+)
 
 
 def set_active_collector(collector: PipelineCollector | None) -> None:
-    """Set (or clear) the active pipeline collector."""
-    global _active_collector
-    with _collector_lock:
-        _active_collector = collector
+    """Set (or clear) the active pipeline collector for this async context."""
+    _active_collector.set(collector)
 
 
 def get_active_collector() -> PipelineCollector | None:
-    """Return the active pipeline collector, or None."""
-    return _active_collector
+    """Return the active pipeline collector for this async context, or None."""
+    return _active_collector.get()
