@@ -279,5 +279,5 @@ def cleanup_corpus(state: dict) -> None:
               "corpus_for_synthesis", "loop_synthesis"):
         try:
             del state[k]
-        except (KeyError, TypeError):
+        except (KeyError, TypeError, AttributeError):
             pass
