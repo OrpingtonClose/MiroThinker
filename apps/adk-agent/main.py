@@ -243,7 +243,9 @@ async def _collect_with_heartbeat(
 
 
 # Directory for persistent session DBs (batch resume).
-_FINDINGS_DIR = os.environ.get("FINDINGS_DIR", "/tmp/mirothinker")
+_FINDINGS_DIR = os.environ.get(
+    "FINDINGS_DIR", os.path.join(os.path.expanduser("~"), ".mirothinker")
+)
 
 
 def _batch_db_url() -> str:
@@ -401,7 +403,7 @@ async def run_report(task: str) -> str:
 
 _DASHBOARD_LOGS_DIR = os.environ.get(
     "DASHBOARD_LOGS_DIR",
-    os.path.join(os.path.dirname(__file__), "dashboard_logs"),
+    os.path.join(os.path.expanduser("~"), ".mirothinker", "dashboard_logs"),
 )
 
 

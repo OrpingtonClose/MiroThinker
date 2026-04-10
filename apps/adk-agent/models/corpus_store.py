@@ -67,15 +67,34 @@ GOSSIP_THRESHOLD = int(os.environ.get("GOSSIP_THRESHOLD", "80"))
 # Provider name for CREATE MODEL (default openai; override if needed)
 _FLOCK_PROVIDER = os.environ.get("FLOCK_PROVIDER", "openai")
 
-# Persistent DB path (empty string -> in-memory)
+# Default corpus storage directory (file-backed for session persistence)
+_CORPUS_DIR = os.path.join(
+    os.environ.get("FINDINGS_DIR", os.path.join(os.path.expanduser("~"), ".mirothinker")),
+    "corpora",
+)
+
+# Explicit override: set CORPUS_DB_PATH to a full file path to use that
+# instead of the auto-generated session-scoped path.
 _DB_PATH = os.environ.get("CORPUS_DB_PATH", "")
 
 
 class CorpusStore:
     """DuckDB + Flock store for AtomicConditions with gradient scoring."""
 
-    def __init__(self) -> None:
-        db = _DB_PATH or ":memory:"
+    def __init__(self, db_path: str = "") -> None:
+        if db_path:
+            db = db_path
+        elif _DB_PATH:
+            db = _DB_PATH
+        else:
+            # Auto-generate a timestamped file in the corpus directory
+            os.makedirs(_CORPUS_DIR, exist_ok=True)
+            db = os.path.join(
+                _CORPUS_DIR,
+                f"corpus_{int(time.time())}_{os.getpid()}_{id(self):x}.duckdb",
+            )
+        self.db_path = db
+        logger.info("CorpusStore opening DuckDB at %s", db)
         self.conn = duckdb.connect(db)
 
         # -- Load Flock extension (MANDATORY) --

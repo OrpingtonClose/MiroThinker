@@ -1,7 +1,8 @@
 "use client";
 
+import { DashboardPanel } from "@/components/dashboard-panel";
 import { ResearchFindings } from "@/components/research-findings";
-import { AgentState } from "@/lib/types";
+import { AgentState } from "@/types/dashboard";
 import {
   useCoAgent,
   useFrontendTool,
@@ -212,8 +213,15 @@ function MainContent({ themeColor }: { themeColor: string }) {
   );
 
   return (
-    <div className="min-h-screen flex justify-center items-start pt-12 px-4 bg-slate-900">
-      <ResearchFindings state={state} setState={setState} />
+    <div className="min-h-screen flex bg-slate-950">
+      {/* Main content: research findings */}
+      <div className="flex-1 flex justify-center items-start pt-8 px-4 overflow-y-auto">
+        <ResearchFindings state={state} setState={setState} />
+      </div>
+      {/* Right panel: live pipeline dashboard */}
+      <div className="w-96 border-l border-slate-800 flex-shrink-0 h-screen sticky top-0 overflow-hidden">
+        <DashboardPanel />
+      </div>
     </div>
   );
 }

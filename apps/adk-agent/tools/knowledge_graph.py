@@ -32,7 +32,9 @@ logger = logging.getLogger(__name__)
 
 # ── Storage ──────────────────────────────────────────────────────────
 
-_GRAPH_DIR = Path(os.environ.get("FINDINGS_DIR", "/tmp/mirothinker"))
+_GRAPH_DIR = Path(os.environ.get(
+    "FINDINGS_DIR", os.path.join(os.path.expanduser("~"), ".mirothinker")
+))
 _GRAPH_DIR.mkdir(parents=True, exist_ok=True)
 
 # In-memory graph — persisted to JSONL on every mutation

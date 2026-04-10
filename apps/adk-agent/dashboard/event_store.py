@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 _DB_PATH = os.environ.get(
     "DASHBOARD_DB_PATH",
-    os.path.join(os.path.dirname(os.path.dirname(__file__)), "dashboard.db"),
+    os.path.join(os.path.expanduser("~"), ".mirothinker", "dashboard.db"),
 )
 
 # Module-level lock for writer connections
@@ -49,6 +49,7 @@ def _get_writer() -> sqlite3.Connection:
     global _writer_conn
     with _writer_lock:
         if _writer_conn is None:
+            os.makedirs(os.path.dirname(_DB_PATH) or ".", exist_ok=True)
             _writer_conn = sqlite3.connect(
                 _DB_PATH, timeout=10, check_same_thread=False
             )
@@ -56,8 +57,43 @@ def _get_writer() -> sqlite3.Connection:
             _writer_conn.execute("PRAGMA synchronous=NORMAL")
             _writer_conn.execute("PRAGMA busy_timeout=5000")
             _init_schema(_writer_conn)
+            _recover_interrupted_runs(_writer_conn)
             logger.info("Dashboard SQLite writer opened: %s", _DB_PATH)
         return _writer_conn
+
+
+def _recover_interrupted_runs(conn: sqlite3.Connection) -> None:
+    """Mark any 'running' rows as 'interrupted' — crash recovery.
+
+    If the process was killed while a pipeline was running, the run row
+    stays in 'running' state forever.  On the next startup we mark
+    those rows as 'interrupted' and record the last snapshot timestamp
+    as the approximate finalized_at time.
+    """
+    cursor = conn.execute(
+        "SELECT session_id FROM runs WHERE status = 'running'"
+    )
+    stale = cursor.fetchall()
+    if not stale:
+        return
+    now = time.time()
+    for (session_id,) in stale:
+        # Use the most recent snapshot timestamp as approximate end time
+        row = conn.execute(
+            "SELECT MAX(timestamp) FROM snapshots WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        approx_end = row[0] if row and row[0] else now
+        conn.execute(
+            "UPDATE runs SET status = 'interrupted', finalized_at = ? "
+            "WHERE session_id = ?",
+            (approx_end, session_id),
+        )
+        logger.warning(
+            "Crash recovery: marked run %s as interrupted (was still 'running')",
+            session_id[:8],
+        )
+    conn.commit()
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:

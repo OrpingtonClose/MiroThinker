@@ -46,7 +46,9 @@ from google.adk.plugins.base_plugin import BasePlugin
 logger = logging.getLogger(__name__)
 
 # ── OTel span archive directory ────────────────────────────────────
-_FINDINGS_DIR = os.environ.get("FINDINGS_DIR", "/tmp/mirothinker")
+_FINDINGS_DIR = os.environ.get(
+    "FINDINGS_DIR", os.path.join(os.path.expanduser("~"), ".mirothinker")
+)
 _SPANS_DB = os.path.join(_FINDINGS_DIR, "adk_spans.db")
 
 # ── Phoenix configuration ──────────────────────────────────────────

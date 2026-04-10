@@ -28,7 +28,9 @@ from google.adk.tools import FunctionTool
 logger = logging.getLogger(__name__)
 
 # ── Configurable paths ──────────────────────────────────────────────
-FINDINGS_DIR = Path(os.environ.get("FINDINGS_DIR", "/tmp/mirothinker"))
+FINDINGS_DIR = Path(os.environ.get(
+    "FINDINGS_DIR", os.path.join(os.path.expanduser("~"), ".mirothinker")
+))
 FINDINGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Current session findings file — set by batch orchestrator or defaults
