@@ -85,7 +85,13 @@ class CostTracker:
         cost: float,
         query: str,
     ) -> None:
-        """Record an API call and its estimated cost."""
+        """Record an API call and its estimated cost.
+
+        Note: ``check_budget`` already reserved ``ESTIMATED_COSTS[provider]``
+        on ``_session_total``.  We do NOT add ``cost`` again — the
+        reservation is the spend record.  We only log the entry and
+        snapshot the current session total.
+        """
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "provider": provider,
@@ -94,7 +100,8 @@ class CostTracker:
             "session_total_usd": 0.0,
         }
         with self._lock:
-            self._session_total += cost
+            # Do NOT increment _session_total — already reserved by
+            # check_budget.  Just snapshot the current total.
             entry["session_total_usd"] = round(self._session_total, 4)
             self._entries.append(entry)
 
@@ -110,6 +117,14 @@ class CostTracker:
 
         Returns a warning string if budget is exceeded, None if OK.
         This is called from the synchronous before_tool_callback.
+
+        When the call is allowed, the estimated cost is *reserved*
+        immediately (added to ``_session_total``) so that concurrent
+        budget checks from other providers see the tentative spend.
+        The reservation is reconciled in ``record_cost`` which
+        replaces it with the actual recorded amount (currently the
+        same estimate, so this is a no-op reconciliation, but the
+        pattern is future-proof).
         """
         estimated = ESTIMATED_COSTS.get(provider, 1.0)
 
@@ -136,6 +151,13 @@ class CostTracker:
         except Exception:
             pass  # If we can't read the ledger, allow the call
 
+        # Reserve the estimated cost so concurrent checks see it.
+        with self._lock:
+            self._session_total += estimated
+        logger.debug(
+            "Budget reservation: %s +$%.2f (session now $%.2f)",
+            provider, estimated, self._session_total,
+        )
         return None
 
     def _get_monthly_total(self) -> float:

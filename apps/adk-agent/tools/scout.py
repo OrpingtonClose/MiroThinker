@@ -53,9 +53,13 @@ _LLM_MODEL = os.environ.get(
     "SCOUT_LLM_MODEL",
     os.environ.get("ADK_MODEL", "gpt-4o"),
 )
-# Strip the litellm/ prefix if present
+# Strip the litellm/ prefix if present, then strip the provider
+# routing prefix (e.g. "openai/") — the scout calls the API
+# directly via httpx, not through LiteLlm which handles routing.
 if _LLM_MODEL.startswith("litellm/"):
     _LLM_MODEL = _LLM_MODEL[len("litellm/"):]
+if "/" in _LLM_MODEL:
+    _LLM_MODEL = _LLM_MODEL.split("/", 1)[1]
 
 
 # ---------------------------------------------------------------------------
