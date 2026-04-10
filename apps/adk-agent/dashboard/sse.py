@@ -49,35 +49,36 @@ _db_executor = concurrent.futures.ThreadPoolExecutor(
 async def _sse_generator(request: Request):
     """Yield SSE events with snapshots every 500ms.
 
-    Reads from SQLite via a thread-pool executor so the SSE stream
-    works even when the async event loop is saturated by LLM calls.
-    Falls back to the in-memory collector if SQLite has no data.
+    Prefers the in-memory collector (always up-to-date) over SQLite
+    snapshots (which may lag during Flock processing).  Falls back to
+    SQLite only when there is no active in-memory collector.
     """
     loop = asyncio.get_running_loop()
     while True:
         if await request.is_disconnected():
             break
 
-        # Try SQLite first — only_running=True so we don't return stale
-        # completed-run data when no pipeline is active
-        try:
-            snapshot = await loop.run_in_executor(
-                _db_executor,
-                lambda: event_store.get_latest_snapshot(None, only_running=True),
-            )
-        except Exception:
-            snapshot = None
+        snapshot = None
+
+        # 1) Prefer in-memory collector — always has real-time data
+        collector = get_any_active_collector()
+        if collector:
+            snapshot = collector.snapshot()
+
+        # 2) Fall back to SQLite (covers post-finalization or saturated loop)
+        if not snapshot:
+            try:
+                snapshot = await loop.run_in_executor(
+                    _db_executor,
+                    lambda: event_store.get_latest_snapshot(None, only_running=True),
+                )
+            except Exception:
+                snapshot = None
 
         if snapshot:
             yield f"data: {json.dumps(snapshot, default=str)}\n\n"
         else:
-            # Fall back to in-memory collector
-            collector = get_any_active_collector()
-            if collector:
-                snapshot = collector.snapshot()
-                yield f"data: {json.dumps(snapshot, default=str)}\n\n"
-            else:
-                yield f"data: {json.dumps({'status': 'idle', 'message': 'No active pipeline run'})}\n\n"
+            yield f"data: {json.dumps({'status': 'idle', 'message': 'No active pipeline run'})}\n\n"
         await asyncio.sleep(0.5)
 
 

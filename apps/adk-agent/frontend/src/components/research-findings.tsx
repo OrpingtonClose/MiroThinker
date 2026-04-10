@@ -1,4 +1,4 @@
-import { AgentState } from "@/lib/types";
+import { AgentState } from "@/types/dashboard";
 
 export interface ResearchFindingsProps {
   state: AgentState;

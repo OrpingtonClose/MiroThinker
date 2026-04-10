@@ -379,10 +379,68 @@ class PipelineCollector:
 
     def _snapshot_unlocked(self) -> dict[str, Any]:
         """Build snapshot dict — caller must hold self._lock."""
-        elapsed = time.time() - self.started_at
+        now = time.time()
+        elapsed = now - self.started_at
+
+        # Recent events (last 30) for the live activity feed
+        recent_events = [
+            {
+                "event_type": e["event_type"],
+                "timestamp": e["timestamp"],
+                "agent": e["agent"],
+                "phase": e["phase"],
+                "data": e["data"],
+            }
+            for e in self.events[-30:]
+        ]
+
+        # Recent LLM calls (last 10) with duration info
+        recent_llm = [
+            {
+                "agent": r.agent,
+                "duration_secs": round(r.duration_secs, 2),
+                "completion_tokens_est": r.completion_tokens_est,
+                "end_time": r.end_time,
+            }
+            for r in self.llm_calls[-10:]
+        ]
+
+        # Recent tool calls (last 10)
+        recent_tools = [
+            {
+                "tool_name": t.tool_name,
+                "agent": t.agent,
+                "duration_secs": round(t.duration_secs, 2),
+                "result_chars": t.result_chars,
+                "error": t.error[:100] if t.error else "",
+                "was_compressed": t.was_compressed,
+            }
+            for t in self.tool_calls[-10:]
+        ]
+
+        # Active (pending) operations
+        pending_tools = list(self._pending_tool.keys())
+        pending_llm = list(self._pending_llm.keys())
+
+        # Corpus growth over time
+        corpus_history = [
+            {"iteration": u["iteration"], "admitted": u["admitted"], "total": u["total"]}
+            for u in self.corpus_updates
+        ]
+
+        # LLM call rate (calls in last 60s)
+        cutoff_60 = now - 60
+        llm_last_60 = sum(1 for r in self.llm_calls if r.end_time > cutoff_60)
+        tool_last_60 = sum(1 for t in self.tool_calls if t.end_time > cutoff_60)
+
+        # Last activity timestamp
+        last_activity = self.events[-1]["timestamp"] if self.events else self.started_at
+        secs_since_activity = round(now - last_activity, 1)
+
         return {
             "session_id": self.session_id,
             "query": self.query[:200],
+            "started_at": self.started_at,
             "elapsed_secs": round(elapsed, 1),
             "current_phase": self._current_phase,
             "phases": [
@@ -390,7 +448,7 @@ class PipelineCollector:
                     "phase": p["phase"],
                     "agent": p["agent"],
                     "elapsed": round(
-                        (p["end_time"] or time.time()) - p["start_time"], 1
+                        (p["end_time"] or now) - p["start_time"], 1
                     ),
                     "outcome": p["outcome"],
                 }
@@ -412,7 +470,20 @@ class PipelineCollector:
                     if self.corpus_updates
                     else 0
                 ),
+                "force_ends": len(self.force_ends),
             },
+            # Live activity data
+            "recent_events": recent_events,
+            "recent_llm": recent_llm,
+            "recent_tools": recent_tools,
+            "pending_tools": pending_tools,
+            "pending_llm": pending_llm,
+            "corpus_history": corpus_history,
+            # Rate metrics
+            "llm_per_min": llm_last_60,
+            "tools_per_min": tool_last_60,
+            "secs_since_activity": secs_since_activity,
+            # Flags
             "thinker_escalated": self.thinker_escalated,
             "stalled": len(self.stall_events) > 0,
             "finalized": self._finalized,
