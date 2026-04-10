@@ -37,6 +37,7 @@ from callbacks.before_model import before_model_callback
 from callbacks.before_tool import before_tool_callback
 from callbacks.condition_manager import researcher_condition_callback
 from tools.mcp_tools import get_tools
+from tools.deep_research_tools import DEEP_RESEARCH_TOOLS
 from tools.research_tools import RESEARCH_TOOLS
 
 RESEARCHER_INSTRUCTION = """\
@@ -152,7 +153,7 @@ researcher_agent = Agent(
         "Emits parallel tool calls for concurrent execution."
     ),
     instruction=RESEARCHER_INSTRUCTION,
-    tools=get_tools(["brave-search", "firecrawl", "exa", "kagi", "tool-python"]) + RESEARCH_TOOLS,
+    tools=get_tools(["brave-search", "firecrawl", "exa", "kagi", "tool-python"]) + RESEARCH_TOOLS + DEEP_RESEARCH_TOOLS,
     before_model_callback=before_model_callback,
     after_model_callback=after_model_callback,
     before_tool_callback=before_tool_callback,

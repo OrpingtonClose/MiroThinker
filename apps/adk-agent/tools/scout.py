@@ -86,7 +86,7 @@ You are a research analyst.  Deeply understand what this query is about \
 Research query: {query}
 
 Analyze this query and output ONLY valid JSON:
-{{
+{
   "entities": ["every entity, person, substance, organization, concept mentioned or implied"],
   "domains": ["every knowledge domain this touches — be expansive"],
   "implicit_questions": ["what is the user REALLY trying to accomplish? list 5-8 implicit questions"],
@@ -94,7 +94,7 @@ Analyze this query and output ONLY valid JSON:
   "sub_questions": ["3-6 concrete sub-questions that research needs to answer"],
   "semantic_summary": "one paragraph explaining what this query is really about",
   "core_need": "one sentence describing what the user ultimately needs"
-}}"""
+}"""
 
 
 async def _llm_complete(prompt: str, max_tokens: int = 2048) -> str:
@@ -290,7 +290,7 @@ Probe results:
 
 Output ONLY valid JSON — an array of objects:
 [
-  {{"sub_question": "...", "tier": "SHALLOW|MODERATE|DEEP", "rationale": "...", "recommended_approach": "..."}}
+  {"sub_question": "...", "tier": "SHALLOW|MODERATE|DEEP", "rationale": "...", "recommended_approach": "..."}
 ]"""
 
 
