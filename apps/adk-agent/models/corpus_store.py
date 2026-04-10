@@ -390,9 +390,12 @@ class CorpusStore:
         from dashboard import get_any_active_collector
         collector = get_any_active_collector()
         flock_agent = f"flock/{caller}" if caller else "flock"
-        if collector:
-            prompt_tokens_est = len(prompt) // 3
-            collector.llm_start(flock_agent, prompt_tokens_est)
+        try:
+            if collector:
+                prompt_tokens_est = len(prompt) // 3
+                collector.llm_start(flock_agent, prompt_tokens_est)
+        except Exception:
+            pass  # never block pipeline for dashboard
 
         t0 = time.monotonic()
         row = self.conn.execute(
@@ -405,11 +408,14 @@ class CorpusStore:
         duration_ms = (time.monotonic() - t0) * 1000
 
         # Emit llm_end to the live dashboard
-        if collector:
-            completion_tokens_est = len(result) // 3
-            collector.llm_end(
-                flock_agent, duration_ms / 1000, completion_tokens_est,
-            )
+        try:
+            if collector:
+                completion_tokens_est = len(result) // 3
+                collector.llm_end(
+                    flock_agent, duration_ms / 1000, completion_tokens_est,
+                )
+        except Exception:
+            pass  # never block pipeline for dashboard
 
         if self._trace_enabled and caller:
             try:
@@ -1307,12 +1313,15 @@ class CorpusStore:
         # Emit algorithm start to live dashboard
         from dashboard import get_any_active_collector
         collector = get_any_active_collector()
-        if collector:
-            collector.emit_event(
-                "algorithm_start",
-                agent="flock",
-                data={"algorithm": name, "iteration": self._trace_iteration},
-            )
+        try:
+            if collector:
+                collector.emit_event(
+                    "algorithm_start",
+                    agent="flock",
+                    data={"algorithm": name, "iteration": self._trace_iteration},
+                )
+        except Exception:
+            pass  # never block pipeline for dashboard
 
         before = self._score_snapshot() if self._trace_enabled else {}
         t0 = time.monotonic()
@@ -1323,16 +1332,19 @@ class CorpusStore:
         after = self._score_snapshot() if self._trace_enabled else {}
 
         # Emit algorithm end to live dashboard
-        if collector:
-            collector.emit_event(
-                "algorithm_end",
-                agent="flock",
-                data={
-                    "algorithm": name,
-                    "affected": result,
-                    "duration_ms": round(duration_ms, 1),
-                },
-            )
+        try:
+            if collector:
+                collector.emit_event(
+                    "algorithm_end",
+                    agent="flock",
+                    data={
+                        "algorithm": name,
+                        "affected": result,
+                        "duration_ms": round(duration_ms, 1),
+                    },
+                )
+        except Exception:
+            pass  # never block pipeline for dashboard
 
         if self._trace_enabled:
             try:
