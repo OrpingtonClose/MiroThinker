@@ -104,6 +104,11 @@ def _init_pipeline_state(
         query = state.get("user_query", "")
         if query:
             from tools.scout import run_scout_phase
+            import threading as _threading
+
+            # Cancel event prevents a timed-out scout from writing to
+            # state after the research loop has started.
+            cancel_event = _threading.Event()
 
             try:
                 loop = asyncio.get_event_loop()
@@ -117,14 +122,19 @@ def _init_pipeline_state(
                     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                     try:
                         future = pool.submit(
-                            asyncio.run, run_scout_phase(query, state)
+                            asyncio.run,
+                            run_scout_phase(query, state, _cancel=cancel_event),
                         )
                         future.result(timeout=90)
                     finally:
+                        cancel_event.set()
                         pool.shutdown(wait=False, cancel_futures=True)
                 else:
-                    loop.run_until_complete(run_scout_phase(query, state))
+                    loop.run_until_complete(
+                        run_scout_phase(query, state, _cancel=cancel_event)
+                    )
             except Exception as exc:
+                cancel_event.set()
                 logger.warning("Phase 0 scout failed (non-fatal): %s", exc)
 
     return None

@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -408,7 +409,11 @@ def _format_landscape_assessment(
 # Public entry point
 # ---------------------------------------------------------------------------
 
-async def run_scout_phase(query: str, state: dict[str, Any]) -> None:
+async def run_scout_phase(
+    query: str,
+    state: dict[str, Any],
+    _cancel: threading.Event | None = None,
+) -> None:
     """Run the full 5-step Phase 0 scout and inject results into state.
 
     This is called once at pipeline initialization, before the first
@@ -418,6 +423,10 @@ async def run_scout_phase(query: str, state: dict[str, Any]) -> None:
     Args:
         query: The user's research query.
         state: The session state dict (modified in place).
+        _cancel: Optional threading.Event — if set, the scout aborts
+            before writing to state.  Used by the pipeline to prevent
+            a timed-out scout from overwriting state after the
+            research loop has started.
     """
     logger.info("Phase 0 scout: starting for query: %s", query[:100])
 
@@ -448,7 +457,11 @@ async def run_scout_phase(query: str, state: dict[str, Any]) -> None:
     assessments = await _assess_landscape(probes)
     logger.info("Scout step 4 (assess): %d assessments", len(assessments))
 
-    # Step 5: Inject
+    # Step 5: Inject — but only if we haven't been cancelled
+    if _cancel is not None and _cancel.is_set():
+        logger.warning("Scout cancelled before state injection — discarding results")
+        return
+
     landscape_text = _format_landscape_assessment(assessments, comprehension)
     current_findings = state.get("research_findings", "(no findings yet)")
     if current_findings == "(no findings yet)":

@@ -151,7 +151,8 @@ def after_tool_callback(
         # is missing — recording phantom costs would inflate the session
         # total and block properly-configured providers.
         _is_no_call_error = (
-            result_text.startswith("[TOOL_ERROR]") and "unavailable" in result_text
+            (result_text.startswith("[TOOL_ERROR]") and "unavailable" in result_text)
+            or "BUDGET EXCEEDED" in result_text
         )
         if not _is_no_call_error:
             try:
