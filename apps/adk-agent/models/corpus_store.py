@@ -90,7 +90,7 @@ class CorpusStore:
             os.makedirs(_CORPUS_DIR, exist_ok=True)
             db = os.path.join(
                 _CORPUS_DIR,
-                f"corpus_{int(time.time())}.duckdb",
+                f"corpus_{int(time.time())}_{os.getpid()}_{id(self):x}.duckdb",
             )
         self.db_path = db
         logger.info("CorpusStore opening DuckDB at %s", db)
