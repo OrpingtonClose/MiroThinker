@@ -42,6 +42,11 @@ class AtomicCondition:
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
 
+    # Single-table architecture fields
+    row_type: str = "finding"  # 'finding' | 'similarity' | 'contradiction' | 'raw' | 'synthesis'
+    related_id: int | None = None  # second parent for relationship rows
+    consider_for_use: bool = True  # universal exclusion flag
+
     def __post_init__(self) -> None:
         # Clamp confidence to [0.0, 1.0]
         self.confidence = max(0.0, min(1.0, self.confidence))
