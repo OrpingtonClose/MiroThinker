@@ -328,10 +328,13 @@ def cleanup_corpus(state: dict) -> None:
     key = state.get("_corpus_key")
     if key and key in _corpus_stores:
         corpus = _corpus_stores[key]
-        logger.info(
-            "Closing CorpusStore for key=%s  db=%s  (%d conditions)",
-            key, corpus.db_path, corpus.count(),
-        )
+        try:
+            logger.info(
+                "Closing CorpusStore for key=%s  db=%s  (%d conditions)",
+                key, corpus.db_path, corpus.count(),
+            )
+        except Exception:
+            logger.warning("Could not log corpus stats before close", exc_info=True)
         corpus.close()
         del _corpus_stores[key]
     # Clear corpus-related state keys so _init_pipeline_state
