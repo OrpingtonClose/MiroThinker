@@ -410,8 +410,8 @@ class CorpusStore:
                         "(id, fact, source_type, source_ref, row_type, "
                         "consider_for_use, created_at) "
                         "VALUES (?, ?, ?, ?, 'raw', ?, ?)",
-                        [cid, raw_text[:2000], src_type, src_ref,
-                         bool(atomised), ingested_at or ""],
+                            [cid, raw_text[:2000], src_type, src_ref,
+                             False, ingested_at or ""],
                     )
                 logger.info("Migrated %d raw_ingestion rows", len(raw_rows))
             except Exception:

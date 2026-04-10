@@ -155,10 +155,10 @@ def _ingest_text_into_corpus(
     )
     logger.info(
         "Algorithm battery: %d ready, %d for expansion, "
-        "%d merged, %d cluster reps (%.0fms)",
+        "%d excluded, %d cluster reps (%.0fms)",
         battery_results.get("ready", 0),
         battery_results.get("expansion_targets", 0),
-        battery_results.get("merged", 0),
+        battery_results.get("excluded", 0),
         battery_results.get("cluster_reps", 0),
         battery_results.get("battery_duration_ms", 0),
     )
