@@ -746,7 +746,8 @@ class CorpusStore:
         """Score all unscored conditions using Flock. Returns count."""
         unscored = self.conn.execute(
             "SELECT id, fact, source_url FROM conditions "
-            "WHERE scored_at = ''"
+            "WHERE scored_at = '' AND consider_for_use = TRUE "
+            "AND row_type = 'finding'"
         ).fetchall()
         if not unscored:
             return 0
