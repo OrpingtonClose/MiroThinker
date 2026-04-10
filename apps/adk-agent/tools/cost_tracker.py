@@ -128,17 +128,7 @@ class CostTracker:
         """
         estimated = ESTIMATED_COSTS.get(provider, 1.0)
 
-        with self._lock:
-            if self._session_total + estimated > SESSION_BUDGET:
-                return (
-                    f"[BUDGET EXCEEDED] Session budget of "
-                    f"${SESSION_BUDGET:.2f} would be exceeded "
-                    f"(current: ${self._session_total:.2f}, "
-                    f"estimated call: ${estimated:.2f}). "
-                    f"Use regular search tools (Brave, Exa, Kagi) instead."
-                )
-
-        # Check monthly budget from JSONL ledger
+        # Check monthly budget from JSONL ledger (outside lock — file I/O)
         try:
             monthly_total = self._get_monthly_total()
             if monthly_total + estimated > MONTHLY_BUDGET:
@@ -151,9 +141,21 @@ class CostTracker:
         except Exception:
             pass  # If we can't read the ledger, allow the call
 
-        # Reserve the estimated cost so concurrent checks see it.
+        # Atomic check-and-reserve: session budget check + reservation
+        # must be in the SAME lock acquisition to prevent TOCTOU races
+        # when multiple providers run budget checks concurrently.
         with self._lock:
+            if self._session_total + estimated > SESSION_BUDGET:
+                return (
+                    f"[BUDGET EXCEEDED] Session budget of "
+                    f"${SESSION_BUDGET:.2f} would be exceeded "
+                    f"(current: ${self._session_total:.2f}, "
+                    f"estimated call: ${estimated:.2f}). "
+                    f"Use regular search tools (Brave, Exa, Kagi) instead."
+                )
+            # Reserve immediately so concurrent checks see the spend.
             self._session_total += estimated
+
         logger.debug(
             "Budget reservation: %s +$%.2f (session now $%.2f)",
             provider, estimated, self._session_total,
