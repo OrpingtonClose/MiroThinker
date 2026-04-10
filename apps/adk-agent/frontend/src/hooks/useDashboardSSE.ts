@@ -5,13 +5,17 @@ import type { DashboardSnapshot } from "@/types/dashboard";
 
 export type ConnectionStatus = "connected" | "connecting" | "disconnected";
 
-// Connect directly to the backend SSE endpoint.
-// In production the backend is on :8000; the Next.js rewrite proxy
-// doesn't handle long-lived SSE streams reliably, so we hit it directly.
+// SSE URL resolution:
+// - On localhost, connect directly to :8000 (avoids Next.js proxy SSE buffering)
+// - On tunnel/deployed URLs, use the /agui/ proxy path (only port 3000 is exposed)
 function getSSEUrl(): string {
   if (typeof window === "undefined") return "http://localhost:8000/dashboard/stream";
   const host = window.location.hostname;
-  return `http://${host}:8000/dashboard/stream`;
+  if (host === "localhost" || host === "127.0.0.1") {
+    return `http://${host}:8000/dashboard/stream`;
+  }
+  // Tunnel or deployed: use Next.js proxy path (same origin)
+  return `${window.location.origin}/agui/dashboard/stream`;
 }
 
 const SSE_URL = getSSEUrl();
