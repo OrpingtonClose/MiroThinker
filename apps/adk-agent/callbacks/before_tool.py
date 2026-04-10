@@ -92,6 +92,40 @@ EXA_CRAWL_TEXT_MAX_CHARS = 15_000  # crawling a specific URL gets more
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
+_DEEP_RESEARCH_TOOLS = frozenset({
+    "perplexity_deep_research",
+    "grok_deep_research",
+    "tavily_deep_research",
+})
+
+
+def _enforce_deep_research_budget(
+    tool_name: str, args: Dict[str, Any], tool_context: ToolContext
+) -> Optional[str]:
+    """Check cost budget before allowing a deep research call.
+
+    Returns None to allow the call, or a string message that ADK will
+    use as the tool result (blocking actual execution).
+    """
+    if tool_name not in _DEEP_RESEARCH_TOOLS:
+        return None
+
+    from tools.cost_tracker import get_cost_tracker
+
+    tracker = get_cost_tracker()
+    provider = _TOOL_TO_PROVIDER.get(tool_name, tool_name)
+    warning = tracker.check_budget(provider)
+    if warning:
+        logger.warning(
+            "Deep research budget exceeded for %s: %s",
+            tool_name, warning,
+        )
+        return (
+            f"[BUDGET EXCEEDED] {warning} "
+            f"Use regular search tools (Brave, Exa, Kagi) instead."
+        )
+    return None
+
 
 def _enforce_exa_budget(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     """Inject source-level size controls into Exa tool calls.
@@ -146,22 +180,13 @@ def before_tool_callback(
     """
     tool_name: str = tool.name if hasattr(tool, "name") else str(tool)
 
+    # ── Deep research budget gate (must be first — blocks expensive calls) ──
+    budget_block = _enforce_deep_research_budget(tool_name, args, tool_context)
+    if budget_block is not None:
+        return {"result": budget_block}
+
     # ── Source-level context budget for Exa ───────────────────────────
     _enforce_exa_budget(tool_name, args)
-
-    # ── Budget gate for deep research tools ───────────────────────────
-    _deep_providers = {"perplexity", "grok", "tavily"}
-    provider_for_budget = _TOOL_TO_PROVIDER.get(tool_name)
-    if provider_for_budget in _deep_providers:
-        from tools.cost_tracker import get_cost_tracker
-
-        tracker = get_cost_tracker()
-        warning = tracker.check_budget(provider_for_budget)
-        if warning:
-            logger.warning(
-                "Budget gate blocked %s: %s", tool_name, warning
-            )
-            return {"error": warning}
 
     # Use function_call_id as the per-invocation key.  ADK assigns a
     # unique function_call_id to every tool invocation, so parallel calls

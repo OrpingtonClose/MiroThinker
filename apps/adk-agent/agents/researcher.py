@@ -118,6 +118,14 @@ kagi_enrich_news)
 **tool-python** (E2B sandbox for code execution)
 - Best for: data parsing, calculations, analysis of gathered data
 
+**Deep Research** (perplexity_deep_research, grok_deep_research, tavily_deep_research)
+- ONLY use when the thinker's strategy assigns a sub-question as TIER_DEEP
+- These are expensive ($1-5/call) and long-running (2-10 min)
+- They autonomously search 50+ sources and return comprehensive cited reports
+- Do NOT also run regular searches on the same topic — that is redundant
+- If budget is exceeded, the tool returns a warning — fall back to regular tools
+- Budget-gated: the before_tool_callback blocks calls when session/monthly budget is hit
+
 PARALLEL EXECUTION: When you have multiple independent searches, emit \
 ALL tool calls in a single response. They execute concurrently — this \
 is dramatically faster than calling tools one at a time. Only serialise \
