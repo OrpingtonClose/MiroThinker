@@ -42,6 +42,11 @@ _provider_semaphores: Dict[str, threading.Semaphore] = {
     "exa": threading.Semaphore(_EXA_CONCURRENCY),
     "firecrawl": threading.Semaphore(_FIRECRAWL_CONCURRENCY),
     "kagi": threading.Semaphore(_KAGI_CONCURRENCY),
+    # Deep research tools — low concurrency (1 each) to prevent
+    # parallel expensive calls from blowing through the budget.
+    "perplexity": threading.Semaphore(1),
+    "grok": threading.Semaphore(1),
+    "tavily": threading.Semaphore(1),
 }
 
 # Map tool names to provider keys
@@ -66,6 +71,10 @@ _TOOL_TO_PROVIDER: Dict[str, str] = {
     "kagi_fastgpt": "kagi",
     "kagi_enrich_web": "kagi",
     "kagi_enrich_news": "kagi",
+    # Deep research tools (budget-gated)
+    "perplexity_deep_research": "perplexity",
+    "grok_deep_research": "grok",
+    "tavily_deep_research": "tavily",
 }
 
 
@@ -139,6 +148,20 @@ def before_tool_callback(
 
     # ── Source-level context budget for Exa ───────────────────────────
     _enforce_exa_budget(tool_name, args)
+
+    # ── Budget gate for deep research tools ───────────────────────────
+    _deep_providers = {"perplexity", "grok", "tavily"}
+    provider_for_budget = _TOOL_TO_PROVIDER.get(tool_name)
+    if provider_for_budget in _deep_providers:
+        from tools.cost_tracker import get_cost_tracker
+
+        tracker = get_cost_tracker()
+        warning = tracker.check_budget(provider_for_budget)
+        if warning:
+            logger.warning(
+                "Budget gate blocked %s: %s", tool_name, warning
+            )
+            return {"error": warning}
 
     # Use function_call_id as the per-invocation key.  ADK assigns a
     # unique function_call_id to every tool invocation, so parallel calls

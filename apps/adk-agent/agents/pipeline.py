@@ -54,6 +54,7 @@ researcher needs tool-calling capability.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -91,6 +92,26 @@ def _init_pipeline_state(
             state[k] = v
         init_corpus(state)
         logger.info("Pipeline state initialised: corpus_key=%s", state["_corpus_key"])
+
+        # Run Phase 0 scout if this is a fresh pipeline
+        query = state.get("user_query", "")
+        if query:
+            from tools.scout import run_scout_phase
+
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # ADK's event loop is already running — schedule as task
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as pool:
+                        pool.submit(
+                            asyncio.run, run_scout_phase(query, state)
+                        ).result(timeout=90)
+                else:
+                    loop.run_until_complete(run_scout_phase(query, state))
+            except Exception as exc:
+                logger.warning("Phase 0 scout failed (non-fatal): %s", exc)
+
     return None
 
 
