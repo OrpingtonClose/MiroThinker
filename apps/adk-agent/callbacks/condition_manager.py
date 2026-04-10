@@ -196,6 +196,10 @@ def researcher_condition_callback(
         # doesn't lose context from previous iterations.
         state["research_findings"] = corpus.format_for_thinker()
         state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
+        # Still advance iteration so stale-expansion cleanup and the
+        # thinker see a fresh round number even when the researcher
+        # produced no new findings.
+        state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
         return None
 
     _ingest_text_into_corpus(state, findings_text, "researcher")
@@ -432,6 +436,7 @@ def cleanup_corpus(state: dict) -> None:
     # re-initialises cleanly on session reuse.
     # ADK State objects don't support .pop(); use del with guard.
     for k in ("_corpus_key", "_corpus_db_path", "_corpus_iteration",
+              "_expansion_targets",
               "research_findings", "corpus_for_synthesis", "loop_synthesis"):
         try:
             del state[k]
