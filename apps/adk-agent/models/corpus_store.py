@@ -919,27 +919,33 @@ class CorpusStore:
 
         If a condition has similarity_flags entries with relationship
         = 'confirms' from different angles, its cross_ref_boost
-        increases.  Pure SQL.
+        increases.
 
         Returns number of conditions boosted.
         """
-        # Find conditions with confirming pairs from different angles
+        # DuckDB does not allow aggregate functions inside correlated
+        # subqueries in UPDATE statements.  Compute boost values in a
+        # CTE first, then join-update.
         self.conn.execute(
-            """UPDATE conditions SET cross_ref_boost = (
-                   SELECT COALESCE(
-                       MIN(0.2, COUNT(*) * 0.05), 0.0
-                   )
-                   FROM similarity_flags sf
+            """UPDATE conditions
+               SET cross_ref_boost = boost.val
+               FROM (
+                   SELECT c.id,
+                          COALESCE(MIN(0.2, COUNT(*) * 0.05), 0.0) AS val
+                   FROM conditions c
+                   JOIN similarity_flags sf
+                       ON sf.condition_a = c.id
+                       OR sf.condition_b = c.id
                    JOIN conditions c2
                        ON (sf.condition_b = c2.id
                            OR sf.condition_a = c2.id)
-                   WHERE (sf.condition_a = conditions.id
-                          OR sf.condition_b = conditions.id)
-                     AND sf.relationship IN ('confirms', 'related')
-                     AND c2.angle != conditions.angle
-                     AND c2.id != conditions.id
-               )
-               WHERE scored_at != ''
+                      AND c2.id != c.id
+                      AND c2.angle != c.angle
+                   WHERE sf.relationship IN ('confirms', 'related')
+                     AND c.scored_at != ''
+                   GROUP BY c.id
+               ) AS boost
+               WHERE conditions.id = boost.id
             """
         )
         count = self.conn.execute(
@@ -997,33 +1003,27 @@ class CorpusStore:
 
         Returns number of conditions with updated boost.
         """
-        # Extract domain from source_url and count occurrences
-        # DuckDB doesn't have a built-in domain extractor, so we
-        # use string functions to approximate it.
+        # DuckDB does not allow aggregate functions inside correlated
+        # subqueries in UPDATE.  Compute per-domain counts first, then
+        # join-update to apply the diversity bonus.
         self.conn.execute(
             """UPDATE conditions
-               SET cross_ref_boost = cross_ref_boost + CASE
-                   WHEN source_url != '' AND source_url IS NOT NULL THEN
-                       -- Unique domain bonus: 0.05 / count of same domain
-                       0.05 / GREATEST(1, (
-                           SELECT COUNT(*)
-                           FROM conditions c2
-                           WHERE c2.source_url != ''
-                             AND SPLIT_PART(
-                                 REPLACE(REPLACE(c2.source_url,
-                                     'https://', ''), 'http://', ''),
-                                 '/', 1
-                             ) = SPLIT_PART(
-                                 REPLACE(REPLACE(conditions.source_url,
-                                     'https://', ''), 'http://', ''),
-                                 '/', 1
-                             )
-                       ))
-                   ELSE 0.0
-               END
-               WHERE scored_at != ''
-                 AND source_url != ''
-                 AND source_url IS NOT NULL
+               SET cross_ref_boost = cross_ref_boost + div.bonus
+               FROM (
+                   SELECT c.id,
+                          0.05 / GREATEST(1, COUNT(*) OVER (
+                              PARTITION BY SPLIT_PART(
+                                  REPLACE(REPLACE(c.source_url,
+                                      'https://', ''), 'http://', ''),
+                                  '/', 1
+                              )
+                          )) AS bonus
+                   FROM conditions c
+                   WHERE c.scored_at != ''
+                     AND c.source_url != ''
+                     AND c.source_url IS NOT NULL
+               ) AS div
+               WHERE conditions.id = div.id
             """
         )
         count = self.conn.execute(
