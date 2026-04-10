@@ -62,21 +62,27 @@ def queue_search_result(
 def _drain_search_queue(state: dict) -> int:
     """Drain queued search results into the corpus (single-threaded).
 
-    Returns the total number of admitted conditions across all queued items.
-    """
-    with _pending_search_lock:
-        items = list(_pending_search_results)
-        _pending_search_results.clear()
+    Only takes items matching this session's ``_corpus_key``, leaving
+    items from other concurrent sessions in the queue.
 
-    if not items:
+    Returns the total number of admitted conditions across all drained items.
+    """
+    corpus_key = state.get("_corpus_key", "")
+    if not corpus_key:
         return 0
 
-    corpus_key = state.get("_corpus_key", "")
+    # Partition under the lock: take ours, leave others
+    with _pending_search_lock:
+        mine = [item for item in _pending_search_results if item[0] == corpus_key]
+        if not mine:
+            return 0
+        # Keep only items that don't belong to us
+        _pending_search_results[:] = [
+            item for item in _pending_search_results if item[0] != corpus_key
+        ]
+
     total_admitted = 0
-    for item_key, text, source_type, iteration in items:
-        # Only ingest items belonging to this session's corpus
-        if item_key != corpus_key:
-            continue
+    for _key, text, source_type, iteration in mine:
         try:
             admitted = _ingest_text_into_corpus(state, text, source_type)
             total_admitted += admitted
@@ -89,7 +95,7 @@ def _drain_search_queue(state: dict) -> int:
     if total_admitted:
         logger.info(
             "Drained search queue: %d items, %d conditions admitted",
-            len(items), total_admitted,
+            len(mine), total_admitted,
         )
     return total_admitted
 
