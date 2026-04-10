@@ -145,9 +145,9 @@ def researcher_condition_callback(
 # ---------------------------------------------------------------------------
 # Module-level corpus store singleton
 # ---------------------------------------------------------------------------
-# Each pipeline run creates a fresh CorpusStore.  The store lives for the
-# duration of the LoopAgent execution.  We use a dict keyed by a session
-# marker so concurrent pipelines don't collide.
+# Each pipeline run gets a file-backed CorpusStore keyed by a session
+# marker so concurrent pipelines don't collide.  The DuckDB file persists
+# after the run completes, enabling session continuation.
 
 _corpus_stores: dict[str, "CorpusStore"] = {}
 
@@ -159,12 +159,13 @@ def _get_corpus(state: dict) -> "CorpusStore":
     # Use session-level key to isolate concurrent runs
     key = state.get("_corpus_key", "default")
     if key not in _corpus_stores:
-        _corpus_stores[key] = CorpusStore()
-        logger.info("Created new CorpusStore for key=%s", key)
+        db_path = state.get("_corpus_db_path", "")
+        _corpus_stores[key] = CorpusStore(db_path=db_path)
+        logger.info("Created new CorpusStore for key=%s db=%s", key, db_path)
     return _corpus_stores[key]
 
 
-def build_corpus_state() -> dict:
+def build_corpus_state(db_path: str = "") -> dict:
     """Return the initial session-state dict for a new pipeline run.
 
     ``InMemorySessionService`` deep-copies sessions on both ``create_session``
@@ -174,12 +175,18 @@ def build_corpus_state() -> dict:
 
     Call :func:`init_corpus` after session creation to register the
     CorpusStore singleton.
+
+    Args:
+        db_path: Optional explicit DuckDB file path.  When empty the
+            CorpusStore will auto-generate a timestamped file under
+            ``$FINDINGS_DIR/corpora/``.
     """
     import uuid
 
     key = f"corpus_{uuid.uuid4().hex[:8]}"
     return {
         "_corpus_key": key,
+        "_corpus_db_path": db_path,
         "_corpus_iteration": 0,
         # Fallbacks so agents never see raw template literals.
         # "(no findings yet)" matches the thinker's first-iteration check.
@@ -208,8 +215,13 @@ def init_corpus(state: dict) -> None:
     # Defensive cleanup: close existing store for this key if present
     if key in _corpus_stores:
         _corpus_stores[key].close()
-    _corpus_stores[key] = CorpusStore()
-    logger.info("Initialised corpus store for key=%s", key)
+
+    db_path = state.get("_corpus_db_path", "")
+    _corpus_stores[key] = CorpusStore(db_path=db_path)
+    logger.info(
+        "Initialised corpus store for key=%s db=%s",
+        key, _corpus_stores[key].db_path,
+    )
 
 
 def get_corpus_text(state: dict) -> str:
@@ -303,11 +315,11 @@ def synthesis_condition_callback(
 
 
 def cleanup_corpus(state: dict) -> None:
-    """Close and remove the CorpusStore for a completed pipeline run.
+    """Close the CorpusStore connection for a completed pipeline run.
 
-    Call this after ``run_pipeline`` returns to release the DuckDB
-    connection and its in-memory data.  Without this, each pipeline
-    run leaks a CorpusStore in the module-level ``_corpus_stores`` dict.
+    The DuckDB file is preserved on disk so the corpus can be reopened
+    later for session continuation or post-hoc analysis.  Only the
+    in-process connection and module-level reference are released.
 
     Also removes corpus-related keys from *state* so that
     :func:`_init_pipeline_state` properly re-initialises on the next
@@ -315,14 +327,18 @@ def cleanup_corpus(state: dict) -> None:
     """
     key = state.get("_corpus_key")
     if key and key in _corpus_stores:
-        _corpus_stores[key].close()
+        corpus = _corpus_stores[key]
+        logger.info(
+            "Closing CorpusStore for key=%s  db=%s  (%d conditions)",
+            key, corpus.db_path, corpus.count(),
+        )
+        corpus.close()
         del _corpus_stores[key]
-        logger.info("Cleaned up CorpusStore for key=%s", key)
     # Clear corpus-related state keys so _init_pipeline_state
     # re-initialises cleanly on session reuse.
     # ADK State objects don't support .pop(); use del with guard.
-    for k in ("_corpus_key", "_corpus_iteration", "research_findings",
-              "corpus_for_synthesis", "loop_synthesis"):
+    for k in ("_corpus_key", "_corpus_db_path", "_corpus_iteration",
+              "research_findings", "corpus_for_synthesis", "loop_synthesis"):
         try:
             del state[k]
         except (KeyError, TypeError, AttributeError):
