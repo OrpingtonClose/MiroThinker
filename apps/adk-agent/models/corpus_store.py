@@ -382,7 +382,18 @@ class CorpusStore:
 
         When tracing is enabled, captures the prompt, response, and
         duration to the dashboard SQLite for after-run analysis.
+
+        Also emits dashboard events (llm_start / llm_end) so the
+        live dashboard shows Flock battery progress in real time.
         """
+        # Emit llm_start to the live dashboard
+        from dashboard import get_any_active_collector
+        collector = get_any_active_collector()
+        flock_agent = f"flock/{caller}" if caller else "flock"
+        if collector:
+            prompt_tokens_est = len(prompt) // 3
+            collector.llm_start(flock_agent, prompt_tokens_est)
+
         t0 = time.monotonic()
         row = self.conn.execute(
             "SELECT llm_complete("
@@ -392,6 +403,13 @@ class CorpusStore:
         ).fetchone()
         result = str(row[0]) if row and row[0] is not None else ""
         duration_ms = (time.monotonic() - t0) * 1000
+
+        # Emit llm_end to the live dashboard
+        if collector:
+            completion_tokens_est = len(result) // 3
+            collector.llm_end(
+                flock_agent, duration_ms / 1000, completion_tokens_est,
+            )
 
         if self._trace_enabled and caller:
             try:
@@ -1283,8 +1301,19 @@ class CorpusStore:
 
         Captures score snapshots before and after, measures duration,
         detects quality regressions, and writes trace to SQLite.
+        Emits dashboard events so the live UI shows battery progress.
         Returns the algorithm's result count.
         """
+        # Emit algorithm start to live dashboard
+        from dashboard import get_any_active_collector
+        collector = get_any_active_collector()
+        if collector:
+            collector.emit_event(
+                "algorithm_start",
+                agent="flock",
+                data={"algorithm": name, "iteration": self._trace_iteration},
+            )
+
         before = self._score_snapshot() if self._trace_enabled else {}
         t0 = time.monotonic()
 
@@ -1292,6 +1321,18 @@ class CorpusStore:
 
         duration_ms = (time.monotonic() - t0) * 1000
         after = self._score_snapshot() if self._trace_enabled else {}
+
+        # Emit algorithm end to live dashboard
+        if collector:
+            collector.emit_event(
+                "algorithm_end",
+                agent="flock",
+                data={
+                    "algorithm": name,
+                    "affected": result,
+                    "duration_ms": round(duration_ms, 1),
+                },
+            )
 
         if self._trace_enabled:
             try:
