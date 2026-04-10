@@ -2,7 +2,7 @@
 # This source code is licensed under the Apache 2.0 License.
 
 """
-After-tool callback — tool result truncation + dashboard tracking.
+After-tool callback — tool result truncation + dashboard tracking + corpus ingestion.
 
 What this callback does:
 1. **Tool result truncation** — caps large tool results (scrapes, crawls) to
@@ -10,6 +10,9 @@ What this callback does:
 2. **Dashboard tool_end tracking** — records duration and result size.
 3. **Provider semaphore release** — releases per-provider rate-limit semaphore
    acquired in before_tool_callback.
+4. **Search result ingestion** — feeds search tool results into the Flock corpus
+   via ``ingest_raw()`` so they get atomised, scored, and deduped alongside
+   all other findings.
 """
 
 from __future__ import annotations
@@ -41,6 +44,19 @@ _TRUNCATABLE_TOOLS = {
     "scrape", "scrape_website", "firecrawl_scrape", "firecrawl_crawl",
     "crawling_exa", "web_search_exa", "web_search_advanced_exa",
     "brave_web_search", "brave_news_search",
+}
+
+# Search tools whose results should be ingested into the Flock corpus.
+# Each tool maps to its source_type tag for condition tracking.
+_SEARCH_TOOLS: dict[str, str] = {
+    "brave_web_search": "brave_web_search",
+    "brave_news_search": "brave_news_search",
+    "web_search_exa": "exa_search",
+    "web_search_advanced_exa": "exa_search",
+    "crawling_exa": "exa_crawl",
+    "kagi_search": "kagi_search",
+    "firecrawl_scrape": "firecrawl_scrape",
+    "firecrawl_crawl": "firecrawl_crawl",
 }
 
 
@@ -125,6 +141,35 @@ def after_tool_callback(
             tool_name, agent_name, duration,
             result_chars=len(result_text),
         )
+
+    # ── Queue search results for corpus ingestion ──────────────────
+    # Search tool results are queued for later ingestion via the
+    # thread-safe queue in condition_manager.  The actual ingest_raw()
+    # call happens in researcher_condition_callback on the main thread,
+    # avoiding concurrent DuckDB access from parallel tool callbacks.
+    source_type = _SEARCH_TOOLS.get(tool_name)
+    if source_type and result_text and len(result_text) > 50:
+        try:
+            from callbacks.condition_manager import queue_search_result
+
+            corpus_key = tool_context.state.get("_corpus_key", "")
+            if corpus_key:
+                iteration = tool_context.state.get("_corpus_iteration", 0)
+                queue_search_result(
+                    corpus_key,
+                    result_text[:TOOL_RESULT_MAX_CHARS],
+                    source_type,
+                    iteration,
+                )
+                logger.info(
+                    "Queued %s result (%d chars) for corpus ingestion",
+                    tool_name, min(len(result_text), TOOL_RESULT_MAX_CHARS),
+                )
+        except Exception:
+            logger.debug(
+                "Search result queuing skipped for %s",
+                tool_name, exc_info=True,
+            )
 
     # ── Tool result truncation (always active) ───────────────────────
     truncated = _maybe_truncate_result(tool_name, result_text)

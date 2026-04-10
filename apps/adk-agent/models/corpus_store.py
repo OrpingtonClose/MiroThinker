@@ -20,17 +20,20 @@ Key features:
 
 from __future__ import annotations
 
+import json as _json
 import logging
 import os
 import re
 import time
+import urllib.request
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Optional
 import duckdb
 
 from models.atomic_condition import AtomicCondition
-from utils.flock_proxy import start_flock_proxy
+from utils.flock_proxy import get_flock_proxy_url, start_flock_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +79,12 @@ _CORPUS_DIR = os.path.join(
 # Explicit override: set CORPUS_DB_PATH to a full file path to use that
 # instead of the auto-generated session-scoped path.
 _DB_PATH = os.environ.get("CORPUS_DB_PATH", "")
+
+# ---------------------------------------------------------------------------
+# Direct HTTP path config (bypasses DuckDB's 2000-char llm_complete limit)
+# ---------------------------------------------------------------------------
+_FLOCK_PARALLELISM = int(os.environ.get("FLOCK_PARALLELISM", "6"))
+_FLOCK_HTTP_TIMEOUT = int(os.environ.get("FLOCK_HTTP_TIMEOUT", "60"))
 
 
 class CorpusStore:
@@ -410,6 +419,151 @@ class CorpusStore:
 
         return result
 
+    # ------------------------------------------------------------------
+    # Direct HTTP path — bypasses DuckDB's 2000-char llm_complete limit
+    # ------------------------------------------------------------------
+
+    def _http_complete(
+        self, prompt: str, caller: str = "", max_tokens: int = 4096,
+        *, _no_duckdb_fallback: bool = False,
+    ) -> str:
+        """Direct HTTP call to the Flock proxy, bypassing DuckDB's limit.
+
+        Used for long-form generation (atomisation, synthesis, merges)
+        where output may exceed DuckDB Flock's ~2000-char truncation.
+        Falls back to ``_flock_complete()`` if the proxy URL is unknown,
+        unless *_no_duckdb_fallback* is True (used by batch callers to
+        avoid concurrent DuckDB access from worker threads).
+        """
+        proxy_url = get_flock_proxy_url()
+        if not proxy_url:
+            if _no_duckdb_fallback:
+                return ""
+            return self._flock_complete(prompt, caller)
+
+        t0 = time.monotonic()
+        body = _json.dumps({
+            "model": "flock-model",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": 0.3,
+        }).encode()
+        req = urllib.request.Request(
+            f"{proxy_url}/v1/chat/completions",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=_FLOCK_HTTP_TIMEOUT) as resp:
+                data = _json.loads(resp.read())
+            choices = data.get("choices", [])
+            result = choices[0]["message"]["content"] if choices else ""
+            # Unwrap Flock JSON wrapper if present
+            try:
+                parsed = _json.loads(result)
+                if isinstance(parsed, dict) and "items" in parsed:
+                    items = parsed["items"]
+                    if isinstance(items, list) and items:
+                        result = str(items[0])
+            except (_json.JSONDecodeError, TypeError, KeyError):
+                pass
+        except Exception:
+            if _no_duckdb_fallback:
+                logger.warning(
+                    "Direct HTTP to proxy failed for %s (batch context, "
+                    "no DuckDB fallback)", caller, exc_info=True,
+                )
+                return ""
+            logger.warning(
+                "Direct HTTP to proxy failed for %s — falling back to "
+                "DuckDB llm_complete", caller, exc_info=True,
+            )
+            return self._flock_complete(prompt, caller)
+
+        duration_ms = (time.monotonic() - t0) * 1000
+
+        if self._trace_enabled and caller:
+            try:
+                from dashboard import event_store
+                event_store.insert_llm_trace(
+                    session_id=self._trace_session_id,
+                    iteration=self._trace_iteration,
+                    caller=caller,
+                    prompt=prompt[:4000],
+                    response=result[:4000],
+                    model=_FLOCK_MODEL,
+                    duration_ms=duration_ms,
+                )
+            except Exception:
+                pass
+
+        return result
+
+    def _http_complete_batch(
+        self,
+        prompts: list[tuple[str, str]],
+        max_tokens: int = 256,
+    ) -> list[str]:
+        """Run multiple HTTP completions in parallel via ThreadPoolExecutor.
+
+        Args:
+            prompts: list of ``(prompt_text, caller_label)`` tuples.
+            max_tokens: per-request max tokens (scoring needs ~10).
+
+        Returns:
+            List of response strings in the same order as *prompts*.
+        """
+        results: list[str] = [""] * len(prompts)
+        workers = min(_FLOCK_PARALLELISM, len(prompts))
+
+        def _call(idx: int, prompt: str, caller: str) -> tuple[int, str]:
+            return idx, self._http_complete(
+                prompt, caller, max_tokens, _no_duckdb_fallback=True,
+            )
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(_call, i, p, c): i
+                for i, (p, c) in enumerate(prompts)
+            }
+            for fut in as_completed(futures):
+                try:
+                    idx, text = fut.result()
+                    results[idx] = text
+                except Exception:
+                    logger.warning(
+                        "Batch HTTP completion failed for index %d",
+                        futures[fut], exc_info=True,
+                    )
+
+        return results
+
+    # ------------------------------------------------------------------
+    # Junk atom filter — rejects LLM meta-commentary before admission
+    # ------------------------------------------------------------------
+
+    _JUNK_PATTERNS: list[re.Pattern[str]] = [
+        re.compile(r"(?i)^here\s+are\s+the\s+(atomic\s+)?facts?"),
+        re.compile(r"(?i)should\s+be\s+prioriti[sz]ed\s+in\s+round"),
+        re.compile(r"(?i)^(based\s+on|according\s+to)\s+the\s+(text|passage|content|above|information)\s*(above|below|provided)?"),
+        re.compile(r"(?i)^(note|disclaimer|caveat|warning)\s*:"),
+        re.compile(r"(?i)^the\s+following\s+(are|is|lists?|contains?)"),
+        re.compile(r"(?i)^(in\s+summary|to\s+summar|overall)\s*[,:]"),
+        re.compile(r"(?i)^I\s+(have\s+)?(identified|extracted|found|listed)"),
+        re.compile(r"(?i)^(here\s+is|below\s+is|the\s+above)"),
+        re.compile(r"(?i)^(sure|certainly|of\s+course)[,!.]"),
+        re.compile(r"(?i)^(let\s+me|I'll|I\s+will)\s+(extract|identify|list|break)"),
+    ]
+
+    @staticmethod
+    def _is_junk_atom(line: str) -> bool:
+        """Return True if *line* looks like LLM meta-commentary."""
+        for pat in CorpusStore._JUNK_PATTERNS:
+            if pat.search(line):
+                return True
+        return False
+
     def score_new_conditions(self, user_query: str = "") -> int:
         """Score all unscored conditions using Flock. Returns count."""
         unscored = self.conn.execute(
@@ -435,73 +589,89 @@ class CorpusStore:
     def _score_single(
         self, cid: int, fact: str, source_url: str, user_query: str,
     ) -> None:
-        """Score a single condition across all gradient dimensions."""
+        """Score a single condition across all gradient dimensions.
+
+        All 6-7 scoring prompts are batched into a single parallel call
+        via ``_http_complete_batch()`` so they execute concurrently
+        instead of sequentially (6-7x speedup per condition).
+        """
         url_text = source_url if source_url else "(no URL)"
 
-        confidence = self._parse_float(self._flock_complete(
-            "Rate the confidence of this research finding on a scale "
-            "from 0.0 to 1.0. Consider: Is it specific? Does it cite "
-            "sources? Is the language hedged or definitive? Return "
-            "ONLY a decimal number, nothing else. "
-            "Finding: " + fact,
-            caller="score_confidence",
-        ), 0.5)
+        # Build all scoring prompts up front
+        prompts: list[tuple[str, str]] = [
+            (
+                "Rate the confidence of this research finding on a scale "
+                "from 0.0 to 1.0. Consider: Is it specific? Does it cite "
+                "sources? Is the language hedged or definitive? Return "
+                "ONLY a decimal number, nothing else. "
+                "Finding: " + fact,
+                "score_confidence",
+            ),
+            (
+                "Rate the trustworthiness of this source URL on a scale "
+                "from 0.0 to 1.0. Academic/government = high, established "
+                "news = medium-high, forums/social = medium, unknown/no "
+                "URL = low. Return ONLY a decimal number. "
+                "URL: " + url_text,
+                "score_trust",
+            ),
+            (
+                "Rate how specific and concrete this finding is on 0.0 to "
+                "1.0. 1.0 = contains exact names, numbers, dates, URLs. "
+                "0.0 = vague generality with no concrete data. Return "
+                "ONLY a decimal number. "
+                "Finding: " + fact,
+                "score_specificity",
+            ),
+            (
+                "Rate the risk that this finding is "
+                "fabricated/hallucinated on 0.0 to 1.0. "
+                "0.0 = clearly grounded in real sources. "
+                "1.0 = likely made up, no verifiable details. Consider: "
+                "Does it cite a real URL? Are the claims verifiable? "
+                "Return ONLY a decimal number. "
+                "Finding: " + fact + " Source: " + url_text,
+                "score_fabrication",
+            ),
+            (
+                "Rate how novel this finding is on 0.0 to 1.0. "
+                "1.0 = completely new information not commonly known. "
+                "0.0 = widely known, obvious, or trivial. "
+                "Return ONLY a decimal number. "
+                "Finding: " + fact,
+                "score_novelty",
+            ),
+            (
+                "Rate how actionable this finding is on 0.0 to 1.0. "
+                "1.0 = directly usable, contains specific steps or data. "
+                "0.0 = purely informational with no actionable content. "
+                "Return ONLY a decimal number. "
+                "Finding: " + fact,
+                "score_actionability",
+            ),
+        ]
 
-        trust = self._parse_float(self._flock_complete(
-            "Rate the trustworthiness of this source URL on a scale "
-            "from 0.0 to 1.0. Academic/government = high, established "
-            "news = medium-high, forums/social = medium, unknown/no "
-            "URL = low. Return ONLY a decimal number. "
-            "URL: " + url_text,
-            caller="score_trust",
-        ), 0.5)
-
-        specificity = self._parse_float(self._flock_complete(
-            "Rate how specific and concrete this finding is on 0.0 to "
-            "1.0. 1.0 = contains exact names, numbers, dates, URLs. "
-            "0.0 = vague generality with no concrete data. Return "
-            "ONLY a decimal number. "
-            "Finding: " + fact,
-            caller="score_specificity",
-        ), 0.5)
-
-        fabrication = self._parse_float(self._flock_complete(
-            "Rate the risk that this finding is "
-            "fabricated/hallucinated on 0.0 to 1.0. "
-            "0.0 = clearly grounded in real sources. "
-            "1.0 = likely made up, no verifiable details. Consider: "
-            "Does it cite a real URL? Are the claims verifiable? "
-            "Return ONLY a decimal number. "
-            "Finding: " + fact + " Source: " + url_text,
-            caller="score_fabrication",
-        ), 0.0)
-
-        relevance = 0.5
-        if user_query:
-            relevance = self._parse_float(self._flock_complete(
+        # Conditionally add relevance scoring if we have a user query
+        has_relevance = bool(user_query)
+        if has_relevance:
+            prompts.append((
                 "Rate how relevant this finding is to the user query "
                 "on 0.0 to 1.0. Return ONLY a decimal number. "
                 "Query: " + user_query + " Finding: " + fact,
-                caller="score_relevance",
-            ), 0.5)
+                "score_relevance",
+            ))
 
-        novelty = self._parse_float(self._flock_complete(
-            "Rate how novel this finding is on 0.0 to 1.0. "
-            "1.0 = completely new information not commonly known. "
-            "0.0 = widely known, obvious, or trivial. "
-            "Return ONLY a decimal number. "
-            "Finding: " + fact,
-            caller="score_novelty",
-        ), 0.5)
+        # Fire all prompts in parallel
+        responses = self._http_complete_batch(prompts, max_tokens=32)
 
-        actionability = self._parse_float(self._flock_complete(
-            "Rate how actionable this finding is on 0.0 to 1.0. "
-            "1.0 = directly usable, contains specific steps or data. "
-            "0.0 = purely informational with no actionable content. "
-            "Return ONLY a decimal number. "
-            "Finding: " + fact,
-            caller="score_actionability",
-        ), 0.5)
+        # Parse results in the same order as prompts
+        confidence = self._parse_float(responses[0], 0.5)
+        trust = self._parse_float(responses[1], 0.5)
+        specificity = self._parse_float(responses[2], 0.5)
+        fabrication = self._parse_float(responses[3], 0.0)
+        novelty = self._parse_float(responses[4], 0.5)
+        actionability = self._parse_float(responses[5], 0.5)
+        relevance = self._parse_float(responses[6], 0.5) if has_relevance else 0.5
 
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
@@ -537,6 +707,10 @@ class CorpusStore:
 
         Updates duplication_score on each row and populates
         similarity_flags. Returns count of pairs evaluated.
+
+        Uses a keyword-overlap pre-filter to skip obviously unrelated
+        pairs, then batches the remaining LLM comparisons in parallel
+        via ``_http_complete_batch()``.
         """
         new_ids = self.conn.execute(
             "SELECT id FROM conditions "
@@ -557,19 +731,58 @@ class CorpusStore:
                 [new_id, new_id],
             ).fetchall()
 
-            max_sim = 0.0
+            # Pre-filter: skip pairs with <15% keyword overlap
+            new_words = set(new_fact.lower().split())
+            candidates: list[tuple[int, str]] = []
             for other_id, other_fact in others:
-                try:
-                    sim = self._compare_pair(
-                        new_id, new_fact, other_id, other_fact,
+                other_words = set(other_fact.lower().split())
+                union_size = len(new_words | other_words)
+                if union_size > 0:
+                    overlap = len(new_words & other_words) / union_size
+                    if overlap >= 0.15:
+                        candidates.append((other_id, other_fact))
+
+            if not candidates:
+                self.conn.execute(
+                    "UPDATE conditions SET duplication_score = 0.0 "
+                    "WHERE id = ?", [new_id],
+                )
+                continue
+
+            # Build batch of compare prompts
+            prompts: list[tuple[str, str]] = []
+            for other_id, other_fact in candidates:
+                prompts.append((
+                    "Are these two statements saying essentially the "
+                    "same thing? Return a similarity score: 0.0 "
+                    "(completely different) to 1.0 (identical meaning). "
+                    "Return ONLY a decimal number. "
+                    "A: " + new_fact + " B: " + other_fact,
+                    "compare_pair",
+                ))
+
+            # Fire all comparisons in parallel
+            responses = self._http_complete_batch(prompts, max_tokens=32)
+
+            max_sim = 0.0
+            for i, (other_id, other_fact) in enumerate(candidates):
+                sim = self._parse_float(responses[i], 0.0)
+                sim = min(max(sim, 0.0), 1.0)
+                max_sim = max(max_sim, sim)
+                pair_count += 1
+
+                if sim > 0.3:
+                    rel = (
+                        "duplicate" if sim > 0.85
+                        else "confirms" if sim > 0.5
+                        else "related"
                     )
-                    max_sim = max(max_sim, sim)
-                    pair_count += 1
-                except Exception:
-                    logger.warning(
-                        "Flock dedup failed for pair (%d, %d)",
-                        new_id, other_id,
-                        exc_info=True,
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO similarity_flags "
+                        "(condition_a, condition_b, "
+                        "similarity_score, relationship) "
+                        "VALUES (?, ?, ?, ?)",
+                        [new_id, other_id, sim, rel],
                     )
 
             self.conn.execute(
@@ -579,36 +792,6 @@ class CorpusStore:
             )
 
         return pair_count
-
-    def _compare_pair(
-        self, id_a: int, fact_a: str, id_b: int, fact_b: str,
-    ) -> float:
-        """Compare two facts for semantic similarity via Flock."""
-        sim_raw = self._flock_complete(
-            "Are these two statements saying essentially the "
-            "same thing? Return a similarity score: 0.0 "
-            "(completely different) to 1.0 (identical meaning). "
-            "Return ONLY a decimal number. "
-            "A: " + fact_a + " B: " + fact_b,
-            caller="compare_pair",
-        )
-        sim = self._parse_float(sim_raw, 0.0)
-        sim = min(max(sim, 0.0), 1.0)
-
-        if sim > 0.3:
-            rel = (
-                "duplicate" if sim > 0.85
-                else "confirms" if sim > 0.5
-                else "related"
-            )
-            self.conn.execute(
-                "INSERT OR REPLACE INTO similarity_flags "
-                "(condition_a, condition_b, "
-                "similarity_score, relationship) "
-                "VALUES (?, ?, ?, ?)",
-                [id_a, id_b, sim, rel],
-            )
-        return sim
 
     # ------------------------------------------------------------------
     # Algorithm battery — each is a small, composable processing step
@@ -861,6 +1044,9 @@ class CorpusStore:
         similarity_flags (sim > 0.3) — these are the most likely
         candidates for contradiction.
 
+        Batches all contradiction checks in parallel via
+        ``_http_complete_batch()``.
+
         Returns number of contradiction pairs found.
         """
         candidates = self.conn.execute(
@@ -878,46 +1064,46 @@ class CorpusStore:
         if not candidates:
             return 0
 
+        # Build batch of contradiction prompts
+        prompts: list[tuple[str, str]] = [
+            (
+                "Do these two statements contradict each other? "
+                "Return a contradiction score: 0.0 (no "
+                "contradiction) to 1.0 (direct contradiction). "
+                "Return ONLY a decimal number. "
+                "A: " + fact_a + " B: " + fact_b,
+                "detect_contradictions",
+            )
+            for _, fact_a, _, fact_b in candidates
+        ]
+        responses = self._http_complete_batch(prompts, max_tokens=32)
+
         contradiction_count = 0
-        for id_a, fact_a, id_b, fact_b in candidates:
-            try:
-                result = self._flock_complete(
-                    "Do these two statements contradict each other? "
-                    "Return a contradiction score: 0.0 (no "
-                    "contradiction) to 1.0 (direct contradiction). "
-                    "Return ONLY a decimal number. "
-                    "A: " + fact_a + " B: " + fact_b,
-                    caller="detect_contradictions",
+        for i, (id_a, fact_a, id_b, fact_b) in enumerate(candidates):
+            score = self._parse_float(responses[i], 0.0)
+            if score > 0.6:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO contradiction_pairs "
+                    "(condition_a, condition_b, "
+                    "contradiction_score, description) "
+                    "VALUES (?, ?, ?, 'auto-detected')",
+                    [id_a, id_b, score],
                 )
-                score = self._parse_float(result, 0.0)
-                if score > 0.6:
-                    self.conn.execute(
-                        "INSERT OR REPLACE INTO contradiction_pairs "
-                        "(condition_a, condition_b, "
-                        "contradiction_score, description) "
-                        "VALUES (?, ?, ?, 'auto-detected')",
-                        [id_a, id_b, score],
-                    )
-                    self.conn.execute(
-                        "UPDATE conditions "
-                        "SET contradiction_flag = TRUE, "
-                        "    contradiction_partner = ? "
-                        "WHERE id = ?",
-                        [id_b, id_a],
-                    )
-                    self.conn.execute(
-                        "UPDATE conditions "
-                        "SET contradiction_flag = TRUE, "
-                        "    contradiction_partner = ? "
-                        "WHERE id = ?",
-                        [id_a, id_b],
-                    )
-                    contradiction_count += 1
-            except Exception:
-                logger.warning(
-                    "Contradiction check failed for (%d, %d)",
-                    id_a, id_b, exc_info=True,
+                self.conn.execute(
+                    "UPDATE conditions "
+                    "SET contradiction_flag = TRUE, "
+                    "    contradiction_partner = ? "
+                    "WHERE id = ?",
+                    [id_b, id_a],
                 )
+                self.conn.execute(
+                    "UPDATE conditions "
+                    "SET contradiction_flag = TRUE, "
+                    "    contradiction_partner = ? "
+                    "WHERE id = ?",
+                    [id_a, id_b],
+                )
+                contradiction_count += 1
 
         if contradiction_count:
             logger.info(
@@ -932,6 +1118,9 @@ class CorpusStore:
         High-density conditions pack many facts/data points per
         character.  Low-density conditions are verbose or repetitive.
 
+        Batches all density prompts in parallel via
+        ``_http_complete_batch()``.
+
         Returns number of conditions scored.
         """
         unscored = self.conn.execute(
@@ -941,28 +1130,27 @@ class CorpusStore:
         if not unscored:
             return 0
 
-        for cid, fact in unscored:
-            try:
-                result = self._flock_complete(
-                    "Rate the information density of this text on "
-                    "0.0 to 1.0. High density = many concrete facts, "
-                    "numbers, names, URLs per sentence. Low density "
-                    "= verbose, repetitive, or filler text. Return "
-                    "ONLY a decimal number. "
-                    "Text: " + fact,
-                    caller="info_density",
-                )
-                density = self._parse_float(result, 0.5)
-                self.conn.execute(
-                    "UPDATE conditions "
-                    "SET information_density = ? WHERE id = ?",
-                    [density, cid],
-                )
-            except Exception:
-                logger.warning(
-                    "Info density scoring failed for #%d", cid,
-                    exc_info=True,
-                )
+        prompts: list[tuple[str, str]] = [
+            (
+                "Rate the information density of this text on "
+                "0.0 to 1.0. High density = many concrete facts, "
+                "numbers, names, URLs per sentence. Low density "
+                "= verbose, repetitive, or filler text. Return "
+                "ONLY a decimal number. "
+                "Text: " + fact,
+                "info_density",
+            )
+            for _, fact in unscored
+        ]
+        responses = self._http_complete_batch(prompts, max_tokens=32)
+
+        for i, (cid, _) in enumerate(unscored):
+            density = self._parse_float(responses[i], 0.5)
+            self.conn.execute(
+                "UPDATE conditions "
+                "SET information_density = ? WHERE id = ?",
+                [density, cid],
+            )
 
         logger.info(
             "Information density: scored %d conditions",
@@ -1096,7 +1284,7 @@ class CorpusStore:
         merge_count = 0
         for id_a, fact_a, url_a, q_a, id_b, fact_b, url_b, q_b in dupes:
             try:
-                merged_fact = self._flock_complete(
+                merged_fact = self._http_complete(
                     "Merge these two near-duplicate findings into "
                     "one stronger, more complete statement. Keep "
                     "ALL specific data from both. If one has a URL "
@@ -1708,7 +1896,7 @@ class CorpusStore:
         )
 
         try:
-            atomised = self._flock_complete(
+            atomised = self._http_complete(
                 "You are a research finding decomposer. Extract every "
                 "atomic fact from the text below. An atomic fact is a "
                 "single, self-contained claim that can be verified "
@@ -1748,6 +1936,11 @@ class CorpusStore:
             line = re.sub(r'^\s*(?:\d+[.)\]]\s*|[-*\u2022]\s+)', '', line.strip())
             line = line.strip()
             if not line:
+                continue
+
+            # P0-2: reject junk atoms (LLM meta-commentary)
+            if self._is_junk_atom(line):
+                logger.debug("Rejected junk atom: %.80s", line)
                 continue
 
             url_match = self._URL_RE.search(line)
@@ -1837,7 +2030,7 @@ class CorpusStore:
             )
             for c in conditions
         )
-        return self._flock_complete(
+        return self._http_complete(
             "You are a research synthesiser. Read ALL findings "
             "below and produce a comprehensive, well-structured "
             "report. "
@@ -1884,7 +2077,7 @@ class CorpusStore:
                 )
                 for c in conds
             )
-            summary = self._flock_complete(
+            summary = self._http_complete(
                 "You are a synthesis worker in a peer-to-peer "
                 "research swarm. Synthesise these findings into "
                 "a focused section report. Include ALL facts, "
@@ -1913,7 +2106,7 @@ class CorpusStore:
                 for a, s in phase1_summaries.items()
                 if a != angle
             )
-            refined = self._flock_complete(
+            refined = self._http_complete(
                 "You produced a section summary. Now you see "
                 "summaries from peer workers who processed "
                 "other research angles. Cross-reference your "
@@ -1940,7 +2133,7 @@ class CorpusStore:
                 angle_summaries.items()
             )
         )
-        final = self._flock_complete(
+        final = self._http_complete(
             "You are the queen synthesiser. Merge these section "
             "reports from specialist workers into a single "
             "comprehensive research report. "
