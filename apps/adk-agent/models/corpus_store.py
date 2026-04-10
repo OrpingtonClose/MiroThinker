@@ -219,9 +219,19 @@ class CorpusStore:
                 source_type TEXT DEFAULT '',
                 source_ref TEXT DEFAULT '',
 
-                -- Core metadata (set at admission)
-                angle TEXT DEFAULT '',
+                -- Row type: 'finding' | 'similarity' | 'contradiction' | 'raw' | 'synthesis'
+                row_type TEXT DEFAULT 'finding',
+
+                -- Hierarchical relationships (parent-child in the SAME table)
                 parent_id INTEGER,
+                related_id INTEGER,
+
+                -- THE universal exclusion flag
+                consider_for_use BOOLEAN DEFAULT TRUE,
+                obsolete_reason TEXT DEFAULT '',
+
+                -- Core metadata
+                angle TEXT DEFAULT '',
                 strategy TEXT DEFAULT '',
                 expansion_depth INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT '',
@@ -244,56 +254,218 @@ class CorpusStore:
                 scored_at TEXT DEFAULT '',
                 score_version INTEGER DEFAULT 0,
 
-                -- Composite & derived scores (computed by algorithms)
+                -- Composite & derived scores
                 composite_quality FLOAT DEFAULT -1.0,
                 information_density FLOAT DEFAULT -1.0,
                 cross_ref_boost FLOAT DEFAULT 0.0,
 
-                -- Enum-style processing columns
+                -- Processing state (FSM state column)
                 processing_status TEXT DEFAULT 'raw',
-                    -- raw → scored → analysed → clustered → ready
-                expansion_strategy TEXT DEFAULT 'none',
-                    -- none | exa_search | brave_deep | kagi_enrich
+
+                -- Expansion system (MUST be closed-loop)
+                expansion_tool TEXT DEFAULT 'none',
                 expansion_hint TEXT DEFAULT '',
+                expansion_fulfilled BOOLEAN DEFAULT FALSE,
+
+                -- Clustering
                 cluster_id INTEGER DEFAULT -1,
                 cluster_rank INTEGER DEFAULT 0,
+
+                -- Contradiction
                 contradiction_flag BOOLEAN DEFAULT FALSE,
                 contradiction_partner INTEGER DEFAULT -1,
-                staleness_penalty FLOAT DEFAULT 0.0
+
+                -- Staleness
+                staleness_penalty FLOAT DEFAULT 0.0,
+
+                -- For relationship rows: the score
+                relationship_score FLOAT DEFAULT 0.0
             )
         """)
 
-        # -- Contradiction pairs table --
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS contradiction_pairs (
-                condition_a INTEGER,
-                condition_b INTEGER,
-                contradiction_score FLOAT DEFAULT 0.0,
-                description TEXT DEFAULT '',
-                PRIMARY KEY (condition_a, condition_b)
-            )
-        """)
+        # Migrate from v1 schema (satellite tables → single table)
+        self._migrate_from_v1()
 
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS raw_ingestion (
-                id INTEGER PRIMARY KEY,
-                raw_text TEXT NOT NULL,
-                source_type TEXT DEFAULT '',
-                source_ref TEXT DEFAULT '',
-                ingested_at TEXT DEFAULT '',
-                atomised BOOLEAN DEFAULT FALSE
-            )
-        """)
+    def _migrate_from_v1(self) -> None:
+        """Migrate from v1 schema (satellite tables) to single-table architecture.
 
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS similarity_flags (
-                condition_a INTEGER,
-                condition_b INTEGER,
-                similarity_score FLOAT DEFAULT 0.0,
-                relationship TEXT DEFAULT '',
-                PRIMARY KEY (condition_a, condition_b)
+        Checks if old satellite tables exist and migrates their data into
+        the unified conditions table as relationship/raw rows, then drops
+        the old tables.  Also converts expansion_strategy → expansion_tool.
+        Safe to call repeatedly (idempotent).
+        """
+        # Check if any old tables exist
+        old_tables = self.conn.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_name IN ('similarity_flags', 'contradiction_pairs', 'raw_ingestion')"
+        ).fetchall()
+        old_table_names = {r[0] for r in old_tables}
+
+        if not old_table_names:
+            # Also handle the expansion_strategy → expansion_tool rename
+            # for databases that were created with v2 schema but still
+            # have expansion_strategy column
+            try:
+                cols = self.conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'conditions'"
+                ).fetchall()
+                col_names = {r[0] for r in cols}
+                if "expansion_strategy" in col_names and "expansion_tool" not in col_names:
+                    self.conn.execute(
+                        "ALTER TABLE conditions RENAME COLUMN expansion_strategy TO expansion_tool"
+                    )
+                    logger.info("Renamed expansion_strategy → expansion_tool")
+            except Exception:
+                pass
+            return
+
+        logger.info(
+            "v1 migration: found old tables %s — migrating to single-table",
+            old_table_names,
+        )
+
+        # Ensure new columns exist (ALTER TABLE ADD IF NOT EXISTS)
+        _new_cols = {
+            "row_type": "TEXT DEFAULT 'finding'",
+            "related_id": "INTEGER",
+            "consider_for_use": "BOOLEAN DEFAULT TRUE",
+            "obsolete_reason": "TEXT DEFAULT ''",
+            "expansion_tool": "TEXT DEFAULT 'none'",
+            "expansion_fulfilled": "BOOLEAN DEFAULT FALSE",
+            "relationship_score": "FLOAT DEFAULT 0.0",
+        }
+        existing_cols = {
+            r[0] for r in self.conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'conditions'"
+            ).fetchall()
+        }
+        for col, typedef in _new_cols.items():
+            if col not in existing_cols:
+                try:
+                    self.conn.execute(
+                        f"ALTER TABLE conditions ADD COLUMN {col} {typedef}"
+                    )
+                except Exception:
+                    pass  # column may already exist
+
+        # 1. Migrate similarity_flags → relationship rows
+        if "similarity_flags" in old_table_names:
+            try:
+                sim_rows = self.conn.execute(
+                    "SELECT condition_a, condition_b, similarity_score, relationship "
+                    "FROM similarity_flags"
+                ).fetchall()
+                for cond_a, cond_b, sim_score, rel_text in sim_rows:
+                    cid = self.conn.execute(
+                        "SELECT COALESCE(MAX(id), 0) + 1 FROM conditions"
+                    ).fetchone()[0]
+                    self.conn.execute(
+                        "INSERT INTO conditions "
+                        "(id, fact, row_type, parent_id, related_id, "
+                        "relationship_score, consider_for_use) "
+                        "VALUES (?, ?, 'similarity', ?, ?, ?, FALSE)",
+                        [cid, rel_text or "similarity", cond_a, cond_b, sim_score],
+                    )
+                logger.info("Migrated %d similarity_flags rows", len(sim_rows))
+            except Exception:
+                logger.warning("Failed to migrate similarity_flags", exc_info=True)
+
+        # 2. Migrate contradiction_pairs → relationship rows
+        if "contradiction_pairs" in old_table_names:
+            try:
+                contra_rows = self.conn.execute(
+                    "SELECT condition_a, condition_b, contradiction_score, description "
+                    "FROM contradiction_pairs"
+                ).fetchall()
+                for cond_a, cond_b, contra_score, desc in contra_rows:
+                    cid = self.conn.execute(
+                        "SELECT COALESCE(MAX(id), 0) + 1 FROM conditions"
+                    ).fetchone()[0]
+                    self.conn.execute(
+                        "INSERT INTO conditions "
+                        "(id, fact, row_type, parent_id, related_id, "
+                        "relationship_score, consider_for_use) "
+                        "VALUES (?, ?, 'contradiction', ?, ?, ?, FALSE)",
+                        [cid, desc or "contradiction", cond_a, cond_b, contra_score],
+                    )
+                logger.info("Migrated %d contradiction_pairs rows", len(contra_rows))
+            except Exception:
+                logger.warning("Failed to migrate contradiction_pairs", exc_info=True)
+
+        # 3. Migrate raw_ingestion → raw rows
+        if "raw_ingestion" in old_table_names:
+            try:
+                raw_rows = self.conn.execute(
+                    "SELECT id, raw_text, source_type, source_ref, ingested_at, atomised "
+                    "FROM raw_ingestion"
+                ).fetchall()
+                for raw_id, raw_text, src_type, src_ref, ingested_at, atomised in raw_rows:
+                    cid = self.conn.execute(
+                        "SELECT COALESCE(MAX(id), 0) + 1 FROM conditions"
+                    ).fetchone()[0]
+                    self.conn.execute(
+                        "INSERT INTO conditions "
+                        "(id, fact, source_type, source_ref, row_type, "
+                        "consider_for_use, created_at) "
+                        "VALUES (?, ?, ?, ?, 'raw', ?, ?)",
+                        [cid, raw_text[:2000], src_type, src_ref,
+                         bool(atomised), ingested_at or ""],
+                    )
+                logger.info("Migrated %d raw_ingestion rows", len(raw_rows))
+            except Exception:
+                logger.warning("Failed to migrate raw_ingestion", exc_info=True)
+
+        # 4. Convert expansion_strategy → expansion_tool on existing conditions
+        if "expansion_strategy" in existing_cols:
+            try:
+                if "expansion_tool" not in existing_cols:
+                    self.conn.execute(
+                        "ALTER TABLE conditions ADD COLUMN expansion_tool TEXT DEFAULT 'none'"
+                    )
+                self.conn.execute(
+                    "UPDATE conditions SET expansion_tool = expansion_strategy "
+                    "WHERE expansion_strategy IS NOT NULL AND expansion_strategy != ''"
+                )
+                logger.info("Converted expansion_strategy → expansion_tool")
+            except Exception:
+                logger.warning("Failed to convert expansion_strategy", exc_info=True)
+
+        # 5. Set consider_for_use=FALSE on merged conditions
+        try:
+            self.conn.execute(
+                "UPDATE conditions SET consider_for_use = FALSE, "
+                "obsolete_reason = 'merged (v1 migration)' "
+                "WHERE processing_status = 'merged'"
             )
-        """)
+        except Exception:
+            pass
+
+        # 6. DROP old tables
+        for tbl in ("similarity_flags", "contradiction_pairs", "raw_ingestion"):
+            if tbl in old_table_names:
+                try:
+                    self.conn.execute(f"DROP TABLE IF EXISTS {tbl}")
+                    logger.info("Dropped old table: %s", tbl)
+                except Exception:
+                    logger.warning("Failed to drop %s", tbl, exc_info=True)
+
+        logger.info("v1 migration complete")
+
+    # ------------------------------------------------------------------
+    # Expansion fulfillment
+    # ------------------------------------------------------------------
+
+    def _check_expansion_fulfillment(self, parent_id: int | None) -> None:
+        """Mark a parent condition's expansion as fulfilled when a child arrives."""
+        if parent_id is None:
+            return
+        self.conn.execute(
+            "UPDATE conditions SET expansion_fulfilled = TRUE "
+            "WHERE id = ? AND expansion_tool != 'none' AND expansion_fulfilled = FALSE",
+            [parent_id],
+        )
 
     def _compute_next_id(self) -> int:
         row = self.conn.execute(
@@ -317,16 +489,20 @@ class CorpusStore:
         self.conn.execute(
             """INSERT INTO conditions
                (id, fact, source_url, source_type, source_ref,
+                row_type, related_id, consider_for_use,
                 confidence, verification_status, angle,
                 parent_id, strategy,
                 expansion_depth, created_at, iteration)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 cid,
                 fact,
                 condition.source_url,
                 getattr(condition, "source_type", "researcher"),
                 getattr(condition, "source_ref", ""),
+                getattr(condition, "row_type", "finding"),
+                getattr(condition, "related_id", None),
+                getattr(condition, "consider_for_use", True),
                 condition.confidence,
                 getattr(condition, "verification_status", ""),
                 condition.angle,
@@ -337,6 +513,8 @@ class CorpusStore:
                 getattr(condition, "iteration", 0),
             ],
         )
+        # Close the expansion loop: mark parent as fulfilled
+        self._check_expansion_fulfillment(condition.parent_id)
         logger.debug("Admitted condition #%d: %.80s", cid, fact)
         return cid
 
@@ -705,8 +883,9 @@ class CorpusStore:
     def compute_duplications(self) -> int:
         """Compute pairwise duplication scores for new conditions.
 
-        Updates duplication_score on each row and populates
-        similarity_flags. Returns count of pairs evaluated.
+        Updates duplication_score on each row and stores similarity
+        results as relationship rows (row_type='similarity') in
+        the conditions table.  Returns count of pairs evaluated.
 
         Uses a keyword-overlap pre-filter to skip obviously unrelated
         pairs, then batches the remaining LLM comparisons in parallel
@@ -714,7 +893,8 @@ class CorpusStore:
         """
         new_ids = self.conn.execute(
             "SELECT id FROM conditions "
-            "WHERE duplication_score < 0.0 AND scored_at != ''"
+            "WHERE duplication_score < 0.0 AND scored_at != '' "
+            "AND consider_for_use = TRUE AND row_type = 'finding'"
         ).fetchall()
         if not new_ids:
             return 0
@@ -727,7 +907,8 @@ class CorpusStore:
 
             others = self.conn.execute(
                 "SELECT id, fact FROM conditions "
-                "WHERE id != ? AND id < ?",
+                "WHERE id != ? AND id < ? "
+                "AND consider_for_use = TRUE AND row_type = 'finding'",
                 [new_id, new_id],
             ).fetchall()
 
@@ -777,12 +958,15 @@ class CorpusStore:
                         else "confirms" if sim > 0.5
                         else "related"
                     )
+                    # Store as a relationship row in conditions table
+                    rel_id = self._next_id
+                    self._next_id += 1
                     self.conn.execute(
-                        "INSERT OR REPLACE INTO similarity_flags "
-                        "(condition_a, condition_b, "
-                        "similarity_score, relationship) "
-                        "VALUES (?, ?, ?, ?)",
-                        [new_id, other_id, sim, rel],
+                        "INSERT INTO conditions "
+                        "(id, fact, row_type, parent_id, related_id, "
+                        "relationship_score, consider_for_use) "
+                        "VALUES (?, ?, 'similarity', ?, ?, ?, FALSE)",
+                        [rel_id, rel, new_id, other_id, sim],
                     )
 
             self.conn.execute(
@@ -813,7 +997,8 @@ class CorpusStore:
         """
         # Count how many will be updated before running
         count = self.conn.execute(
-            "SELECT COUNT(*) FROM conditions WHERE scored_at != ''"
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE scored_at != '' AND consider_for_use = TRUE"
         ).fetchone()[0]
         if count == 0:
             return 0
@@ -835,6 +1020,7 @@ class CorpusStore:
                    ELSE processing_status
                END
                WHERE scored_at != ''
+                 AND consider_for_use = TRUE
             """
         )
         logger.info("Composite quality: updated %d conditions", count)
@@ -844,7 +1030,7 @@ class CorpusStore:
         """Mark low-quality conditions for expansion instead of
         passing them to the swarm.  Pure SQL.
 
-        Conditions below *threshold* get expansion_strategy set to
+        Conditions below *threshold* get expansion_tool set to
         'exa_search' so the researcher's next iteration can enrich
         them rather than starting from scratch.
 
@@ -853,21 +1039,22 @@ class CorpusStore:
         count = self.conn.execute(
             "SELECT COUNT(*) FROM conditions "
             "WHERE composite_quality >= 0.0 AND composite_quality < ? "
-            "AND expansion_strategy = 'none'",
+            "AND expansion_tool = 'none' AND consider_for_use = TRUE",
             [threshold],
         ).fetchone()[0]
         if count == 0:
             return 0
         self.conn.execute(
             """UPDATE conditions
-               SET expansion_strategy = 'exa_search',
+               SET expansion_tool = 'exa_search',
                    expansion_hint = 'Low composite quality ('
                        || ROUND(composite_quality, 2) || ') — '
                        || 'search for more specific data on: '
                        || SUBSTR(fact, 1, 120)
                WHERE composite_quality >= 0.0
                  AND composite_quality < ?
-                 AND expansion_strategy = 'none'
+                 AND expansion_tool = 'none'
+                 AND consider_for_use = TRUE
             """,
             [threshold],
         )
@@ -882,7 +1069,7 @@ class CorpusStore:
         """Flag vague/generic conditions for enrichment via search.
 
         A condition is vague if specificity_score < 0.3 AND it has no
-        source URL.  These get expansion_strategy = 'brave_deep' to
+        source URL.  These get expansion_tool = 'brave_deep' to
         trigger a deep search for concrete data.  Pure SQL.
 
         Returns number flagged.
@@ -891,20 +1078,22 @@ class CorpusStore:
             "SELECT COUNT(*) FROM conditions "
             "WHERE specificity_score < 0.3 "
             "AND (source_url = '' OR source_url IS NULL) "
-            "AND expansion_strategy = 'none' AND scored_at != ''"
+            "AND expansion_tool = 'none' AND scored_at != '' "
+            "AND consider_for_use = TRUE"
         ).fetchone()[0]
         if count == 0:
             return 0
         self.conn.execute(
             """UPDATE conditions
-               SET expansion_strategy = 'brave_deep',
+               SET expansion_tool = 'brave_deep',
                    expansion_hint = 'Vague finding — search for '
                        || 'specific names/numbers/dates: '
                        || SUBSTR(fact, 1, 120)
                WHERE specificity_score < 0.3
                  AND (source_url = '' OR source_url IS NULL)
-                 AND expansion_strategy = 'none'
+                 AND expansion_tool = 'none'
                  AND scored_at != ''
+                 AND consider_for_use = TRUE
             """
         )
         if count:
@@ -917,24 +1106,17 @@ class CorpusStore:
     def compute_cross_ref_boost(self) -> int:
         """Boost conditions that are confirmed by multiple angles.
 
-        If a condition has similarity_flags entries with relationship
-        = 'confirms' from different angles, its cross_ref_boost
-        increases.
+        Queries relationship rows (row_type='similarity') with
+        relationship = 'confirms' from different angles to compute
+        cross-reference boosts.
 
         Returns number of conditions boosted.
         """
-        # DuckDB does not allow aggregate functions inside correlated
-        # subqueries in UPDATE statements.  Compute boost values in a
-        # CTE first, then join-update.
-        #
-        # Reset first: the old correlated subquery wrote 0.0 for
-        # conditions without cross-references.  The JOIN-UPDATE below
-        # only touches matched rows, so unmatched conditions must be
-        # explicitly zeroed to prevent accumulation from
+        # Reset first to prevent accumulation from
         # compute_source_diversity (which adds to cross_ref_boost).
         self.conn.execute(
             "UPDATE conditions SET cross_ref_boost = 0.0 "
-            "WHERE scored_at != ''"
+            "WHERE scored_at != '' AND consider_for_use = TRUE"
         )
         self.conn.execute(
             """UPDATE conditions
@@ -943,16 +1125,16 @@ class CorpusStore:
                    SELECT c.id,
                           COALESCE(LEAST(0.2, COUNT(*) * 0.05), 0.0) AS val
                    FROM conditions c
-                   JOIN similarity_flags sf
-                       ON sf.condition_a = c.id
-                       OR sf.condition_b = c.id
+                   JOIN conditions sf
+                       ON sf.row_type = 'similarity'
+                      AND (sf.parent_id = c.id OR sf.related_id = c.id)
                    JOIN conditions c2
-                       ON (sf.condition_b = c2.id
-                           OR sf.condition_a = c2.id)
+                       ON (sf.related_id = c2.id OR sf.parent_id = c2.id)
                       AND c2.id != c.id
                       AND c2.angle != c.angle
-                   WHERE sf.relationship IN ('confirms', 'related')
+                   WHERE sf.fact IN ('confirms', 'related')
                      AND c.scored_at != ''
+                     AND c.consider_for_use = TRUE
                    GROUP BY c.id
                ) AS boost
                WHERE conditions.id = boost.id
@@ -960,7 +1142,7 @@ class CorpusStore:
         )
         count = self.conn.execute(
             "SELECT COUNT(*) FROM conditions "
-            "WHERE cross_ref_boost > 0.0"
+            "WHERE cross_ref_boost > 0.0 AND consider_for_use = TRUE"
         ).fetchone()[0]
         if count:
             logger.info(
@@ -989,12 +1171,13 @@ class CorpusStore:
                )
                WHERE iteration < ?
                  AND scored_at != ''
+                 AND consider_for_use = TRUE
             """,
             [current_iteration, current_iteration],
         )
         count = self.conn.execute(
             "SELECT COUNT(*) FROM conditions "
-            "WHERE staleness_penalty > 0.0"
+            "WHERE staleness_penalty > 0.0 AND consider_for_use = TRUE"
         ).fetchone()[0]
         if count:
             logger.info(
@@ -1032,6 +1215,7 @@ class CorpusStore:
                    WHERE c.scored_at != ''
                      AND c.source_url != ''
                      AND c.source_url IS NOT NULL
+                     AND c.consider_for_use = TRUE
                ) AS div
                WHERE conditions.id = div.id
             """
@@ -1039,7 +1223,7 @@ class CorpusStore:
         count = self.conn.execute(
             "SELECT COUNT(*) FROM conditions "
             "WHERE scored_at != '' AND source_url != '' "
-            "AND source_url IS NOT NULL"
+            "AND source_url IS NOT NULL AND consider_for_use = TRUE"
         ).fetchone()[0]
         if count:
             logger.info(
@@ -1050,9 +1234,10 @@ class CorpusStore:
     def detect_contradictions(self) -> int:
         """Detect contradicting condition pairs via Flock LLM.
 
-        Only checks pairs that are already flagged as 'related' in
-        similarity_flags (sim > 0.3) — these are the most likely
-        candidates for contradiction.
+        Queries relationship rows (row_type='similarity') with
+        similarity score between 0.3 and 0.7 as candidates for
+        contradiction.  Results are stored as new relationship rows
+        (row_type='contradiction').
 
         Batches all contradiction checks in parallel via
         ``_http_complete_batch()``.
@@ -1060,15 +1245,18 @@ class CorpusStore:
         Returns number of contradiction pairs found.
         """
         candidates = self.conn.execute(
-            """SELECT sf.condition_a, c1.fact,
-                      sf.condition_b, c2.fact
-               FROM similarity_flags sf
-               JOIN conditions c1 ON sf.condition_a = c1.id
-               JOIN conditions c2 ON sf.condition_b = c2.id
-               WHERE sf.relationship = 'related'
-                 AND sf.similarity_score BETWEEN 0.3 AND 0.7
+            """SELECT sf.parent_id, c1.fact,
+                      sf.related_id, c2.fact
+               FROM conditions sf
+               JOIN conditions c1 ON sf.parent_id = c1.id
+               JOIN conditions c2 ON sf.related_id = c2.id
+               WHERE sf.row_type = 'similarity'
+                 AND sf.fact = 'related'
+                 AND sf.relationship_score BETWEEN 0.3 AND 0.7
                  AND c1.contradiction_flag = FALSE
                  AND c2.contradiction_flag = FALSE
+                 AND c1.consider_for_use = TRUE
+                 AND c2.consider_for_use = TRUE
             """
         ).fetchall()
         if not candidates:
@@ -1092,12 +1280,15 @@ class CorpusStore:
         for i, (id_a, fact_a, id_b, fact_b) in enumerate(candidates):
             score = self._parse_float(responses[i], 0.0)
             if score > 0.6:
+                # Store as a contradiction relationship row
+                rel_id = self._next_id
+                self._next_id += 1
                 self.conn.execute(
-                    "INSERT OR REPLACE INTO contradiction_pairs "
-                    "(condition_a, condition_b, "
-                    "contradiction_score, description) "
-                    "VALUES (?, ?, ?, 'auto-detected')",
-                    [id_a, id_b, score],
+                    "INSERT INTO conditions "
+                    "(id, fact, row_type, parent_id, related_id, "
+                    "relationship_score, consider_for_use) "
+                    "VALUES (?, 'auto-detected', 'contradiction', ?, ?, ?, FALSE)",
+                    [rel_id, id_a, id_b, score],
                 )
                 self.conn.execute(
                     "UPDATE conditions "
@@ -1135,7 +1326,8 @@ class CorpusStore:
         """
         unscored = self.conn.execute(
             "SELECT id, fact FROM conditions "
-            "WHERE information_density < 0.0 AND scored_at != ''"
+            "WHERE information_density < 0.0 AND scored_at != '' "
+            "AND consider_for_use = TRUE"
         ).fetchall()
         if not unscored:
             return 0
@@ -1171,20 +1363,19 @@ class CorpusStore:
     def cluster_conditions(self) -> int:
         """Cluster similar conditions and rank within each cluster.
 
-        Uses the existing similarity_flags to build clusters via a
-        simple union-find approach.  Within each cluster, the
-        condition with the highest composite_quality becomes rank 0
-        (representative).  Others get rank 1+ (supplementary).
-
-        The swarm can then process only cluster representatives
-        (rank 0) and fold in supplementary context, dramatically
-        reducing LLM calls.
+        Queries relationship rows (row_type='similarity') to build
+        clusters via a simple union-find approach.  Within each
+        cluster, the condition with the highest composite_quality
+        becomes rank 0 (representative).  Others get rank 1+
+        (supplementary).
 
         Returns number of clusters formed.
         """
         # Get all conditions and their similarity edges
         conditions = self.conn.execute(
-            "SELECT id FROM conditions WHERE scored_at != ''"
+            "SELECT id FROM conditions "
+            "WHERE scored_at != '' AND consider_for_use = TRUE "
+            "AND row_type = 'finding'"
         ).fetchall()
         if not conditions:
             return 0
@@ -1203,11 +1394,12 @@ class CorpusStore:
             if ra != rb:
                 parent[ra] = rb
 
-        # Build clusters from high-similarity pairs
+        # Build clusters from high-similarity relationship rows
         edges = self.conn.execute(
-            "SELECT condition_a, condition_b "
-            "FROM similarity_flags "
-            "WHERE similarity_score > 0.5"
+            "SELECT parent_id, related_id "
+            "FROM conditions "
+            "WHERE row_type = 'similarity' "
+            "AND relationship_score > 0.5"
         ).fetchall()
         for a, b in edges:
             if a in parent and b in parent:
@@ -1268,24 +1460,26 @@ class CorpusStore:
     def compress_redundant(self) -> int:
         """Merge near-duplicate conditions via Flock LLM.
 
-        For pairs with duplication_score > 0.85, asks Flock to merge
-        them into a single stronger condition.  The merged condition
-        inherits the best scores from both parents.
+        Queries relationship rows (row_type='similarity') for
+        duplicate pairs (score > 0.85).  When merging, sets
+        consider_for_use=FALSE on the loser instead of
+        processing_status='merged'.
 
         Returns number of merges performed.
         """
         dupes = self.conn.execute(
-            """SELECT sf.condition_a, c1.fact, c1.source_url,
+            """SELECT sf.parent_id, c1.fact, c1.source_url,
                       c1.composite_quality AS quality_a,
-                      sf.condition_b, c2.fact, c2.source_url,
+                      sf.related_id, c2.fact, c2.source_url,
                       c2.composite_quality AS quality_b
-               FROM similarity_flags sf
-               JOIN conditions c1 ON sf.condition_a = c1.id
-               JOIN conditions c2 ON sf.condition_b = c2.id
-               WHERE sf.relationship = 'duplicate'
-                 AND sf.similarity_score > 0.85
-                 AND c1.processing_status != 'merged'
-                 AND c2.processing_status != 'merged'
+               FROM conditions sf
+               JOIN conditions c1 ON sf.parent_id = c1.id
+               JOIN conditions c2 ON sf.related_id = c2.id
+               WHERE sf.row_type = 'similarity'
+                 AND sf.fact = 'duplicate'
+                 AND sf.relationship_score > 0.85
+                 AND c1.consider_for_use = TRUE
+                 AND c2.consider_for_use = TRUE
             """
         ).fetchall()
         if not dupes:
@@ -1324,10 +1518,11 @@ class CorpusStore:
                 )
                 self.conn.execute(
                     "UPDATE conditions "
-                    "SET processing_status = 'merged', "
+                    "SET consider_for_use = FALSE, "
+                    "    obsolete_reason = 'merged into ' || ?, "
                     "    duplication_score = 1.0 "
                     "WHERE id = ?",
-                    [merged_id],
+                    [str(survivor_id), merged_id],
                 )
                 merge_count += 1
             except Exception:
@@ -1349,23 +1544,25 @@ class CorpusStore:
 
         A condition is ready if:
         - It's been scored (scored_at != '')
-        - It hasn't been merged away (processing_status != 'merged')
-        - It's not flagged for expansion (expansion_strategy = 'none')
+        - consider_for_use = TRUE
+        - It's not flagged for expansion, or expansion is fulfilled
 
         Returns number marked ready.
         """
         count = self.conn.execute(
             "SELECT COUNT(*) FROM conditions "
             "WHERE scored_at != '' "
+            "AND consider_for_use = TRUE "
             "AND processing_status NOT IN ('merged', 'ready') "
-            "AND expansion_strategy = 'none'"
+            "AND (expansion_tool = 'none' OR expansion_fulfilled = TRUE)"
         ).fetchone()[0]
         self.conn.execute(
             """UPDATE conditions
                SET processing_status = 'ready'
                WHERE scored_at != ''
+                 AND consider_for_use = TRUE
                  AND processing_status NOT IN ('merged', 'ready')
-                 AND expansion_strategy = 'none'
+                 AND (expansion_tool = 'none' OR expansion_fulfilled = TRUE)
             """
         )
         logger.info("Marked %d conditions as ready for swarm", count)
@@ -1378,10 +1575,12 @@ class CorpusStore:
         search strategy instead of starting from scratch.
         """
         rows = self.conn.execute(
-            """SELECT id, fact, expansion_strategy, expansion_hint,
+            """SELECT id, fact, expansion_tool, expansion_hint,
                       specificity_score, composite_quality
                FROM conditions
-               WHERE expansion_strategy != 'none'
+               WHERE expansion_tool != 'none'
+                 AND expansion_fulfilled = FALSE
+                 AND consider_for_use = TRUE
                ORDER BY composite_quality ASC
             """
         ).fetchall()
@@ -1405,11 +1604,12 @@ class CorpusStore:
                       novelty_score, specificity_score,
                       composite_quality, cluster_id,
                       (SELECT COUNT(*) FROM conditions c2
-                       WHERE c2.cluster_id = conditions.cluster_id)
+                       WHERE c2.cluster_id = conditions.cluster_id
+                         AND c2.consider_for_use = TRUE)
                        AS cluster_size
                FROM conditions
                WHERE cluster_rank = 0
-                 AND processing_status NOT IN ('merged')
+                 AND consider_for_use = TRUE
                  AND scored_at != ''
                ORDER BY composite_quality DESC
             """
@@ -1636,6 +1836,24 @@ class CorpusStore:
         results["specificity_gate"] = self._trace_algorithm(
             "specificity_gate", self.apply_specificity_gate,
         )
+
+        # Clear stale expansion flags — prevent permanent limbo
+        if iteration >= 2:
+            stale = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions "
+                "WHERE expansion_tool != 'none' AND expansion_fulfilled = FALSE "
+                "AND consider_for_use = TRUE AND iteration <= ?",
+                [iteration - 2],
+            ).fetchone()[0]
+            if stale:
+                self.conn.execute(
+                    "UPDATE conditions SET expansion_tool = 'none', expansion_hint = '' "
+                    "WHERE expansion_tool != 'none' AND expansion_fulfilled = FALSE "
+                    "AND consider_for_use = TRUE AND iteration <= ?",
+                    [iteration - 2],
+                )
+            results["stale_expansions_cleared"] = stale
+
         results["info_density"] = self._trace_algorithm(
             "info_density", self.compute_information_density,
         )
@@ -1665,27 +1883,28 @@ class CorpusStore:
         ).fetchone()[0]
         expansion = self.conn.execute(
             "SELECT COUNT(*) FROM conditions "
-            "WHERE expansion_strategy != 'none'"
+            "WHERE expansion_tool != 'none' AND expansion_fulfilled = FALSE "
+            "AND consider_for_use = TRUE"
         ).fetchone()[0]
-        merged = self.conn.execute(
+        excluded = self.conn.execute(
             "SELECT COUNT(*) FROM conditions "
-            "WHERE processing_status = 'merged'"
+            "WHERE consider_for_use = FALSE"
         ).fetchone()[0]
         cluster_reps = len(self.get_cluster_representatives())
 
         logger.info(
             "Algorithm battery complete in %.0fms: %d total, %d ready, "
-            "%d for expansion, %d merged, %d cluster reps "
+            "%d for expansion, %d excluded, %d cluster reps "
             "(swarm will process %d instead of %d)",
             battery_duration_ms,
-            total, ready, expansion, merged, cluster_reps,
+            total, ready, expansion, excluded, cluster_reps,
             cluster_reps, total,
         )
 
         results["total"] = total
         results["ready"] = ready
         results["expansion_targets"] = expansion
-        results["merged"] = merged
+        results["excluded"] = excluded
         results["cluster_reps"] = cluster_reps
         results["battery_duration_ms"] = int(battery_duration_ms)
 
@@ -1717,41 +1936,78 @@ class CorpusStore:
         return [dict(zip(cols, row)) for row in rows]
 
     def get_for_thinker(self) -> list[dict]:
-        """Thinker sees almost everything -- only excludes near-exact
-        duplicates so it can reason about gaps."""
+        """Return findings for the thinker with all computed columns.
+
+        Filters: consider_for_use=TRUE, row_type='finding'.
+        Ordered by composite quality, then novelty.
+        """
         rows = self.conn.execute(
             """SELECT id, fact, source_url, confidence, trust_score,
                       novelty_score, specificity_score, duplication_score,
                       fabrication_risk, verification_status, angle,
-                      parent_id, expansion_depth, iteration
+                      parent_id, related_id, expansion_depth, iteration,
+                      row_type, consider_for_use,
+                      composite_quality, information_density, cross_ref_boost,
+                      relevance_score, actionability_score,
+                      cluster_id, cluster_rank,
+                      expansion_tool, expansion_hint, expansion_fulfilled,
+                      contradiction_flag, contradiction_partner,
+                      staleness_penalty, processing_status
                FROM conditions
-               WHERE duplication_score < 0.85
-               ORDER BY novelty_score DESC, confidence DESC, id ASC"""
+               WHERE consider_for_use = TRUE
+                 AND row_type = 'finding'
+               ORDER BY composite_quality DESC, novelty_score DESC, id ASC"""
         ).fetchall()
         cols = [
             "id", "fact", "source_url", "confidence", "trust_score",
             "novelty_score", "specificity_score", "duplication_score",
             "fabrication_risk", "verification_status", "angle",
-            "parent_id", "expansion_depth", "iteration",
+            "parent_id", "related_id", "expansion_depth", "iteration",
+            "row_type", "consider_for_use",
+            "composite_quality", "information_density", "cross_ref_boost",
+            "relevance_score", "actionability_score",
+            "cluster_id", "cluster_rank",
+            "expansion_tool", "expansion_hint", "expansion_fulfilled",
+            "contradiction_flag", "contradiction_partner",
+            "staleness_penalty", "processing_status",
         ]
         return [dict(zip(cols, row)) for row in rows]
 
     def get_for_synthesiser(self) -> list[dict]:
-        """Synthesiser is stricter but still sees low-confidence with
-        hedging. Excludes near-duplicates and high fabrication risk."""
+        """Return findings for the synthesiser.
+
+        Stricter than thinker: also excludes high fabrication risk.
+        """
         rows = self.conn.execute(
             """SELECT id, fact, source_url, confidence, trust_score,
-                      specificity_score, duplication_score, fabrication_risk,
-                      verification_status, angle, iteration
+                      novelty_score, specificity_score, duplication_score,
+                      fabrication_risk, verification_status, angle,
+                      parent_id, related_id, expansion_depth, iteration,
+                      row_type, consider_for_use,
+                      composite_quality, information_density, cross_ref_boost,
+                      relevance_score, actionability_score,
+                      cluster_id, cluster_rank,
+                      expansion_tool, expansion_hint, expansion_fulfilled,
+                      contradiction_flag, contradiction_partner,
+                      staleness_penalty, processing_status
                FROM conditions
-               WHERE duplication_score < 0.80
+               WHERE consider_for_use = TRUE
+                 AND row_type = 'finding'
                  AND fabrication_risk < 0.80
-               ORDER BY confidence DESC, trust_score DESC, id ASC"""
+               ORDER BY composite_quality DESC, confidence DESC, id ASC"""
         ).fetchall()
         cols = [
             "id", "fact", "source_url", "confidence", "trust_score",
-            "specificity_score", "duplication_score", "fabrication_risk",
-            "verification_status", "angle", "iteration",
+            "novelty_score", "specificity_score", "duplication_score",
+            "fabrication_risk", "verification_status", "angle",
+            "parent_id", "related_id", "expansion_depth", "iteration",
+            "row_type", "consider_for_use",
+            "composite_quality", "information_density", "cross_ref_boost",
+            "relevance_score", "actionability_score",
+            "cluster_id", "cluster_rank",
+            "expansion_tool", "expansion_hint", "expansion_fulfilled",
+            "contradiction_flag", "contradiction_partner",
+            "staleness_penalty", "processing_status",
         ]
         return [dict(zip(cols, row)) for row in rows]
 
@@ -1759,114 +2015,252 @@ class CorpusStore:
     # Formatting
     # ------------------------------------------------------------------
 
-    def format_for_thinker(self) -> str:
-        """Format the corpus as structured text for the thinker.
+    def _describe_finding(self, c: dict) -> str:
+        """Convert a condition's algorithm scores into verbal prose."""
+        parts = [f"[{c['id']}] {c['fact']}"]
 
-        Groups conditions by angle and includes gradient flags so the
-        thinker can reason about quality, gaps, and contradictions.
+        # Source attribution
+        if c.get("source_url"):
+            parts.append(f"  Source: {c['source_url']}")
+
+        # Verbal quality assessment
+        cq = c.get("composite_quality", -1)
+        if cq >= 0.7:
+            parts.append(
+                "  This finding is well-established and strongly supported."
+            )
+        elif cq >= 0.4:
+            parts.append(
+                "  This finding has moderate support but could benefit "
+                "from additional verification."
+            )
+        elif cq >= 0:
+            parts.append(
+                "  This finding is weakly supported and needs more "
+                "evidence."
+            )
+
+        # Verbal specificity
+        spec = c.get("specificity_score", 0.5)
+        if spec < 0.3:
+            parts.append(
+                "  Note: This is vague — it lacks specific names, "
+                "numbers, or dates."
+            )
+
+        # Fabrication risk
+        fab = c.get("fabrication_risk", 0)
+        if fab > 0.5:
+            parts.append(
+                "  Warning: This finding has elevated fabrication risk "
+                "and should be independently verified."
+            )
+        elif fab > 0.3:
+            parts.append(
+                "  Note: Some fabrication risk detected — cross-check "
+                "recommended."
+            )
+
+        # Contradiction
+        if c.get("contradiction_flag"):
+            partner = c.get("contradiction_partner", -1)
+            if partner > 0:
+                parts.append(
+                    f"  Contradicts finding [{partner}] — both sides "
+                    "need examination."
+                )
+
+        # Cross-reference boost
+        xref = c.get("cross_ref_boost", 0)
+        if xref > 0.1:
+            parts.append(
+                "  Corroborated by independent sources from "
+                "different angles."
+            )
+
+        # Expansion status
+        tool = c.get("expansion_tool", "none")
+        if tool != "none" and not c.get("expansion_fulfilled"):
+            parts.append(
+                f"  Needs enrichment: "
+                f"{c.get('expansion_hint', 'search for more specific data')}"
+            )
+
+        return "\n".join(parts)
+
+    def format_for_thinker(self) -> str:
+        """Format the corpus as verbal prose for the thinker.
+
+        Organises findings into tiered sections by quality.
+        No raw score numbers — pure verbal prose that an LLM can
+        reason about naturally.
         """
         conditions = self.get_for_thinker()
         if not conditions:
             return "(no findings yet)"
 
+        # Tier findings by composite quality
+        strong = [c for c in conditions
+                  if (c.get("composite_quality") or 0) >= 0.6]
+        moderate = [c for c in conditions
+                    if 0.3 <= (c.get("composite_quality") or 0) < 0.6]
+        weak = [c for c in conditions
+                if (c.get("composite_quality") or 0) < 0.3]
+
         lines: list[str] = [
-            f"CORPUS: {len(conditions)} conditions "
-            f"(total stored: {self.count()})\n"
+            f"RESEARCH BRIEFING: {len(conditions)} findings gathered "
+            "so far\n",
         ]
 
-        by_angle: dict[str, list[dict]] = {}
-        for c in conditions:
-            angle = c["angle"] or "general"
-            by_angle.setdefault(angle, []).append(c)
-
-        for angle, conds in sorted(by_angle.items()):
+        # Strong findings
+        if strong:
             lines.append(
-                f"## Angle: {angle} ({len(conds)} findings)"
+                "STRONG FINDINGS (well-sourced, high confidence):"
             )
-            for c in conds:
-                status = c["verification_status"] or "unverified"
-                flags = (
-                    f"conf={c['confidence']:.1f}, "
-                    f"trust={c['trust_score']:.1f}, "
-                    f"novel={c['novelty_score']:.1f}, "
-                    f"spec={c['specificity_score']:.1f}"
+            for c in strong:
+                lines.append(self._describe_finding(c))
+                lines.append("")
+
+        # Moderate findings
+        if moderate:
+            lines.append(
+                "MODERATE FINDINGS (partial evidence, worth "
+                "building on):"
+            )
+            for c in moderate:
+                lines.append(self._describe_finding(c))
+                lines.append("")
+
+        # Weak findings
+        if weak:
+            lines.append(
+                "WEAK FINDINGS (need more evidence or enrichment):"
+            )
+            for c in weak:
+                lines.append(self._describe_finding(c))
+                lines.append("")
+
+        # Contradictions section
+        contradictions = [
+            c for c in conditions if c.get("contradiction_flag")
+        ]
+        if contradictions:
+            lines.append("CONTRADICTIONS DETECTED:")
+            seen: set[tuple[int, int]] = set()
+            for c in contradictions:
+                partner = c.get("contradiction_partner", -1)
+                pair = (min(c["id"], partner), max(c["id"], partner))
+                if pair in seen or partner < 0:
+                    continue
+                seen.add(pair)
+                partner_c = next(
+                    (x for x in conditions if x["id"] == partner),
+                    None,
                 )
-                if c["fabrication_risk"] > 0.3:
-                    flags += (
-                        f", fab_risk={c['fabrication_risk']:.1f}"
+                if partner_c:
+                    lines.append(
+                        f"Findings [{c['id']}] and [{partner}] "
+                        f"disagree. [{c['id']}] claims: "
+                        f"{c['fact'][:200]}. "
+                        f"[{partner}] claims: "
+                        f"{partner_c['fact'][:200]}. "
+                        "This needs resolution."
                     )
-                if c["duplication_score"] > 0.3:
-                    flags += f", dup={c['duplication_score']:.1f}"
-                src = (
-                    f" [{c['source_url']}]"
-                    if c["source_url"] else ""
-                )
-                depth = (
-                    f" (depth={c['expansion_depth']})"
-                    if c.get("expansion_depth", 0) > 0
-                    else ""
+            lines.append("")
+
+        # Under-explored areas
+        cluster_data: dict[int, list[dict]] = {}
+        for c in conditions:
+            cid = c.get("cluster_id", -1)
+            if cid >= 0:
+                cluster_data.setdefault(cid, []).append(c)
+        under_explored = [
+            (cid, members)
+            for cid, members in cluster_data.items()
+            if len(members) <= 2
+            or sum(
+                (m.get("composite_quality") or 0)
+                for m in members
+            ) / len(members) < 0.4
+        ]
+        if under_explored:
+            lines.append("UNDER-EXPLORED AREAS:")
+            for _, members in under_explored[:5]:
+                angle = members[0].get("angle", "unknown")
+                mean_q = sum(
+                    (m.get("composite_quality") or 0)
+                    for m in members
+                ) / len(members)
+                qual = (
+                    "moderate" if mean_q >= 0.3
+                    else "low"
                 )
                 lines.append(
-                    f"  [{c['id']}] ({flags}, {status}{depth}) "
-                    f"{c['fact']}{src}"
+                    f"The topic of {angle} has only "
+                    f"{len(members)} findings, all with {qual} "
+                    "confidence. More research needed here."
                 )
             lines.append("")
 
-        status_counts = Counter(
-            c["verification_status"] or "(unset)"
-            for c in conditions
+        # Corpus health summary
+        awaiting = sum(
+            1 for c in conditions
+            if c.get("expansion_tool", "none") != "none"
+            and not c.get("expansion_fulfilled")
         )
         lines.append(
-            "STATUS SUMMARY: "
-            + ", ".join(
-                f"{k}={v}"
-                for k, v in sorted(status_counts.items())
-            )
+            f"CORPUS HEALTH: {len(conditions)} findings total. "
+            f"{len(strong)} strong, {len(moderate)} moderate, "
+            f"{len(weak)} weak. {len(contradictions)} contradictions "
+            f"detected. {awaiting} findings awaiting enrichment."
         )
 
         return "\n".join(lines)
 
     def format_for_synthesiser(self) -> str:
-        """Format the corpus for the synthesiser -- includes angle and
-        gradient flags so it can weight claims appropriately."""
+        """Format the corpus as verbal prose for the synthesiser.
+
+        Same verbal approach as thinker, but with synthesis-oriented
+        framing and source URLs prominently displayed.
+        """
         conditions = self.get_for_synthesiser()
         if not conditions:
             return "(no findings)"
 
+        # Group by angle for synthesis
         by_angle: dict[str, list[dict]] = {}
         for c in conditions:
             angle = c["angle"] or "general"
             by_angle.setdefault(angle, []).append(c)
 
         lines: list[str] = [
-            f"CORPUS: {len(conditions)} findings\n"
+            f"SYNTHESIS BRIEFING: {len(conditions)} findings "
+            f"across {len(by_angle)} research angles\n",
         ]
+
         for angle, conds in sorted(by_angle.items()):
             lines.append(
-                f"## {angle} ({len(conds)} findings)"
+                f"## {angle.upper()} ({len(conds)} findings)"
             )
             for c in conds:
-                src = (
-                    f"\n   Source: {c['source_url']}"
-                    if c["source_url"]
-                    else ""
-                )
-                status = (
-                    c["verification_status"] or "unverified"
-                )
-                fab = (
-                    f", fabrication_risk="
-                    f"{c['fabrication_risk']:.1f}"
-                    if c["fabrication_risk"] > 0.2
-                    else ""
-                )
-                lines.append(
-                    f"- [#{c['id']}, {status}, "
-                    f"confidence={c['confidence']:.2f}, "
-                    f"trust={c['trust_score']:.2f}{fab}] "
-                    f"{c['fact']}{src}"
-                )
-            lines.append("")
+                lines.append(self._describe_finding(c))
+                lines.append("")
+
+        # Corpus health for synthesis context
+        strong = sum(
+            1 for c in conditions
+            if (c.get("composite_quality") or 0) >= 0.6
+        )
+        contradictions = sum(
+            1 for c in conditions
+            if c.get("contradiction_flag")
+        )
+        lines.append(
+            f"SYNTHESIS NOTES: {len(conditions)} findings total. "
+            f"{strong} strongly supported. "
+            f"{contradictions} contradictions to resolve."
+        )
+
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -1894,15 +2288,16 @@ class CorpusStore:
         if not raw_text or not raw_text.strip():
             return []
 
-        raw_id = self.conn.execute(
-            "SELECT COALESCE(MAX(id), 0) + 1 FROM raw_ingestion"
-        ).fetchone()[0]
+        # Store raw text as a 'raw' row in the unified conditions table
+        raw_id = self._next_id
+        self._next_id += 1
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
-            "INSERT INTO raw_ingestion "
-            "(id, raw_text, source_type, source_ref, ingested_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            [raw_id, raw_text, source_type, source_ref, now],
+            "INSERT INTO conditions "
+            "(id, fact, source_type, source_ref, row_type, "
+            "consider_for_use, created_at) "
+            "VALUES (?, ?, ?, ?, 'raw', FALSE, ?)",
+            [raw_id, raw_text[:2000], source_type, source_ref, now],
         )
 
         try:
@@ -1996,9 +2391,11 @@ class CorpusStore:
             )
             ids.append(cid)
 
+        # Mark the raw row as atomised
         self.conn.execute(
-            "UPDATE raw_ingestion SET atomised = TRUE "
-            "WHERE id = ?",
+            "UPDATE conditions SET consider_for_use = FALSE, "
+            "obsolete_reason = 'atomised into findings' "
+            "WHERE id = ? AND row_type = 'raw'",
             [raw_id],
         )
 

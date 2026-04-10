@@ -210,6 +210,25 @@ def researcher_condition_callback(
     # Also store synthesiser-formatted version for the final stage
     state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
 
+    # Inject expansion targets so the researcher acts on them
+    expansion_targets = corpus.get_expansion_targets()
+    if expansion_targets:
+        lines = ["=== ENRICHMENT TASKS (from corpus analysis) ==="]
+        for t in expansion_targets[:10]:
+            lines.append(
+                f"- Finding [{t['id']}] needs enrichment via "
+                f"{t['strategy']}: {t['hint']}"
+            )
+        lines.append("=== END ENRICHMENT TASKS ===")
+        state["_expansion_targets"] = "\n".join(lines)
+    else:
+        state["_expansion_targets"] = ""
+
+    # Advance iteration at the loop boundary — the researcher is now
+    # the last agent in each LoopAgent iteration, so incrementing here
+    # ensures all agents in the same round share the same iteration tag.
+    state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
+
     return None  # preserve original researcher output
 
 
@@ -259,6 +278,7 @@ def build_corpus_state(db_path: str = "") -> dict:
         "_corpus_key": key,
         "_corpus_db_path": db_path,
         "_corpus_iteration": 0,
+        "_expansion_targets": "",
         # Fallbacks so agents never see raw template literals.
         # "(no findings yet)" matches the thinker's first-iteration check.
         "corpus_for_synthesis": "(no findings)",

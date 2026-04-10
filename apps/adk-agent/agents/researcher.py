@@ -51,6 +51,17 @@ a research strategy written by the thinker agent:
 {research_findings}
 === END PREVIOUS FINDINGS ===
 
+=== ENRICHMENT TASKS ===
+{_expansion_targets}
+=== END ENRICHMENT TASKS ===
+
+If enrichment tasks are listed above, they are findings that corpus \
+analysis identified as needing more evidence. Each specifies a tool \
+(exa_search → use Exa, brave_deep → use Brave, kagi_enrich → use Kagi, \
+perplexity_deep → use Perplexity, grok_deep → use Grok, \
+tavily_deep → use Tavily) and what to search for. Interleave these \
+with the thinker's strategy tasks within your search budget.
+
 If the strategy begins with EVIDENCE_SUFFICIENT, output the previous \
 findings UNCHANGED — do not run any more searches.
 
