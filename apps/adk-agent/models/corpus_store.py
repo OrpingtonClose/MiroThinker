@@ -425,15 +425,20 @@ class CorpusStore:
 
     def _http_complete(
         self, prompt: str, caller: str = "", max_tokens: int = 4096,
+        *, _no_duckdb_fallback: bool = False,
     ) -> str:
         """Direct HTTP call to the Flock proxy, bypassing DuckDB's limit.
 
         Used for long-form generation (atomisation, synthesis, merges)
         where output may exceed DuckDB Flock's ~2000-char truncation.
-        Falls back to ``_flock_complete()`` if the proxy URL is unknown.
+        Falls back to ``_flock_complete()`` if the proxy URL is unknown,
+        unless *_no_duckdb_fallback* is True (used by batch callers to
+        avoid concurrent DuckDB access from worker threads).
         """
         proxy_url = get_flock_proxy_url()
         if not proxy_url:
+            if _no_duckdb_fallback:
+                return ""
             return self._flock_complete(prompt, caller)
 
         t0 = time.monotonic()
@@ -464,6 +469,12 @@ class CorpusStore:
             except (_json.JSONDecodeError, TypeError, KeyError):
                 pass
         except Exception:
+            if _no_duckdb_fallback:
+                logger.warning(
+                    "Direct HTTP to proxy failed for %s (batch context, "
+                    "no DuckDB fallback)", caller, exc_info=True,
+                )
+                return ""
             logger.warning(
                 "Direct HTTP to proxy failed for %s — falling back to "
                 "DuckDB llm_complete", caller, exc_info=True,
@@ -507,7 +518,9 @@ class CorpusStore:
         workers = min(_FLOCK_PARALLELISM, len(prompts))
 
         def _call(idx: int, prompt: str, caller: str) -> tuple[int, str]:
-            return idx, self._http_complete(prompt, caller, max_tokens)
+            return idx, self._http_complete(
+                prompt, caller, max_tokens, _no_duckdb_fallback=True,
+            )
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
