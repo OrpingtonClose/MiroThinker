@@ -471,6 +471,13 @@ class PipelineCollector:
                     else 0
                 ),
                 "force_ends": len(self.force_ends),
+                "tool_errors": sum(1 for t in self.tool_calls if t.error),
+                "prompt_tokens_est": sum(
+                    r.prompt_tokens_est for r in self.llm_calls
+                ),
+                "completion_tokens_est": sum(
+                    r.completion_tokens_est for r in self.llm_calls
+                ),
             },
             # Live activity data
             "recent_events": recent_events,
