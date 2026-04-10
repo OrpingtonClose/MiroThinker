@@ -941,7 +941,7 @@ class CorpusStore:
                SET cross_ref_boost = boost.val
                FROM (
                    SELECT c.id,
-                          COALESCE(MIN(0.2, COUNT(*) * 0.05), 0.0) AS val
+                          COALESCE(LEAST(0.2, COUNT(*) * 0.05), 0.0) AS val
                    FROM conditions c
                    JOIN similarity_flags sf
                        ON sf.condition_a = c.id
