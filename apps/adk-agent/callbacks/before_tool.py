@@ -42,6 +42,11 @@ _provider_semaphores: Dict[str, threading.Semaphore] = {
     "exa": threading.Semaphore(_EXA_CONCURRENCY),
     "firecrawl": threading.Semaphore(_FIRECRAWL_CONCURRENCY),
     "kagi": threading.Semaphore(_KAGI_CONCURRENCY),
+    # Deep research tools — low concurrency (1 each) to prevent
+    # parallel expensive calls from blowing through the budget.
+    "perplexity": threading.Semaphore(1),
+    "grok": threading.Semaphore(1),
+    "tavily": threading.Semaphore(1),
 }
 
 # Map tool names to provider keys
@@ -66,6 +71,10 @@ _TOOL_TO_PROVIDER: Dict[str, str] = {
     "kagi_fastgpt": "kagi",
     "kagi_enrich_web": "kagi",
     "kagi_enrich_news": "kagi",
+    # Deep research tools (budget-gated)
+    "perplexity_deep_research": "perplexity",
+    "grok_deep_research": "grok",
+    "tavily_deep_research": "tavily",
 }
 
 
@@ -82,6 +91,40 @@ EXA_CRAWL_TEXT_MAX_CHARS = 15_000  # crawling a specific URL gets more
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
+_DEEP_RESEARCH_TOOLS = frozenset({
+    "perplexity_deep_research",
+    "grok_deep_research",
+    "tavily_deep_research",
+})
+
+
+def _enforce_deep_research_budget(
+    tool_name: str, args: Dict[str, Any], tool_context: ToolContext
+) -> Optional[str]:
+    """Check cost budget before allowing a deep research call.
+
+    Returns None to allow the call, or a string message that ADK will
+    use as the tool result (blocking actual execution).
+    """
+    if tool_name not in _DEEP_RESEARCH_TOOLS:
+        return None
+
+    from tools.cost_tracker import get_cost_tracker
+
+    tracker = get_cost_tracker()
+    provider = _TOOL_TO_PROVIDER.get(tool_name, tool_name)
+    warning = tracker.check_budget(provider)
+    if warning:
+        logger.warning(
+            "Deep research budget exceeded for %s: %s",
+            tool_name, warning,
+        )
+        return (
+            f"[BUDGET EXCEEDED] {warning} "
+            f"Use regular search tools (Brave, Exa, Kagi) instead."
+        )
+    return None
 
 
 def _enforce_exa_budget(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -136,6 +179,11 @@ def before_tool_callback(
     that ADK will use as the tool result (blocking the actual execution).
     """
     tool_name: str = tool.name if hasattr(tool, "name") else str(tool)
+
+    # ── Deep research budget gate (must be first — blocks expensive calls) ──
+    budget_block = _enforce_deep_research_budget(tool_name, args, tool_context)
+    if budget_block is not None:
+        return {"result": budget_block}
 
     # ── Source-level context budget for Exa ───────────────────────────
     _enforce_exa_budget(tool_name, args)

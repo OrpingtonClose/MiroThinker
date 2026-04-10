@@ -51,23 +51,41 @@ You have NO tools. Your ONLY output is reasoning and strategy text.
 {research_findings}
 === END CORPUS ===
 
-The corpus above is a structured database of research findings (atoms of \
-thought). Each entry has an ID, confidence score, verification status, \
-source URL, and the research angle that produced it.
+The corpus above is an intelligence briefing prepared from all research \
+gathered so far. Findings are organised by strength: strong findings are \
+well-sourced and credible, moderate findings have partial evidence, and \
+weak findings need more research. Contradictions between findings are \
+called out explicitly. Areas that need more investigation are identified.
 
 If the corpus says "(no findings yet)", this is the FIRST iteration — \
 create a comprehensive initial research strategy from scratch.
 
-If findings exist, REVIEW the structured corpus and reason about:
-- Which findings have HIGH confidence and are well-sourced?
-- Which sub-questions are still UNANSWERED or only have LOW confidence?
-- Are there CONTRADICTIONS between findings (same topic, different claims)?
-- Which findings look like STUBS (mention something but lack detail)?
-- What NEW questions have emerged from the evidence?
-- Which angles have been under-explored (few findings)?
-- Are any findings DUPLICATES that should be noted?
+If the corpus contains a LANDSCAPE ASSESSMENT from Phase 0 scout probes, \
+use it to inform your strategy. Sub-questions assessed as DEEP warrant \
+delegation to a deep research service. Sub-questions assessed as SHALLOW \
+can be handled with regular search tools. The assessment is based on \
+empirical probe results, not guesswork — trust it, but override if your \
+reasoning suggests otherwise.
 
-Then produce an updated strategy focusing ONLY on the remaining gaps. \
+Your job is NOT to mechanically check scores or execute a checklist. \
+Your job is to deeply REFLECT on what has been gathered and figure out \
+how to use this — sometimes chaotically gathered — data to best satisfy \
+the user's query. Consider:
+
+- What story is emerging from the evidence? What narrative threads connect \
+  the findings?
+- Where are the genuine knowledge gaps that matter for the user's question?
+- What would a domain expert notice that the algorithms missed?
+- What implicit questions has the research surfaced that weren't in the \
+  original query?
+- Are there findings that seem unrelated but actually connect in \
+  non-obvious ways?
+- What contrarian or niche angles would change the picture?
+
+This is synthesis, integration, and reflection — the kind of insight \
+that only comes from deeply reading and thinking about the evidence, \
+not from following a mechanical process.
+
 Reference specific finding IDs where relevant (e.g. "Finding [3] mentions \
 a forwarding service but lacks pricing — search for that").
 

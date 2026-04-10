@@ -1,72 +1,60 @@
 # Copyright (c) 2025 MiroMind
 # This source code is licensed under the Apache 2.0 License.
 
-"""
-Blackboard research pipeline: LoopAgent(Thinker → Researcher → Ferment) + Synthesiser.
+"""Blackboard research pipeline: LoopAgent(Thinker → Researcher) + Synthesiser.
 
-Uses ADK's ``LoopAgent`` to implement an iterative research cycle where
-context grows richer on every iteration, then a ``SequentialAgent`` to
-run the final synthesiser after the loop exits.
+Uses ADK's ``LoopAgent`` to implement an iterative 2-phase research
+cycle where context grows richer on every iteration, then a
+``SequentialAgent`` to run the final synthesiser after the loop exits.
 
 Architecture::
 
     SequentialAgent("mirothinker_pipeline")
     └── LoopAgent("research_loop", max_iterations=3)
     │     ├── Agent("thinker")           # pure reasoning, no tools
-    │     ├── Agent("researcher")        # direct tool access, parallel_tool_calls=True
-    │     │     └── after_agent_callback: researcher_condition_callback
-    │     └── Agent("loop_synthesiser")  # fermentation step
-    │           └── after_agent_callback: synthesis_condition_callback
+    │     └── Agent("researcher")        # direct tool access, parallel_tool_calls=True
+    │           └── after_agent_callback: researcher_condition_callback
     └── Agent("synthesiser")                # final report, uncensored
 
-The loop implements a 3-phase cycle per iteration:
+The loop implements a 2-phase cycle per iteration:
 
-  1. **Expansion** (researcher): brute-force tool execution — algorithmic
-     factory line of enrichment.  Flock atomises, scores, and deduplicates
-     the raw findings.
+  1. **Strategy** (thinker): reads the enriched corpus (verbal prose
+     briefing with tiered findings, contradictions, and under-explored
+     areas), reasons deeply about gaps and emerging narratives, and
+     plans the next expansion round.
 
-  2. **Fermentation** (loop_synthesiser): quasi-human analysis that
-     connects themes, surfaces contradictions, and builds causal chains.
-     Its output is re-ingested into the CorpusStore as just another input
-     — no special status, scored and deduplicated equally with raw findings.
-
-  3. **Strategy** (thinker): reads the enriched corpus (now containing
-     both raw findings AND synthesised insights), reasons about gaps,
-     and plans the next expansion round.
+  2. **Expansion** (researcher): brute-force tool execution — Flock's
+     algorithm battery (scoring, dedup, contradiction detection,
+     clustering, redundancy compression) runs in the after-agent
+     callback, replacing the old loop_synthesiser's responsibilities.
 
 Data flows via session state (blackboard):
 
-  - **Thinker** reads ``{research_findings}`` — a structured corpus of
-    AtomicConditions stored in DuckDB.  Each condition carries confidence,
-    verification_status, source_url, angle, and expansion_depth.
-    The thinker reasons about gaps, duplicates, and contradictions
-    holistically, then outputs strategy to ``state["research_strategy"]``.
+  - **Thinker** reads ``{research_findings}`` — a verbal prose briefing
+    of findings organised by quality tier (strong/moderate/weak),
+    with contradictions, under-explored areas, and corpus health.
+    The thinker outputs strategy to ``state["research_strategy"]``.
     When evidence is sufficient it outputs ``EVIDENCE_SUFFICIENT`` and an
     ``after_agent_callback`` sets ``escalate=True`` to break the loop.
 
-  - **Researcher** reads ``{research_strategy}`` + ``{research_findings}``,
-    executes via the executor ``AgentTool``, then outputs accumulated
-    findings to ``state["research_findings"]``.  Its ``after_agent_callback``
-    (condition_manager) decomposes the free-text output into AtomicConditions,
-    stores them in the DuckDB corpus, and overwrites the state keys with
-    structured formatted text for the thinker and synthesiser.
-
-  - **Loop synthesiser** reads ``{corpus_for_synthesis}`` and produces
-    structured analysis.  Its ``after_agent_callback`` re-ingests the
-    output into the CorpusStore — the synthesis becomes fertiliser for
-    the next expansion round.
+  - **Researcher** reads ``{research_strategy}`` + ``{research_findings}``
+    + ``{_expansion_targets}``, executes searches, then its
+    ``after_agent_callback`` (condition_manager) decomposes the output
+    into AtomicConditions, runs the full algorithm battery, and
+    updates state with verbal prose for the thinker.
 
   - **Final synthesiser** (runs once after the loop) reads
-    ``{corpus_for_synthesis}`` — all conditions formatted with confidence
-    and verification metadata — and writes the polished report.
+    ``{corpus_for_synthesis}`` — the swarm-synthesised report — and
+    writes the polished final report.
 
-The thinker and synthesisers NEVER touch tool format — they are pure
+The thinker and synthesiser NEVER touch tool format — they are pure
 text-in/text-out LLM agents using the uncensored model.  Only the
-researcher and executor need tool-calling capability.
+researcher needs tool-calling capability.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -78,7 +66,6 @@ from google.genai import types as genai_types
 from agents.thinker import thinker_agent
 from agents.researcher import researcher_agent
 from agents.synthesiser import synthesiser_agent
-from agents.loop_synthesiser import loop_synthesiser_agent
 from callbacks.condition_manager import (
     build_corpus_state,
     cleanup_corpus,
@@ -105,6 +92,51 @@ def _init_pipeline_state(
             state[k] = v
         init_corpus(state)
         logger.info("Pipeline state initialised: corpus_key=%s", state["_corpus_key"])
+
+        # Reset per-session cost tracker so each pipeline run starts fresh
+        try:
+            from tools.cost_tracker import reset_session_tracker
+            reset_session_tracker()
+        except Exception:
+            pass
+
+        # Run Phase 0 scout if this is a fresh pipeline
+        query = state.get("user_query", "")
+        if query:
+            from tools.scout import run_scout_phase
+            import threading as _threading
+
+            # Cancel event prevents a timed-out scout from writing to
+            # state after the research loop has started.
+            cancel_event = _threading.Event()
+
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # ADK's event loop is already running — run in a
+                    # separate thread with its own event loop.
+                    # Do NOT use ThreadPoolExecutor as a context manager:
+                    # __exit__ calls shutdown(wait=True), which blocks
+                    # until the task finishes even after timeout.
+                    import concurrent.futures
+                    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                    try:
+                        future = pool.submit(
+                            asyncio.run,
+                            run_scout_phase(query, state, _cancel=cancel_event),
+                        )
+                        future.result(timeout=90)
+                    finally:
+                        cancel_event.set()
+                        pool.shutdown(wait=False, cancel_futures=True)
+                else:
+                    loop.run_until_complete(
+                        run_scout_phase(query, state, _cancel=cancel_event)
+                    )
+            except Exception as exc:
+                cancel_event.set()
+                logger.warning("Phase 0 scout failed (non-fatal): %s", exc)
+
     return None
 
 
@@ -153,17 +185,16 @@ def _cleanup_pipeline_state(
 
 
 # ---------------------------------------------------------------------------
-# Inner loop: thinker → researcher → fermentation → repeat
+# Inner loop: thinker → researcher → repeat
 # The thinker escalates when it judges evidence is sufficient.
-# Each iteration: expansion (researcher) → fermentation (loop_synthesiser)
-# → strategy (thinker).  The loop_synthesiser's output is re-ingested
-# into the corpus so synthesised insights are treated equally to raw
-# findings by Flock's scoring, dedup, and contradiction detection.
+# Each iteration: strategy (thinker) → expansion (researcher).
+# Flock's algorithm battery runs inside researcher_condition_callback,
+# replacing the old loop_synthesiser's responsibilities.
 # ---------------------------------------------------------------------------
 research_loop = LoopAgent(
     name="research_loop",
     max_iterations=3,
-    sub_agents=[thinker_agent, researcher_agent, loop_synthesiser_agent],
+    sub_agents=[thinker_agent, researcher_agent],
 )
 
 # ---------------------------------------------------------------------------
@@ -188,11 +219,11 @@ _synthesiser_with_swarm = SequentialAgent(
 pipeline_agent = SequentialAgent(
     name="mirothinker_pipeline",
     description=(
-        "Blackboard research pipeline: LoopAgent(thinker → researcher → "
-        "loop_synthesiser) runs iteratively with ever-expanding context. "
-        "Each round: brute expansion → intelligent fermentation → strategy. "
-        "Flock gossip swarm synthesises the corpus, then the final "
-        "synthesiser writes the definitive report."
+        "Blackboard research pipeline: LoopAgent(thinker → researcher) "
+        "runs iteratively with ever-expanding context. Each round: "
+        "strategy → expansion (with algorithm battery). Flock gossip "
+        "swarm synthesises the corpus, then the final synthesiser "
+        "writes the definitive report."
     ),
     sub_agents=[research_loop, _synthesiser_with_swarm],
     before_agent_callback=_init_pipeline_state,

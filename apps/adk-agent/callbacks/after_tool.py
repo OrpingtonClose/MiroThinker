@@ -25,7 +25,7 @@ from typing import Any, Dict, Optional
 
 from google.adk.tools import ToolContext
 
-from callbacks.before_tool import _provider_semaphores
+from callbacks.before_tool import _TOOL_TO_PROVIDER, _provider_semaphores
 from dashboard import get_active_collector
 
 logger = logging.getLogger(__name__)
@@ -141,6 +141,34 @@ def after_tool_callback(
             tool_name, agent_name, duration,
             result_chars=len(result_text),
         )
+
+    # ── Record cost for deep research tools ────────────────────────
+    _deep_providers = {"perplexity", "grok", "tavily"}
+    provider_for_cost = _TOOL_TO_PROVIDER.get(tool_name)
+    if provider_for_cost in _deep_providers:
+        # Only record cost if the tool actually made an API call.
+        # Tools return "[TOOL_ERROR] ... unavailable" when the API key
+        # is missing — recording phantom costs would inflate the session
+        # total and block properly-configured providers.
+        _is_no_call_error = (
+            (result_text.startswith("[TOOL_ERROR]") and "unavailable" in result_text)
+            or "BUDGET EXCEEDED" in result_text
+        )
+        if not _is_no_call_error:
+            try:
+                from tools.cost_tracker import ESTIMATED_COSTS, get_cost_tracker
+
+                tracker = get_cost_tracker()
+                estimated = ESTIMATED_COSTS.get(provider_for_cost, 1.0)
+                query_text = args.get("query", "") if isinstance(args, dict) else ""
+                tracker.record_cost(provider_for_cost, estimated, query_text)
+                logger.info(
+                    "Recorded deep research cost: %s $%.2f (session total: $%.2f)",
+                    provider_for_cost, estimated,
+                    tracker.get_session_stats()["session_total_usd"],
+                )
+            except Exception:
+                logger.debug("Cost recording failed for %s", tool_name, exc_info=True)
 
     # ── Queue search results for corpus ingestion ──────────────────
     # Search tool results are queued for later ingestion via the

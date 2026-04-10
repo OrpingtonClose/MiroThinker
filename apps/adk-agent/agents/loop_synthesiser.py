@@ -1,6 +1,12 @@
 # Copyright (c) 2025 MiroMind
 # This source code is licensed under the Apache 2.0 License.
 
+# DEPRECATED: This agent's responsibilities have been split between
+# Flock's algorithm battery (contradiction detection, cross-referencing,
+# clustering, redundancy compression) and the redesigned thinker
+# (reflective synthesis, thematic integration, inferential leaps).
+# Kept for reference only — not wired into the pipeline.
+
 """
 In-loop synthesiser — fermentation step after each expansion round.
 

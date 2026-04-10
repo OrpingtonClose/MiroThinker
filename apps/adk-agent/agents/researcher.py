@@ -37,6 +37,7 @@ from callbacks.before_model import before_model_callback
 from callbacks.before_tool import before_tool_callback
 from callbacks.condition_manager import researcher_condition_callback
 from tools.mcp_tools import get_tools
+from tools.deep_research_tools import DEEP_RESEARCH_TOOLS
 from tools.research_tools import RESEARCH_TOOLS
 
 RESEARCHER_INSTRUCTION = """\
@@ -50,6 +51,17 @@ a research strategy written by the thinker agent:
 === PREVIOUS FINDINGS ===
 {research_findings}
 === END PREVIOUS FINDINGS ===
+
+=== ENRICHMENT TASKS ===
+{_expansion_targets}
+=== END ENRICHMENT TASKS ===
+
+If enrichment tasks are listed above, they are findings that corpus \
+analysis identified as needing more evidence. Each specifies a tool \
+(exa_search → use Exa, brave_deep → use Brave, kagi_enrich → use Kagi, \
+perplexity_deep → use Perplexity, grok_deep → use Grok, \
+tavily_deep → use Tavily) and what to search for. Interleave these \
+with the thinker's strategy tasks within your search budget.
 
 If the strategy begins with EVIDENCE_SUFFICIENT, output the previous \
 findings UNCHANGED — do not run any more searches.
@@ -106,6 +118,14 @@ kagi_enrich_news)
 **tool-python** (E2B sandbox for code execution)
 - Best for: data parsing, calculations, analysis of gathered data
 
+**Deep Research** (perplexity_deep_research, grok_deep_research, tavily_deep_research)
+- ONLY use when the thinker's strategy assigns a sub-question as TIER_DEEP
+- These are expensive ($1-5/call) and long-running (2-10 min)
+- They autonomously search 50+ sources and return comprehensive cited reports
+- Do NOT also run regular searches on the same topic — that is redundant
+- If budget is exceeded, the tool returns a warning — fall back to regular tools
+- Budget-gated: the before_tool_callback blocks calls when session/monthly budget is hit
+
 PARALLEL EXECUTION: When you have multiple independent searches, emit \
 ALL tool calls in a single response. They execute concurrently — this \
 is dramatically faster than calling tools one at a time. Only serialise \
@@ -141,7 +161,7 @@ researcher_agent = Agent(
         "Emits parallel tool calls for concurrent execution."
     ),
     instruction=RESEARCHER_INSTRUCTION,
-    tools=get_tools(["brave-search", "firecrawl", "exa", "kagi", "tool-python"]) + RESEARCH_TOOLS,
+    tools=get_tools(["brave-search", "firecrawl", "exa", "kagi", "tool-python"]) + RESEARCH_TOOLS + DEEP_RESEARCH_TOOLS,
     before_model_callback=before_model_callback,
     after_model_callback=after_model_callback,
     before_tool_callback=before_tool_callback,

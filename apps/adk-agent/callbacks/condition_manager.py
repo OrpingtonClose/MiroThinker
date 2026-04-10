@@ -155,10 +155,10 @@ def _ingest_text_into_corpus(
     )
     logger.info(
         "Algorithm battery: %d ready, %d for expansion, "
-        "%d merged, %d cluster reps (%.0fms)",
+        "%d excluded, %d cluster reps (%.0fms)",
         battery_results.get("ready", 0),
         battery_results.get("expansion_targets", 0),
-        battery_results.get("merged", 0),
+        battery_results.get("excluded", 0),
         battery_results.get("cluster_reps", 0),
         battery_results.get("battery_duration_ms", 0),
     )
@@ -196,6 +196,10 @@ def researcher_condition_callback(
         # doesn't lose context from previous iterations.
         state["research_findings"] = corpus.format_for_thinker()
         state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
+        # Still advance iteration so stale-expansion cleanup and the
+        # thinker see a fresh round number even when the researcher
+        # produced no new findings.
+        state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
         return None
 
     _ingest_text_into_corpus(state, findings_text, "researcher")
@@ -209,6 +213,25 @@ def researcher_condition_callback(
 
     # Also store synthesiser-formatted version for the final stage
     state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
+
+    # Inject expansion targets so the researcher acts on them
+    expansion_targets = corpus.get_expansion_targets()
+    if expansion_targets:
+        lines = ["=== ENRICHMENT TASKS (from corpus analysis) ==="]
+        for t in expansion_targets[:10]:
+            lines.append(
+                f"- Finding [{t['id']}] needs enrichment via "
+                f"{t['strategy']}: {t['hint']}"
+            )
+        lines.append("=== END ENRICHMENT TASKS ===")
+        state["_expansion_targets"] = "\n".join(lines)
+    else:
+        state["_expansion_targets"] = ""
+
+    # Advance iteration at the loop boundary — the researcher is now
+    # the last agent in each LoopAgent iteration, so incrementing here
+    # ensures all agents in the same round share the same iteration tag.
+    state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
 
     return None  # preserve original researcher output
 
@@ -259,6 +282,7 @@ def build_corpus_state(db_path: str = "") -> dict:
         "_corpus_key": key,
         "_corpus_db_path": db_path,
         "_corpus_iteration": 0,
+        "_expansion_targets": "",
         # Fallbacks so agents never see raw template literals.
         # "(no findings yet)" matches the thinker's first-iteration check.
         "corpus_for_synthesis": "(no findings)",
@@ -412,6 +436,7 @@ def cleanup_corpus(state: dict) -> None:
     # re-initialises cleanly on session reuse.
     # ADK State objects don't support .pop(); use del with guard.
     for k in ("_corpus_key", "_corpus_db_path", "_corpus_iteration",
+              "_expansion_targets",
               "research_findings", "corpus_for_synthesis", "loop_synthesis"):
         try:
             del state[k]
