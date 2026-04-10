@@ -69,7 +69,8 @@ _FLOCK_PROVIDER = os.environ.get("FLOCK_PROVIDER", "openai")
 
 # Default corpus storage directory (file-backed for session persistence)
 _CORPUS_DIR = os.path.join(
-    os.environ.get("FINDINGS_DIR", "/tmp/mirothinker"), "corpora"
+    os.environ.get("FINDINGS_DIR", os.path.join(os.path.expanduser("~"), ".mirothinker")),
+    "corpora",
 )
 
 # Explicit override: set CORPUS_DB_PATH to a full file path to use that

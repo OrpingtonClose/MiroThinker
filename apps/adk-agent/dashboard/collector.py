@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 _DASHBOARD_LOGS_DIR = os.environ.get(
     "DASHBOARD_LOGS_DIR",
-    os.path.join(os.path.dirname(os.path.dirname(__file__)), "dashboard_logs"),
+    os.path.join(os.path.expanduser("~"), ".mirothinker", "dashboard_logs"),
 )
 
 
@@ -76,6 +76,7 @@ class PipelineCollector:
         # Snapshot interval tracking
         self._last_snapshot_time: float = 0.0
         self._snapshot_interval: float = 0.5  # write snapshot every 500ms
+        self._last_checkpoint_time: float = 0.0  # incremental JSON checkpoint
 
         # Phase tracking
         self.phases: list[dict[str, Any]] = []
@@ -639,7 +640,7 @@ class PipelineCollector:
         except Exception:
             pass  # SQLite write failed — don't block pipeline
 
-        # Periodically write a snapshot to SQLite
+        # Periodically write a snapshot to SQLite + incremental JSON checkpoint
         if now - self._last_snapshot_time >= self._snapshot_interval:
             self._last_snapshot_time = now
             try:
@@ -648,6 +649,15 @@ class PipelineCollector:
                 event_store.insert_snapshot(self.session_id, snapshot)
             except Exception:
                 pass  # Never block pipeline
+
+            # Write an incremental JSON checkpoint every 30s so partial
+            # results survive a crash even without SQLite recovery.
+            if not self._finalized and now - self._last_checkpoint_time >= 30.0:
+                self._last_checkpoint_time = now
+                try:
+                    self._save_checkpoint()
+                except Exception:
+                    pass  # Never block pipeline
 
     def _build_tool_summary(self) -> dict[str, Any]:
         summary: dict[str, Any] = {}
@@ -667,6 +677,24 @@ class PipelineCollector:
                 s["errors"] += 1
         return summary
 
+    def _save_checkpoint(self) -> None:
+        """Write an incremental JSON checkpoint so partial results survive crashes.
+
+        Overwrites the same file each time (one checkpoint per session).
+        The finalize path writes a separate timestamped file.
+        """
+        os.makedirs(_DASHBOARD_LOGS_DIR, exist_ok=True)
+        filename = f"checkpoint_{self.session_id[:8]}.json"
+        path = os.path.join(_DASHBOARD_LOGS_DIR, filename)
+        try:
+            snapshot = self._snapshot_unlocked()
+            snapshot["_checkpoint"] = True
+            snapshot["_checkpoint_time"] = time.time()
+            with open(path, "w") as f:
+                json.dump(snapshot, f, indent=2, default=str)
+        except Exception:
+            pass  # Never block pipeline
+
     def _save(self, data: dict[str, Any]) -> None:
         """Write the finalized data to dashboard_logs/."""
         os.makedirs(_DASHBOARD_LOGS_DIR, exist_ok=True)
@@ -679,3 +707,12 @@ class PipelineCollector:
             logger.info("Dashboard data saved to %s", path)
         except Exception:
             logger.exception("Failed to save dashboard data to %s", path)
+        # Clean up checkpoint file after successful finalize
+        checkpoint_path = os.path.join(
+            _DASHBOARD_LOGS_DIR, f"checkpoint_{self.session_id[:8]}.json"
+        )
+        try:
+            if os.path.exists(checkpoint_path):
+                os.remove(checkpoint_path)
+        except Exception:
+            pass

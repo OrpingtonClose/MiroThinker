@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 _DASHBOARD_LOGS_DIR = os.environ.get(
     "DASHBOARD_LOGS_DIR",
-    os.path.join(os.path.dirname(os.path.dirname(__file__)), "dashboard_logs"),
+    os.path.join(os.path.expanduser("~"), ".mirothinker", "dashboard_logs"),
 )
 
 # Thread pool for SQLite reads — completely decoupled from the async event loop
