@@ -300,8 +300,9 @@ def start_flock_proxy(
     if raw_instances:
         parsed = _parse_instances(raw_instances, litellm_api_key)
         if parsed:
-            _instances = parsed
-            _instance_cycle = None  # reset cycle
+            with _instance_lock:
+                _instances = parsed
+                _instance_cycle = None  # reset cycle
             logger.info(
                 "Flock multi-instance: %d backends configured",
                 len(_instances),

@@ -142,36 +142,32 @@ def after_tool_callback(
             result_chars=len(result_text),
         )
 
-    # ── Ingest search results into Flock corpus ─────────────────────
-    # Search tool results are fed through ingest_raw() so they get
-    # atomised, scored, and deduped alongside all other findings.
-    # This runs on the pre-truncation text for maximum data capture.
-    #
-    # The CorpusStore lives in a module-level dict in condition_manager,
-    # keyed by state["_corpus_key"].  We look it up directly rather than
-    # creating on demand (get-only semantics).
+    # ── Queue search results for corpus ingestion ──────────────────
+    # Search tool results are queued for later ingestion via the
+    # thread-safe queue in condition_manager.  The actual ingest_raw()
+    # call happens in researcher_condition_callback on the main thread,
+    # avoiding concurrent DuckDB access from parallel tool callbacks.
     source_type = _SEARCH_TOOLS.get(tool_name)
     if source_type and result_text and len(result_text) > 50:
         try:
-            from callbacks.condition_manager import _corpus_stores
+            from callbacks.condition_manager import queue_search_result
 
             corpus_key = tool_context.state.get("_corpus_key", "")
-            corpus = _corpus_stores.get(corpus_key) if corpus_key else None
-            if corpus is not None:
+            if corpus_key:
                 iteration = tool_context.state.get("_corpus_iteration", 0)
-                corpus.ingest_raw(
+                queue_search_result(
+                    corpus_key,
                     result_text[:TOOL_RESULT_MAX_CHARS],
-                    source_type=source_type,
-                    source_ref=tool_name,
-                    iteration=iteration,
+                    source_type,
+                    iteration,
                 )
                 logger.info(
-                    "Ingested %s result (%d chars) into corpus",
+                    "Queued %s result (%d chars) for corpus ingestion",
                     tool_name, min(len(result_text), TOOL_RESULT_MAX_CHARS),
                 )
         except Exception:
             logger.debug(
-                "Corpus ingestion skipped for %s (corpus not available)",
+                "Search result queuing skipped for %s",
                 tool_name, exc_info=True,
             )
 

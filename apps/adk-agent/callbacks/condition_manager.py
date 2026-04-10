@@ -20,6 +20,7 @@ Flock turns it into queryable atoms with gradient-flag scoring.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import TYPE_CHECKING, Optional
 
 from google.adk.agents.callback_context import CallbackContext
@@ -31,6 +32,66 @@ if TYPE_CHECKING:
     from models.corpus_store import CorpusStore
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Thread-safe queue for search results collected by after_tool_callback.
+# Parallel tool callbacks append here; researcher_condition_callback drains
+# on the main thread where DuckDB access is safe.
+# ---------------------------------------------------------------------------
+_pending_search_results: list[tuple[str, str, str, int]] = []  # (corpus_key, text, source_type, iteration)
+_pending_search_lock = threading.Lock()
+
+
+def queue_search_result(
+    corpus_key: str, text: str, source_type: str, iteration: int,
+) -> None:
+    """Thread-safe enqueue of a search result for later corpus ingestion.
+
+    Called from ``after_tool_callback`` which may fire from parallel
+    tool threads.  The actual ``ingest_raw()`` happens in
+    ``researcher_condition_callback`` on the main thread.
+    """
+    with _pending_search_lock:
+        _pending_search_results.append((corpus_key, text, source_type, iteration))
+    logger.debug(
+        "Queued search result for corpus ingestion: source_type=%s, %d chars",
+        source_type, len(text),
+    )
+
+
+def _drain_search_queue(state: dict) -> int:
+    """Drain queued search results into the corpus (single-threaded).
+
+    Returns the total number of admitted conditions across all queued items.
+    """
+    with _pending_search_lock:
+        items = list(_pending_search_results)
+        _pending_search_results.clear()
+
+    if not items:
+        return 0
+
+    corpus_key = state.get("_corpus_key", "")
+    total_admitted = 0
+    for item_key, text, source_type, iteration in items:
+        # Only ingest items belonging to this session's corpus
+        if item_key != corpus_key:
+            continue
+        try:
+            admitted = _ingest_text_into_corpus(state, text, source_type)
+            total_admitted += admitted
+        except Exception:
+            logger.warning(
+                "Failed to ingest queued search result (source_type=%s)",
+                source_type, exc_info=True,
+            )
+
+    if total_admitted:
+        logger.info(
+            "Drained search queue: %d items, %d conditions admitted",
+            len(items), total_admitted,
+        )
+    return total_admitted
 
 
 def _ingest_text_into_corpus(
@@ -132,6 +193,10 @@ def researcher_condition_callback(
         return None
 
     _ingest_text_into_corpus(state, findings_text, "researcher")
+
+    # Drain any search results queued by parallel after_tool_callbacks.
+    # This is the single-threaded point where DuckDB access is safe.
+    _drain_search_queue(state)
 
     # Update state with structured corpus for thinker
     state["research_findings"] = corpus.format_for_thinker()
