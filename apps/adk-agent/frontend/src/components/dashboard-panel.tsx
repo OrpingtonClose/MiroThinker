@@ -378,7 +378,7 @@ export function DashboardPanel() {
           </div>
 
           {/* Rate metrics bar */}
-          {(snap.llm_per_min || snap.tools_per_min || snap.secs_since_activity) && (
+          {(snap.llm_per_min || snap.tools_per_min || snap.secs_since_activity !== undefined) ? (
             <div className="flex gap-3 text-xs">
               {snap.llm_per_min !== undefined && (
                 <div className="bg-blue-500/10 border border-blue-500/20 text-blue-400 px-2.5 py-1 rounded-lg">
@@ -396,7 +396,7 @@ export function DashboardPanel() {
                 </div>
               )}
             </div>
-          )}
+          ) : null}
 
           {/* Alerts */}
           {snap.stalled && (
