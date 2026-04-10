@@ -152,10 +152,19 @@ async def dashboard_runs(request: Request) -> JSONResponse:
 
 
 async def dashboard_latest(request: Request) -> JSONResponse:
-    """GET /dashboard/latest — most recent snapshot (from SQLite or memory)."""
+    """GET /dashboard/latest — most recent snapshot (from memory, SQLite, or files).
+
+    Priority mirrors the SSE generator: prefer in-memory collector (real-time),
+    fall back to SQLite, then to saved JSON files.
+    """
     loop = asyncio.get_running_loop()
 
-    # Try SQLite first (works even under load)
+    # 1) Prefer in-memory collector — always has real-time data
+    collector = get_any_active_collector()
+    if collector:
+        return JSONResponse(collector.snapshot())
+
+    # 2) Fall back to SQLite
     try:
         snapshot = await loop.run_in_executor(
             _db_executor, event_store.get_latest_snapshot, None
@@ -165,21 +174,15 @@ async def dashboard_latest(request: Request) -> JSONResponse:
     if snapshot:
         return JSONResponse(snapshot)
 
-    # Fall back to in-memory collector
-    collector = get_any_active_collector()
-    if collector:
-        return JSONResponse(collector.snapshot())
-
-    # Otherwise return the most recent saved run
+    # 3) Otherwise return the most recent saved run
     runs = _load_runs()
     if not runs:
-        return JSONResponse({"error": "No dashboard runs found"}, status_code=404)
+        return JSONResponse({"status": "idle", "message": "No active pipeline run"})
 
-    # Load the full data for the most recent run
     data = _load_run_by_id(runs[0]["session_id"][:8])
     if data:
         return JSONResponse(data)
-    return JSONResponse({"error": "Run data not found"}, status_code=404)
+    return JSONResponse({"status": "idle", "message": "No active pipeline run"})
 
 
 async def dashboard_run_detail(request: Request) -> JSONResponse:
