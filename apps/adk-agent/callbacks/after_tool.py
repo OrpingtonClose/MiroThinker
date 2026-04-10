@@ -146,12 +146,19 @@ def after_tool_callback(
     # Search tool results are fed through ingest_raw() so they get
     # atomised, scored, and deduped alongside all other findings.
     # This runs on the pre-truncation text for maximum data capture.
+    #
+    # The CorpusStore lives in a module-level dict in condition_manager,
+    # keyed by state["_corpus_key"].  We look it up directly rather than
+    # creating on demand (get-only semantics).
     source_type = _SEARCH_TOOLS.get(tool_name)
     if source_type and result_text and len(result_text) > 50:
         try:
-            corpus = tool_context.state.get("corpus")
+            from callbacks.condition_manager import _corpus_stores
+
+            corpus_key = tool_context.state.get("_corpus_key", "")
+            corpus = _corpus_stores.get(corpus_key) if corpus_key else None
             if corpus is not None:
-                iteration = tool_context.state.get("iteration", 0)
+                iteration = tool_context.state.get("_corpus_iteration", 0)
                 corpus.ingest_raw(
                     result_text[:TOOL_RESULT_MAX_CHARS],
                     source_type=source_type,
@@ -164,8 +171,8 @@ def after_tool_callback(
                 )
         except Exception:
             logger.debug(
-                "Corpus ingestion skipped for %s (no corpus in state)",
-                tool_name,
+                "Corpus ingestion skipped for %s (corpus not available)",
+                tool_name, exc_info=True,
             )
 
     # ── Tool result truncation (always active) ───────────────────────
