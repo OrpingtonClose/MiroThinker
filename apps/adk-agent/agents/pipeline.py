@@ -93,6 +93,13 @@ def _init_pipeline_state(
         init_corpus(state)
         logger.info("Pipeline state initialised: corpus_key=%s", state["_corpus_key"])
 
+        # Reset per-session cost tracker so each pipeline run starts fresh
+        try:
+            from tools.cost_tracker import reset_session_tracker
+            reset_session_tracker()
+        except Exception:
+            pass
+
         # Run Phase 0 scout if this is a fresh pipeline
         query = state.get("user_query", "")
         if query:
@@ -101,12 +108,20 @@ def _init_pipeline_state(
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    # ADK's event loop is already running — schedule as task
+                    # ADK's event loop is already running — run in a
+                    # separate thread with its own event loop.
+                    # Do NOT use ThreadPoolExecutor as a context manager:
+                    # __exit__ calls shutdown(wait=True), which blocks
+                    # until the task finishes even after timeout.
                     import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as pool:
-                        pool.submit(
+                    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                    try:
+                        future = pool.submit(
                             asyncio.run, run_scout_phase(query, state)
-                        ).result(timeout=90)
+                        )
+                        future.result(timeout=90)
+                    finally:
+                        pool.shutdown(wait=False, cancel_futures=True)
                 else:
                     loop.run_until_complete(run_scout_phase(query, state))
             except Exception as exc:

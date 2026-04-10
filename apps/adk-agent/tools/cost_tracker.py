@@ -67,6 +67,18 @@ class CostTracker:
         except Exception as exc:
             logger.warning("Failed to create cost log dir: %s", exc)
 
+    def reset_session(self) -> None:
+        """Reset session counters for a new pipeline run.
+
+        Call this at pipeline init so that each research session starts
+        with a fresh budget.  Monthly totals (from the JSONL ledger)
+        are unaffected.
+        """
+        with self._lock:
+            self._session_total = 0.0
+            self._entries = []
+        logger.info("Cost tracker session reset")
+
     def record_cost(
         self,
         provider: str,
@@ -174,3 +186,8 @@ _cost_tracker = CostTracker()
 def get_cost_tracker() -> CostTracker:
     """Return the global cost tracker instance."""
     return _cost_tracker
+
+
+def reset_session_tracker() -> None:
+    """Reset the global cost tracker for a new session."""
+    _cost_tracker.reset_session()
