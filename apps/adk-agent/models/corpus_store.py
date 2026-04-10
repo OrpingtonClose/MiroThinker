@@ -926,6 +926,16 @@ class CorpusStore:
         # DuckDB does not allow aggregate functions inside correlated
         # subqueries in UPDATE statements.  Compute boost values in a
         # CTE first, then join-update.
+        #
+        # Reset first: the old correlated subquery wrote 0.0 for
+        # conditions without cross-references.  The JOIN-UPDATE below
+        # only touches matched rows, so unmatched conditions must be
+        # explicitly zeroed to prevent accumulation from
+        # compute_source_diversity (which adds to cross_ref_boost).
+        self.conn.execute(
+            "UPDATE conditions SET cross_ref_boost = 0.0 "
+            "WHERE scored_at != ''"
+        )
         self.conn.execute(
             """UPDATE conditions
                SET cross_ref_boost = boost.val
