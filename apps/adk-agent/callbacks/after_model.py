@@ -92,10 +92,14 @@ def after_model_callback(
             state["intermediate_boxed_answers"].append(boxed)
             logger.info("Intermediate boxed answer captured: %s", boxed[:200])
 
-    # Record LLM end in dashboard
+    # Record LLM end in dashboard — but ONLY for actual completions,
+    # not partial streaming chunks.  ADK fires after_model_callback on
+    # both token-by-token streaming events AND final completions.
+    # Guard: only count as a completion if we got substantive text
+    # (>20 chars rules out single-token streaming fragments).
     _c = get_active_collector()
-    if _c:
+    if _c and len(response_text) > 20:
         agent_name = getattr(callback_context, "agent_name", "")
-        _c.llm_end(agent_name, 0.0, len(response_text) // 4)  # rough token estimate
+        _c.llm_end(agent_name, 0.0, len(response_text) // 4)
 
     return None  # keep the original response

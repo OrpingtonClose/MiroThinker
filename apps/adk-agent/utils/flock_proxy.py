@@ -37,10 +37,12 @@ Why LiteLLM instead of raw HTTP forwarding?
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
 import threading
+from dataclasses import dataclass
 from typing import Optional
 
 from aiohttp import web
@@ -50,6 +52,57 @@ logger = logging.getLogger(__name__)
 _FLOCK_PROXY_PORT = int(os.environ.get("FLOCK_PROXY_PORT", "18199"))
 _proxy_started = False
 _proxy_lock = threading.Lock()
+
+
+# ---------------------------------------------------------------------------
+# Multi-instance round-robin load balancing
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _ModelInstance:
+    """A single LLM backend that the proxy can route requests to."""
+    model: str
+    api_key: str
+    api_base: str
+
+
+# Parsed from FLOCK_INSTANCES env var at startup.  Each entry is
+# "model@base_url" or just "model" (api_base inferred by LiteLLM).
+# Falls back to the single default instance when empty.
+_instances: list[_ModelInstance] = []
+_instance_cycle: itertools.cycle | None = None  # type: ignore[type-arg]
+_instance_lock = threading.Lock()
+
+
+def _parse_instances(raw: str, default_key: str) -> list[_ModelInstance]:
+    """Parse ``FLOCK_INSTANCES`` env var into a list of backends.
+
+    Format: comma-separated entries, each is ``model@base_url`` or ``model``.
+    The api_key from the default FLOCK_API_KEY is shared across all instances.
+    """
+    instances: list[_ModelInstance] = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "@" in entry:
+            model, base = entry.split("@", 1)
+            instances.append(_ModelInstance(model=model.strip(), api_key=default_key, api_base=base.strip()))
+        else:
+            instances.append(_ModelInstance(model=entry.strip(), api_key=default_key, api_base=""))
+    return instances
+
+
+def _pick_instance(app_default: _ModelInstance) -> _ModelInstance:
+    """Return the next instance via round-robin, or the default."""
+    global _instance_cycle
+    with _instance_lock:
+        if not _instances:
+            return app_default
+        if _instance_cycle is None:
+            _instance_cycle = itertools.cycle(range(len(_instances)))
+        idx = next(_instance_cycle)
+        return _instances[idx]
 
 
 # ---------------------------------------------------------------------------
@@ -107,20 +160,24 @@ async def _proxy_handler(request: web.Request) -> web.Response:
         had_schema = "response_format" in data
         data.pop("response_format", None)
 
-        # Build LiteLLM kwargs.  The proxy's env-configured model always
-        # wins over whatever Flock sends in the request body.
-        litellm_model: str = request.app["litellm_model"]
-        litellm_api_key: str = request.app["litellm_api_key"]
-        litellm_api_base: str = request.app["litellm_api_base"]
+        # Build LiteLLM kwargs.  Pick the next backend instance via
+        # round-robin if FLOCK_INSTANCES is configured, otherwise use
+        # the single default.
+        default_inst = _ModelInstance(
+            model=request.app["litellm_model"],
+            api_key=request.app["litellm_api_key"],
+            api_base=request.app["litellm_api_base"],
+        )
+        inst = _pick_instance(default_inst)
 
         kwargs: dict = {
-            "model": litellm_model,
+            "model": inst.model,
             "messages": data.get("messages", []),
         }
-        if litellm_api_key:
-            kwargs["api_key"] = litellm_api_key
-        if litellm_api_base:
-            kwargs["api_base"] = litellm_api_base
+        if inst.api_key:
+            kwargs["api_key"] = inst.api_key
+        if inst.api_base:
+            kwargs["api_base"] = inst.api_base
 
         # Forward safe optional params
         for param in ("temperature", "max_tokens", "top_p", "stop", "seed"):
@@ -139,7 +196,7 @@ async def _proxy_handler(request: web.Request) -> web.Response:
                         msg["content"], had_schema,
                     )
 
-            logger.debug("Proxy response OK (model=%s)", litellm_model)
+            logger.debug("Proxy response OK (model=%s)", inst.model)
             return web.json_response(resp_dict)
 
         except Exception as exc:
@@ -228,8 +285,32 @@ def start_flock_proxy(
 
     Raises:
         RuntimeError: If the proxy fails to start within 5 seconds.
+
+    Multi-instance support:
+        Set ``FLOCK_INSTANCES`` to a comma-separated list of
+        ``model@base_url`` entries for round-robin load balancing
+        across multiple LLM backends (e.g. multiple Ollama instances
+        on rented GPUs).  When set, the proxy cycles through instances
+        on each request.
     """
-    global _proxy_started
+    global _proxy_started, _instances, _instance_cycle
+
+    # Parse multi-instance config if provided
+    raw_instances = os.environ.get("FLOCK_INSTANCES", "")
+    if raw_instances:
+        parsed = _parse_instances(raw_instances, litellm_api_key)
+        if parsed:
+            _instances = parsed
+            _instance_cycle = None  # reset cycle
+            logger.info(
+                "Flock multi-instance: %d backends configured",
+                len(_instances),
+            )
+            for i, inst in enumerate(_instances):
+                logger.info(
+                    "  instance[%d]: model=%s base=%s",
+                    i, inst.model, inst.api_base or "(provider default)",
+                )
 
     with _proxy_lock:
         if _proxy_started:
