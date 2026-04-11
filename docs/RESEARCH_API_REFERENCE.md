@@ -14,8 +14,9 @@
 7. [Mojeek](#7-mojeek) — Independent crawler-based search (no Google/Bing dependency)
 8. [Marginalia](#8-marginalia) — Small/indie web search engine (non-commercial focus)
 9. [Apify](#9-apify) — Actor marketplace for web scraping (Google Scholar, PubMed, etc.)
-10. [Scite.ai](#10-sciteai) — Smart Citations, citation graph analysis, full-text scientific literature
-11. [Integration Strategy for MiroThinker](#11-integration-strategy)
+10. [Consensus](#10-consensus) — 200M+ peer-reviewed papers, study type filtering, MCP protocol
+11. [Scite.ai](#11-sciteai) — Smart Citations, citation graph analysis, full-text scientific literature
+12. [Integration Strategy for MiroThinker](#12-integration-strategy)
 
 ---
 
@@ -813,7 +814,149 @@ Apify also offers an MCP server for direct integration with LLM agents — can b
 
 ---
 
-## 10. Scite.ai
+## 10. Consensus
+
+**What it is:** AI-powered academic search engine indexing 200M+ peer-reviewed papers. The only API that provides **study type classification** (RCT, meta-analysis, systematic review, etc.) and **key takeaways** per paper. Consensus focuses on answering research questions with evidence from scientific literature.
+
+**MCP URL:** `https://mcp.consensus.app/mcp` (note: `/mcp` path is required)  
+**Auth:** OAuth 2.1 with PKCE (browser-based login via Clerk)  
+**Protocol:** MCP (Model Context Protocol) over Streamable HTTP / JSON-RPC  
+**Env vars:** `CONSENSUS_REFRESH_TOKEN`, `CONSENSUS_CLIENT_ID`
+
+### Authentication — OAuth 2.1 Flow
+
+Consensus uses OAuth 2.1 with PKCE — same pattern as scite.ai. The flow:
+
+1. **Discovery:** `GET https://consensus.app/.well-known/oauth-authorization-server`
+   Returns authorization, token, and registration endpoints.
+2. **Dynamic Client Registration (DCR):**
+   ```bash
+   curl -X POST "https://consensus.app/oauth/register/" \
+     -H "Content-Type: application/json" \
+     -d '{"client_name": "MiroThinker", "redirect_uris": ["http://localhost:8765/oauth/callback"], "grant_types": ["authorization_code", "refresh_token"], "token_endpoint_auth_method": "none", "scope": "mcp"}'
+   ```
+   **Note:** Trailing slash on `/oauth/register/` is required.
+   Returns: `client_id` (no secret — public client with PKCE)
+3. **Authorization:** Open browser to:
+   ```
+   https://consensus.app/oauth/authorize/?response_type=code&client_id=CLIENT_ID&code_challenge=CHALLENGE&code_challenge_method=S256&redirect_uri=http://localhost:8765/oauth/callback
+   ```
+   User logs in via Clerk (Google SSO or email). On success, redirects with `?code=AUTH_CODE`.
+4. **Token Exchange:**
+   ```bash
+   curl -X POST "https://consensus.app/oauth/token" \
+     -d "grant_type=authorization_code&code=AUTH_CODE&redirect_uri=http://localhost:8765/oauth/callback&client_id=CLIENT_ID&code_verifier=VERIFIER"
+   ```
+   Returns: `access_token` (short-lived), `refresh_token` (long-lived)
+5. **Token Refresh:** Use refresh_token to get new access_token without re-login
+
+**Known Issue (April 2026):** Google SSO via Clerk may loop back to login screen in automated environments. Manual browser login is recommended for initial token acquisition.
+
+### MCP Protocol
+
+Consensus uses the Model Context Protocol (JSON-RPC over HTTP):
+
+```python
+import requests
+
+# Initialize MCP session
+response = requests.post("https://mcp.consensus.app/mcp",
+    headers={"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"},
+    json={"jsonrpc": "2.0", "method": "initialize",
+          "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                     "clientInfo": {"name": "MiroThinker", "version": "1.0.0"}}, "id": 1})
+
+# List available tools
+response = requests.post("https://mcp.consensus.app/mcp",
+    headers={"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"},
+    json={"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 2})
+
+# Call search tool
+response = requests.post("https://mcp.consensus.app/mcp",
+    headers={"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"},
+    json={"jsonrpc": "2.0", "method": "tools/call",
+          "params": {"name": "search",
+                     "arguments": {"query": "omega-3 fatty acids diabetes prevention"}}, "id": 3})
+```
+
+### The `search` Tool — Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `query` | string | Natural language research question (best results with specific, well-formed questions) |
+| `year_min` | int | Filter papers published from this year onwards |
+| `year_max` | int | Filter papers published up to this year |
+| `study_types` | array[string] | Filter by study design: `rct`, `meta-analysis`, `systematic-review`, `case-report`, `observational`, `cohort`, `cross-sectional`, `literature-review`, `animal-study`, `in-vitro` |
+| `sjr_max` | int | Journal quality quartile (1 = top 25% journals by SCImago Journal Rank) |
+| `human` | bool | Restrict to human-subjects studies only |
+| `sample_size_min` | int | Minimum sample size (filters out underpowered studies) |
+
+### Response Structure
+
+```json
+{
+  "papers": [
+    {
+      "title": "Omega-3 Fatty Acid Supplementation and Risk of Type 2 Diabetes",
+      "authors": ["Smith J", "Jones A"],
+      "abstract": "Full abstract text...",
+      "journal": "The Lancet Diabetes & Endocrinology",
+      "year": 2023,
+      "citation_count": 142,
+      "url": "https://consensus.app/papers/...",
+      "study_type": "meta-analysis",
+      "takeaway": "Meta-analysis of 12 RCTs (n=45,000) found omega-3 supplementation associated with 15% reduced risk of T2D (RR 0.85, 95% CI 0.78-0.93)"
+    }
+  ]
+}
+```
+
+**Note:** `study_type` and `takeaway` fields require a Pro plan. Enterprise plan adds `doi` field. Free plan returns basic paper metadata with up to 3 papers per search.
+
+### Access Tiers
+
+| Tier | Papers/Search | Searches/Month | Study Type | Takeaway | DOI |
+|------|--------------|----------------|------------|----------|-----|
+| No account | 3 | Unlimited | No | No | No |
+| Free | 10 | 30 | No | No | No |
+| Pro ($8.99/mo) | 20 | 1,000 | Yes | Yes | No |
+| Enterprise | 20+ | Custom | Yes | Yes | Yes |
+
+### Why Consensus is Valuable for MiroThinker
+
+1. **Study type filtering** — The killer feature. No other API lets you filter by RCT, meta-analysis, systematic review, etc. Essential for evidence-based research where study design determines evidence quality.
+2. **Sample size filtering** — Filter out underpowered studies (e.g., `sample_size_min: 100`).
+3. **Journal quality filtering** — SCImago Journal Rank quartile filtering ensures high-quality sources.
+4. **AI-generated takeaways** — Pre-synthesized key findings per paper, saving LLM tokens.
+5. **Human-subjects filter** — Critical for health/nutrition research (excludes animal studies when needed).
+6. **200M+ papers** — Comprehensive coverage across all scientific disciplines.
+
+### Optimal MiroThinker Usage
+- **Evidence hierarchy queries** — Search with `study_types: ["meta-analysis", "systematic-review"]` first, then broaden to RCTs
+- **Clinical research** — Use `human: true` + `sample_size_min: 50` for robust human evidence
+- **Quality filtering** — Use `sjr_max: 1` or `sjr_max: 2` to restrict to top-tier journals
+- **Combine with scite.ai** — Consensus finds the papers by study type, scite.ai shows how they cite each other
+- **Combine with Exa/Tavily** — Consensus for structured metadata, Exa/Tavily for full-text content extraction
+- **Date-bounded searches** — Use `year_min`/`year_max` to focus on recent evidence
+
+### Token Management
+- Access tokens are short-lived
+- Use refresh_token to get new access_token without re-login:
+  ```bash
+  curl -X POST "https://consensus.app/oauth/token" \
+    -d "grant_type=refresh_token&refresh_token=REFRESH_TOKEN&client_id=CLIENT_ID"
+  ```
+- Store refresh_token securely — it's long-lived
+- MiroThinker should auto-refresh before each session
+
+### Pricing
+- Free tier: 30 searches/month, 10 papers per search (limited metadata)
+- Pro: $8.99/month — 1,000 searches/month, study types, takeaways
+- Enterprise: Custom pricing, DOIs included, higher limits
+
+---
+
+## 11. Scite.ai
 
 **What it is:** Smart Citations platform that indexes 1.6B+ citations from scientific literature. Shows whether papers *support*, *contrast*, or merely *mention* each other — the only API that provides citation sentiment analysis. Full-text search across peer-reviewed papers with excerpts.
 
@@ -964,7 +1107,7 @@ response = requests.post("https://api.scite.ai/mcp",
 
 ---
 
-## 11. Integration Strategy for MiroThinker
+## 12. Integration Strategy for MiroThinker
 
 ### Tiered Research Architecture
 
@@ -1047,7 +1190,7 @@ TIER 4: Content Processing (post-discovery)
 
 ### Citation Graph Analysis — Now Available via Scite.ai
 
-Scite.ai provides **citation graph traversal** with sentiment — the only API that shows whether citations are supporting, contradicting, or mentioning. This is now fully integrated via OAuth 2.1 (see Section 10). Use it to:
+Scite.ai provides **citation graph traversal** with sentiment — the only API that shows whether citations are supporting, contradicting, or mentioning. This is now fully integrated via OAuth 2.1 (see Section 11). Use it to:
 - Verify claims by checking support/contrast ratios
 - Follow citation chains to find foundational papers
 - Screen for retractions before citing any paper
@@ -1077,6 +1220,10 @@ JINA_API_KEY=...
 DEEP_RESEARCH_SESSION_BUDGET=10.00
 DEEP_RESEARCH_MONTHLY_BUDGET=200.00
 
+# Consensus (OAuth 2.1 — same pattern as Scite.ai)
+CONSENSUS_REFRESH_TOKEN=...  # Long-lived refresh token from OAuth flow
+CONSENSUS_CLIENT_ID=...      # OAuth client ID from DCR
+
 # Scite.ai (OAuth 2.1 — no static key, uses refresh token)
 SCITE_REFRESH_TOKEN=...  # Long-lived refresh token from OAuth flow
 SCITE_CLIENT_ID=...       # OAuth client ID from DCR
@@ -1086,23 +1233,25 @@ SCITE_CLIENT_ID=...       # OAuth client ID from DCR
 
 ## Appendix: Quick Comparison Matrix
 
-| Feature | Exa | Tavily | Firecrawl | Perplexity | Kagi | Jina | Mojeek | Marginalia | Apify | Scite.ai |
-|---------|-----|--------|-----------|------------|------|------|--------|------------|-------|----------|
-| Web search | ++ | ++ | - | ++ | + | + | + | + | - | + |
-| Academic filter | ++ | + | - | + | - | - | - | - | ++ | ++ |
-| Content extraction | + | + | ++ | - | - | ++ | - | - | ++ | + |
-| Summarization | + | + | - | ++ | ++ | - | - | - | - | - |
-| Structured extraction | + | - | ++ | + | - | - | - | - | ++ | + |
-| Citation tracking | - | - | - | + | - | - | - | - | - | ++ |
-| Smart Citations | - | - | - | - | - | - | - | - | - | ++ |
-| Retraction screening | - | - | - | - | - | - | - | - | - | ++ |
-| Indie/small web | - | - | - | - | ++ | - | ++ | ++ | - | - |
-| Independent index | - | - | - | - | + | - | ++ | ++ | - | + |
-| PDF handling | - | - | + | - | ++ | + | - | - | - | - |
-| Anti-bot/proxy | - | - | ++ | - | - | + | - | - | ++ | - |
-| Embeddings | - | - | - | + | - | ++ | - | - | - | - |
-| Reranking | - | - | - | - | - | ++ | - | - | - | - |
-| Async/batch | - | - | + | - | - | - | - | - | ++ | - |
-| Cost per query | $$ | $ | $ | $$$ | $$ | $ | $ | $ | $$ | flat |
+| Feature | Exa | Tavily | Firecrawl | Perplexity | Kagi | Jina | Mojeek | Marginalia | Apify | Consensus | Scite.ai |
+|---------|-----|--------|-----------|------------|------|------|--------|------------|-------|-----------|----------|
+| Web search | ++ | ++ | - | ++ | + | + | + | + | - | + | + |
+| Academic filter | ++ | + | - | + | - | - | - | - | ++ | ++ | ++ |
+| Content extraction | + | + | ++ | - | - | ++ | - | - | ++ | - | + |
+| Summarization | + | + | - | ++ | ++ | - | - | - | - | + | - |
+| Structured extraction | + | - | ++ | + | - | - | - | - | ++ | + | + |
+| Study type filtering | - | - | - | - | - | - | - | - | - | ++ | + |
+| Citation tracking | - | - | - | + | - | - | - | - | - | - | ++ |
+| Smart Citations | - | - | - | - | - | - | - | - | - | - | ++ |
+| Retraction screening | - | - | - | - | - | - | - | - | - | - | ++ |
+| AI takeaways | - | - | - | + | - | - | - | - | - | ++ | - |
+| Indie/small web | - | - | - | - | ++ | - | ++ | ++ | - | - | - |
+| Independent index | - | - | - | - | + | - | ++ | ++ | - | + | + |
+| PDF handling | - | - | + | - | ++ | + | - | - | - | - | - |
+| Anti-bot/proxy | - | - | ++ | - | - | + | - | - | ++ | - | - |
+| Embeddings | - | - | - | + | - | ++ | - | - | - | - | - |
+| Reranking | - | - | - | - | - | ++ | - | - | - | - | - |
+| Async/batch | - | - | + | - | - | - | - | - | ++ | - | - |
+| Cost per query | $$ | $ | $ | $$$ | $$ | $ | $ | $ | $$ | $ | flat |
 
 **Legend:** `++` = best-in-class, `+` = capable, `-` = not available, `$` = cheap, `$$` = moderate, `$$$` = expensive, `flat` = subscription-based
