@@ -14,7 +14,8 @@
 7. [Mojeek](#7-mojeek) — Independent crawler-based search (no Google/Bing dependency)
 8. [Marginalia](#8-marginalia) — Small/indie web search engine (non-commercial focus)
 9. [Apify](#9-apify) — Actor marketplace for web scraping (Google Scholar, PubMed, etc.)
-10. [Integration Strategy for MiroThinker](#10-integration-strategy)
+10. [Scite.ai](#10-sciteai) — Smart Citations, citation graph analysis, full-text scientific literature
+11. [Integration Strategy for MiroThinker](#11-integration-strategy)
 
 ---
 
@@ -812,7 +813,158 @@ Apify also offers an MCP server for direct integration with LLM agents — can b
 
 ---
 
-## 10. Integration Strategy for MiroThinker
+## 10. Scite.ai
+
+**What it is:** Smart Citations platform that indexes 1.6B+ citations from scientific literature. Shows whether papers *support*, *contrast*, or merely *mention* each other — the only API that provides citation sentiment analysis. Full-text search across peer-reviewed papers with excerpts.
+
+**Base URL:** `https://api.scite.ai/mcp`  
+**Auth:** OAuth 2.1 with PKCE (Dynamic Client Registration, no static API key)  
+**Protocol:** MCP (Model Context Protocol) over Streamable HTTP / JSON-RPC  
+**Env vars:** `SCITE_ACCESS_TOKEN`, `SCITE_REFRESH_TOKEN`, `SCITE_CLIENT_ID`
+
+### Authentication — OAuth 2.1 Flow
+
+Scite.ai uses OAuth 2.1 with PKCE — no static API key. The flow:
+
+1. **Discovery:** `GET https://api.scite.ai/.well-known/oauth-authorization-server`
+2. **Dynamic Client Registration (DCR):**
+   ```bash
+   curl -X POST "https://api.scite.ai/mcp/oauth/register" \
+     -H "Content-Type: application/json" \
+     -d '{"client_name": "MiroThinker", "redirect_uris": ["http://localhost:8765/oauth/callback"], "grant_types": ["authorization_code", "refresh_token"], "token_endpoint_auth_method": "none", "scope": "mcp"}'
+   ```
+   Returns: `client_id` (no secret — public client with PKCE)
+3. **Authorization:** Open browser to `https://api.scite.ai/mcp/oauth/authorize?response_type=code&client_id=...&code_challenge=...&code_challenge_method=S256`
+4. **Token Exchange:**
+   ```bash
+   curl -X POST "https://api.scite.ai/mcp/oauth/token" \
+     -d "grant_type=authorization_code&code=AUTH_CODE&redirect_uri=...&client_id=...&code_verifier=..."
+   ```
+   Returns: `access_token` (12h TTL), `refresh_token` (long-lived)
+5. **Token Refresh:** Use refresh_token to get new access_token without re-login
+
+### MCP Protocol
+
+Scite.ai uses the Model Context Protocol (JSON-RPC over HTTP):
+
+```python
+import requests
+
+# Initialize session
+response = requests.post("https://api.scite.ai/mcp",
+    headers={"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"},
+    json={"jsonrpc": "2.0", "method": "initialize",
+          "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                     "clientInfo": {"name": "MiroThinker", "version": "1.0.0"}}, "id": 1})
+
+# Call search_literature
+response = requests.post("https://api.scite.ai/mcp",
+    headers={"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"},
+    json={"jsonrpc": "2.0", "method": "tools/call",
+          "params": {"name": "search_literature",
+                     "arguments": {"term": "lutein zeaxanthin macular pigment", "limit": 10}}, "id": 2})
+```
+
+### The `search_literature` Tool — Full Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `term` | string | Cross-field search query. Supports Boolean (AND, OR, NOT), phrase ("exact"), proximity ("term1 term2"~5) |
+| `dois` | array[string] | Filter to specific DOIs (preferred over titles for exact match) |
+| `titles` | array[string] | Filter to papers matching these titles |
+| `limit` | int | Max results (default 10, max 1000) |
+| `offset` | int | Pagination offset |
+| `title` | string | Filter by title text |
+| `abstract` | string | Filter by abstract text |
+| `author` | string | Filter by author name |
+| `journal` | string | Filter by journal name |
+| `publisher` | string | Filter by publisher |
+| `year` | int | Filter by publication year |
+| `date_from` | string | Papers from this date (YYYY-MM-DD) |
+| `date_to` | string | Papers up to this date |
+| `paper_type` | string | Article, Review, Clinical Trial, Meta-Analysis, Case Report |
+| `affiliation` | string | Author institution |
+| `topic` | string | Research topic/subject area |
+| `has_tally` | bool | Papers with Smart Citations |
+| `has_retraction` | bool | Retracted papers only |
+| `has_concern` | bool | Papers with editorial concerns |
+| `supporting_from/to` | int | Min/max supporting citations |
+| `contrasting_from/to` | int | Min/max contrasting citations |
+| `mentioning_from/to` | int | Min/max mentioning citations |
+| `citing_publications_from/to` | int | Min/max total citing publications |
+
+### Response Structure
+
+```json
+{
+  "hits": [{
+    "doi": "10.3390/nu8070426",
+    "title": "Lutein, Zeaxanthin and Meso-zeaxanthin Supplementation...",
+    "authors": [{"authorName": "Jane Smith"}],
+    "abstract": "Full abstract...",
+    "year": 2016,
+    "journal": "Nutrients",
+    "tally": {
+      "total": 86,
+      "supporting": 5,
+      "contrasting": 0,
+      "mentioning": 81
+    },
+    "fulltextExcerpts": ["Relevant passage from the paper (~500 chars)..."],
+    "access": {"url": "https://doi.org/...", "accessType": "open", "contentType": "pdf"},
+    "citations": [{
+      "snippet": "Actual quoted text from a citing paper",
+      "type": "supporting",
+      "section": "Results",
+      "sourceDoi": "10.xxxx/citing-paper",
+      "targetDoi": "10.3390/nu8070426"
+    }],
+    "retraction_notices": [],
+    "isOa": true,
+    "oaStatus": "gold"
+  }]
+}
+```
+
+### Why Scite.ai is Transformative for MiroThinker
+
+1. **Smart Citations** — The killer feature. Shows *how* papers cite each other:
+   - **Supporting**: "Our results confirm the findings of Smith et al."
+   - **Contrasting**: "In contrast to Smith et al., we found no significant effect"
+   - **Mentioning**: "Smith et al. previously studied this topic"
+2. **Citation sentiment analysis** — No other API provides this
+3. **Full-text excerpts** — Up to 5 passages (~500 chars each) per paper, matching query
+4. **Retraction/correction tracking** — Essential for research integrity
+5. **1.6B+ citations indexed** — Comprehensive coverage
+6. **Section-level citation context** — Know if a citation appears in Methods vs Results vs Discussion
+
+### Optimal MiroThinker Usage
+- **Citation graph traversal** — Find paper A, see who supports/contradicts it, follow the chain
+- **Claim verification** — Search a claim, check if supporting > contrasting citations
+- **Retraction screening** — Filter `has_retraction: true` before citing any paper
+- **Deep reading workflow**: Search broadly → get DOIs → query with targeted `term` to read section by section
+- **Combine with Exa/Tavily**: They find URLs, scite.ai validates the science behind them
+- Use `supporting_from: 10` to find well-supported papers (consensus indicators)
+- Use `contrasting_from: 5` to find controversial papers (active debate)
+
+### Token Management
+- Access tokens expire in 12 hours
+- Use refresh_token to get new access_token without re-login:
+  ```bash
+  curl -X POST "https://api.scite.ai/mcp/oauth/token" \
+    -d "grant_type=refresh_token&refresh_token=REFRESH_TOKEN&client_id=CLIENT_ID"
+  ```
+- Store refresh_token securely — it's long-lived
+- MiroThinker should auto-refresh before each session
+
+### Pricing
+- Requires scite.ai premium subscription (~$10-20/month)
+- MCP access included with premium plan
+- No per-query charges once subscribed
+
+---
+
+## 11. Integration Strategy for MiroThinker
 
 ### Tiered Research Architecture
 
@@ -893,9 +1045,13 @@ TIER 4: Content Processing (post-discovery)
 | **Batch Apify runs** | Run once for 50+ papers vs. individual API calls |
 | **Jina Reader for simple pages** | Cheaper than Firecrawl for straightforward URL→markdown |
 
-### Missing Capability: Citation Graph Analysis
+### Citation Graph Analysis — Now Available via Scite.ai
 
-None of these APIs provide **citation graph traversal** (paper A cites paper B which cites paper C). This is where **scite.ai** would be transformative — it provides Smart Citations showing how papers cite each other and whether citations are supporting, contradicting, or mentioning. Awaiting API key.
+Scite.ai provides **citation graph traversal** with sentiment — the only API that shows whether citations are supporting, contradicting, or mentioning. This is now fully integrated via OAuth 2.1 (see Section 10). Use it to:
+- Verify claims by checking support/contrast ratios
+- Follow citation chains to find foundational papers
+- Screen for retractions before citing any paper
+- Identify active scientific debates (high contrasting citation count)
 
 ### Recommended `.env` Configuration
 
@@ -921,29 +1077,32 @@ JINA_API_KEY=...
 DEEP_RESEARCH_SESSION_BUDGET=10.00
 DEEP_RESEARCH_MONTHLY_BUDGET=200.00
 
-# Pending
-# SCITE_API_KEY=...  # Citation graph analysis
+# Scite.ai (OAuth 2.1 — no static key, uses refresh token)
+SCITE_REFRESH_TOKEN=...  # Long-lived refresh token from OAuth flow
+SCITE_CLIENT_ID=...       # OAuth client ID from DCR
 ```
 
 ---
 
 ## Appendix: Quick Comparison Matrix
 
-| Feature | Exa | Tavily | Firecrawl | Perplexity | Kagi | Jina | Mojeek | Marginalia | Apify |
-|---------|-----|--------|-----------|------------|------|------|--------|------------|-------|
-| Web search | ++ | ++ | - | ++ | + | + | + | + | - |
-| Academic filter | ++ | + | - | + | - | - | - | - | ++ |
-| Content extraction | + | + | ++ | - | - | ++ | - | - | ++ |
-| Summarization | + | + | - | ++ | ++ | - | - | - | - |
-| Structured extraction | + | - | ++ | + | - | - | - | - | ++ |
-| Citation tracking | - | - | - | + | - | - | - | - | - |
-| Indie/small web | - | - | - | - | ++ | - | ++ | ++ | - |
-| Independent index | - | - | - | - | + | - | ++ | ++ | - |
-| PDF handling | - | - | + | - | ++ | + | - | - | - |
-| Anti-bot/proxy | - | - | ++ | - | - | + | - | - | ++ |
-| Embeddings | - | - | - | + | - | ++ | - | - | - |
-| Reranking | - | - | - | - | - | ++ | - | - | - |
-| Async/batch | - | - | + | - | - | - | - | - | ++ |
-| Cost per query | $$ | $ | $ | $$$ | $$ | $ | $ | $ | $$ |
+| Feature | Exa | Tavily | Firecrawl | Perplexity | Kagi | Jina | Mojeek | Marginalia | Apify | Scite.ai |
+|---------|-----|--------|-----------|------------|------|------|--------|------------|-------|----------|
+| Web search | ++ | ++ | - | ++ | + | + | + | + | - | + |
+| Academic filter | ++ | + | - | + | - | - | - | - | ++ | ++ |
+| Content extraction | + | + | ++ | - | - | ++ | - | - | ++ | + |
+| Summarization | + | + | - | ++ | ++ | - | - | - | - | - |
+| Structured extraction | + | - | ++ | + | - | - | - | - | ++ | + |
+| Citation tracking | - | - | - | + | - | - | - | - | - | ++ |
+| Smart Citations | - | - | - | - | - | - | - | - | - | ++ |
+| Retraction screening | - | - | - | - | - | - | - | - | - | ++ |
+| Indie/small web | - | - | - | - | ++ | - | ++ | ++ | - | - |
+| Independent index | - | - | - | - | + | - | ++ | ++ | - | + |
+| PDF handling | - | - | + | - | ++ | + | - | - | - | - |
+| Anti-bot/proxy | - | - | ++ | - | - | + | - | - | ++ | - |
+| Embeddings | - | - | - | + | - | ++ | - | - | - | - |
+| Reranking | - | - | - | - | - | ++ | - | - | - | - |
+| Async/batch | - | - | + | - | - | - | - | - | ++ | - |
+| Cost per query | $$ | $ | $ | $$$ | $$ | $ | $ | $ | $$ | flat |
 
-**Legend:** `++` = best-in-class, `+` = capable, `-` = not available, `$` = cheap, `$$` = moderate, `$$$` = expensive
+**Legend:** `++` = best-in-class, `+` = capable, `-` = not available, `$` = cheap, `$$` = moderate, `$$$` = expensive, `flat` = subscription-based
