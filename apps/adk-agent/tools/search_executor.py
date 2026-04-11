@@ -431,6 +431,12 @@ def extract_search_queries(strategy_text: str) -> list[str]:
     queries: list[str] = []
     seen: set[str] = set()
 
+    # The last pattern in _QUERY_PATTERNS is the numbered-list pattern
+    # which is noisy and captures meta-instructions.  Verb-prefixed
+    # patterns ("search for X", "find X") already have strong signal
+    # so we trust those extractions without skip-word filtering.
+    noisy_pattern = _QUERY_PATTERNS[-1]
+
     for pattern in _QUERY_PATTERNS:
         for match in pattern.finditer(strategy_text):
             q = match.group(1).strip()
@@ -439,15 +445,13 @@ def extract_search_queries(strategy_text: str) -> list[str]:
             # Skip too short or too long
             if len(q) < 10 or len(q) > 200:
                 continue
-            # Skip if it's a meta-instruction, not a search query
+            # Only apply meta-instruction filter to the noisy
+            # numbered-list pattern — high-signal verb patterns
+            # ("search for X", "find X") are trusted as-is.
             lower = q.lower()
-            if any(skip in lower for skip in _SKIP_WORDS):
-                continue
-            # Skip queries that look like meta-instructions rather
-            # than actual search topics.  Only apply to the numbered-
-            # list pattern (last in _QUERY_PATTERNS) which is noisy.
-            # Verb-prefixed patterns ("search for X", "find X") already
-            # have strong signal so we trust those extractions.
+            if pattern is noisy_pattern:
+                if any(skip in lower for skip in _SKIP_WORDS):
+                    continue
             normalised = lower.strip()
             if normalised not in seen:
                 seen.add(normalised)

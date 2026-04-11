@@ -50,24 +50,70 @@ def _fix_unescaped_quotes(query: str) -> str:
     Strategy: walk the query character-by-character, tracking whether
     we are inside a string literal.  When we encounter a single quote
     that is preceded and followed by word characters (i.e. it looks
-    like an apostrophe inside a word), double it.
+    like an apostrophe inside a word), double it.  This avoids
+    corrupting valid SQL where a closing quote abuts a keyword
+    (e.g. ``'value'AND``).
     """
     if "'" not in query:
         return query
 
-    # We operate on the raw characters.  The idea:
-    # A quote that is NOT at a string-literal boundary (open/close)
-    # but sits between two word-like characters is an unescaped
-    # apostrophe and needs doubling.
-    #
-    # Heuristic: replace pattern  letter'letter  with  letter''letter
-    # inside SQL string bodies.  This handles  Anna's  →  Anna''s
-    # while leaving real SQL quote boundaries alone.
-    fixed = re.sub(
-        r"([A-Za-z])'([A-Za-z])",
-        r"\1''\2",
-        query,
-    )
+    # Common English apostrophe suffixes — the characters *after* the
+    # quote in patterns like  Anna's  /  don't  /  they're  /  I've
+    _APOSTROPHE_SUFFIXES = {"s", "t", "re", "ve", "ll", "d", "m"}
+
+    chars = list(query)
+    n = len(chars)
+    result: list[str] = []
+    in_string = False
+
+    i = 0
+    while i < n:
+        ch = chars[i]
+
+        if ch == "'":
+            if not in_string:
+                # Opening a string literal
+                in_string = True
+                result.append(ch)
+            elif i + 1 < n and chars[i + 1] == "'":
+                # Already-escaped quote inside string — pass both through
+                result.append(ch)
+                result.append(chars[i + 1])
+                i += 1
+            else:
+                # Single quote inside a string — is it an apostrophe
+                # (letter'letter) or a closing quote?
+                #
+                # We only treat it as an apostrophe when the suffix
+                # after the quote matches a known English contraction
+                # pattern (e.g.  's  /  't  /  're  /  've  /  'll).
+                # This avoids corrupting  'value'AND  while still
+                # fixing  Anna's  →  Anna''s.
+                prev_is_letter = i > 0 and chars[i - 1].isalpha()
+                if prev_is_letter and i + 1 < n and chars[i + 1].isalpha():
+                    # Extract the suffix word after the apostrophe
+                    suffix_end = i + 1
+                    while suffix_end < n and chars[suffix_end].isalpha():
+                        suffix_end += 1
+                    suffix = "".join(chars[i + 1 : suffix_end]).lower()
+                    if suffix in _APOSTROPHE_SUFFIXES:
+                        # Known contraction — double the apostrophe
+                        result.append("'")
+                        result.append("'")
+                    else:
+                        # Not a known contraction — treat as closing quote
+                        in_string = False
+                        result.append(ch)
+                else:
+                    # Not letter'letter — closing quote
+                    in_string = False
+                    result.append(ch)
+        else:
+            result.append(ch)
+
+        i += 1
+
+    fixed = "".join(result)
     if fixed != query:
         logger.debug("Fixed unescaped quotes in SQL: %s → %s", query[:200], fixed[:200])
     return fixed
