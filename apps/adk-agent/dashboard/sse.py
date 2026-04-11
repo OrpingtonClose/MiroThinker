@@ -46,6 +46,15 @@ _db_executor = concurrent.futures.ThreadPoolExecutor(
 )
 
 
+# Grace period (seconds) after a run completes during which the SSE stream
+# continues to serve the finalized snapshot instead of immediately showing idle.
+_POST_RUN_GRACE_SECS = 30.0
+
+# Tracks the most recently finalized snapshot and when it was captured.
+_last_finalized_snapshot: dict | None = None
+_last_finalized_at: float = 0.0
+
+
 async def _sse_generator(request: Request):
     """Yield SSE events with snapshots every 500ms.
 
@@ -53,6 +62,7 @@ async def _sse_generator(request: Request):
     snapshots (which may lag during Flock processing).  Falls back to
     SQLite only when there is no active in-memory collector.
     """
+    global _last_finalized_snapshot, _last_finalized_at
     loop = asyncio.get_running_loop()
     while True:
         if await request.is_disconnected():
@@ -64,8 +74,12 @@ async def _sse_generator(request: Request):
         collector = get_any_active_collector()
         if collector:
             snapshot = collector.snapshot()
+            # Cache a copy so we can serve it during the grace period
+            if snapshot and snapshot.get("finalized"):
+                _last_finalized_snapshot = snapshot
+                _last_finalized_at = asyncio.get_event_loop().time()
 
-        # 2) Fall back to SQLite (covers post-finalization or saturated loop)
+        # 2) Fall back to SQLite — try running runs first
         if not snapshot:
             try:
                 snapshot = await loop.run_in_executor(
@@ -74,6 +88,26 @@ async def _sse_generator(request: Request):
                 )
             except Exception:
                 snapshot = None
+
+        # 3) Fall back to SQLite without only_running filter to get the
+        #    most recently completed run (mirrors /dashboard/latest logic).
+        if not snapshot:
+            try:
+                snapshot = await loop.run_in_executor(
+                    _db_executor,
+                    lambda: event_store.get_latest_snapshot(None),
+                )
+            except Exception:
+                snapshot = None
+
+        # 4) During the grace period after finalization, continue serving
+        #    the last finalized snapshot so the dashboard doesn't flicker.
+        if not snapshot and _last_finalized_snapshot:
+            elapsed = asyncio.get_event_loop().time() - _last_finalized_at
+            if elapsed < _POST_RUN_GRACE_SECS:
+                snapshot = _last_finalized_snapshot
+            else:
+                _last_finalized_snapshot = None
 
         if snapshot:
             yield f"data: {json.dumps(snapshot, default=str)}\n\n"

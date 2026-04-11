@@ -12,6 +12,16 @@ export interface DashboardSnapshot {
   event_count: number;
   status?: "idle";
   message?: string;
+  started_at?: number;
+  recent_events?: RawEvent[];
+  recent_tools?: ToolCall[];
+  recent_llm?: LLMCall[];
+  pending_tools?: string[];
+  pending_llm?: string[];
+  corpus_history?: CorpusUpdate[];
+  llm_per_min?: number;
+  tools_per_min?: number;
+  secs_since_activity?: number;
 }
 
 export interface Phase {
@@ -33,6 +43,10 @@ export interface KPI {
   compressions: number;
   keep_k_trims: number;
   corpus_atoms: number;
+  tool_errors?: number;
+  prompt_tokens_est?: number;
+  completion_tokens_est?: number;
+  force_ends?: number;
 }
 
 /** Full run detail from /dashboard/latest or /dashboard/run/:id */
