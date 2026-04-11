@@ -25,6 +25,7 @@ import asyncio
 import logging
 import os
 import re
+import threading
 import time
 from typing import Any
 
@@ -401,11 +402,21 @@ def extract_search_queries(strategy_text: str) -> list[str]:
 # Public entry point
 # ---------------------------------------------------------------------------
 
-async def run_search_executor(state: dict) -> dict[str, int]:
+async def run_search_executor(
+    state: dict,
+    cancel: threading.Event | None = None,
+) -> dict[str, int]:
     """Run the automated search executor.
 
     Reads expansion targets from the corpus and the thinker's strategy,
     fires the appropriate APIs, and ingests results into the corpus.
+
+    Args:
+        state: Pipeline session state dict.
+        cancel: Optional threading.Event.  When set, the executor stops
+            ingesting results and returns early.  Used by
+            ``search_executor_callback`` to prevent an orphaned worker
+            thread from accessing DuckDB after timeout.
 
     Returns a dict with execution stats.
     """
@@ -492,6 +503,11 @@ async def run_search_executor(state: dict) -> dict[str, int]:
 
     # Ingest results into corpus
     for i, result in enumerate(results):
+        # Check cancellation before each corpus write
+        if cancel and cancel.is_set():
+            logger.info("Search executor: cancelled, stopping ingestion")
+            break
+
         if isinstance(result, Exception):
             logger.warning("Search task %d failed: %s", i, result)
             continue
@@ -518,15 +534,16 @@ async def run_search_executor(state: dict) -> dict[str, int]:
             )
 
     # Mark only successfully searched expansion targets as fulfilled
-    for target_id in fulfilled_target_ids:
-        try:
-            corpus.conn.execute(
-                "UPDATE conditions SET expansion_fulfilled = TRUE "
-                "WHERE id = ? AND expansion_tool != 'none'",
-                [target_id],
-            )
-        except Exception:
-            pass
+    if not (cancel and cancel.is_set()):
+        for target_id in fulfilled_target_ids:
+            try:
+                corpus.conn.execute(
+                    "UPDATE conditions SET expansion_fulfilled = TRUE "
+                    "WHERE id = ? AND expansion_tool != 'none'",
+                    [target_id],
+                )
+            except Exception:
+                pass
 
     logger.info(
         "Search executor complete: %d searches, %d results, "

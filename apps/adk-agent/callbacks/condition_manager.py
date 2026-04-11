@@ -325,19 +325,30 @@ def search_executor_callback(
 
     # Run the automated search executor
     try:
+        import threading
         from tools.search_executor import run_search_executor
+
+        cancel_event = threading.Event()
 
         loop = asyncio.get_event_loop()
         if loop.is_running():
             import concurrent.futures
             pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             try:
-                future = pool.submit(asyncio.run, run_search_executor(state))
+                future = pool.submit(
+                    asyncio.run,
+                    run_search_executor(state, cancel=cancel_event),
+                )
                 stats = future.result(timeout=120)
             finally:
+                # Signal the worker to stop touching DuckDB before we
+                # proceed — prevents concurrent connection access.
+                cancel_event.set()
                 pool.shutdown(wait=False, cancel_futures=True)
         else:
-            stats = loop.run_until_complete(run_search_executor(state))
+            stats = loop.run_until_complete(
+                run_search_executor(state, cancel=cancel_event),
+            )
 
         logger.info("Search executor stats: %s", stats)
 
@@ -390,16 +401,13 @@ def maestro_condition_callback(
     if _c:
         try:
             total = corpus.count()
-            by_status = corpus.count_by_status()
-            _c.corpus_update(
-                total,
-                total,
-                state.get("_corpus_iteration", 0),
-            )
+            iteration = state.get("_corpus_iteration", 0)
+            # Pass 0 for admitted — the maestro organises existing
+            # conditions, it doesn't ingest new ones.
+            _c.corpus_update(0, total, iteration)
             _c.emit_event("maestro_complete", data={
                 "total_conditions": total,
-                "by_status": by_status,
-                "iteration": state.get("_corpus_iteration", 0),
+                "iteration": iteration,
             })
         except Exception:
             pass
