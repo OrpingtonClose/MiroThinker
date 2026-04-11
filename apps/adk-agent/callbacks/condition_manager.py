@@ -84,7 +84,7 @@ def _drain_search_queue(state: dict) -> int:
     total_admitted = 0
     for _key, text, source_type, iteration in mine:
         try:
-            admitted = _ingest_text_into_corpus(state, text, source_type)
+            admitted = _ingest_only(state, text, source_type)
             total_admitted += admitted
         except Exception:
             logger.warning(
@@ -100,12 +100,16 @@ def _drain_search_queue(state: dict) -> int:
     return total_admitted
 
 
-def _ingest_text_into_corpus(
+def _ingest_only(
     state: dict,
     text: str,
     source_type: str,
 ) -> int:
-    """Shared helper: atomise *text* and ingest into the session corpus.
+    """Atomise *text* and ingest into the corpus — no scoring or battery.
+
+    This is the lightweight ingestion path.  Scoring, dedup, and the
+    full algorithm battery should be run **once** after all ingestion
+    for the iteration is complete (see :func:`_score_and_battery`).
 
     Returns the number of newly admitted conditions.
     """
@@ -139,8 +143,26 @@ def _ingest_text_into_corpus(
         if _c:
             _c.corpus_update(admitted_count, total_count, iteration)
 
-    # Score & dedup
+    return admitted_count
+
+
+def _score_and_battery(state: dict) -> dict:
+    """Run scoring, dedup, and the full algorithm battery once.
+
+    Call this **after** all ingestion for the current iteration is
+    complete.  Previously this ran inside ``_ingest_text_into_corpus``
+    which was called per-source, causing N redundant battery runs
+    (each with hundreds of LLM calls) and making the pipeline appear
+    to hang.
+
+    Returns the battery results dict.
+    """
+    corpus = _get_corpus(state)
+    iteration = state.get("_corpus_iteration", 0)
     user_query = state.get("user_query", "")
+    _c = get_active_collector()
+
+    # Score & dedup
     scored = corpus.score_new_conditions(user_query)
     if scored:
         logger.info("Scored %d conditions via Flock", scored)
@@ -175,7 +197,26 @@ def _ingest_text_into_corpus(
             [t["strategy"] for t in expansion_targets[:5]],
         )
 
-    return admitted_count
+    return battery_results
+
+
+def _ingest_text_into_corpus(
+    state: dict,
+    text: str,
+    source_type: str,
+) -> int:
+    """Atomise, ingest, score, and run battery — legacy all-in-one path.
+
+    Only used by :func:`synthesis_condition_callback` where there is a
+    single ingestion per call.  The researcher path uses the split
+    :func:`_ingest_only` + :func:`_score_and_battery` to avoid
+    redundant battery runs.
+
+    Returns the number of newly admitted conditions.
+    """
+    admitted = _ingest_only(state, text, source_type)
+    _score_and_battery(state)
+    return admitted
 
 
 def researcher_condition_callback(
@@ -202,11 +243,19 @@ def researcher_condition_callback(
         state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
         return None
 
-    _ingest_text_into_corpus(state, findings_text, "researcher")
+    # Phase 1: Ingest all text (lightweight, no scoring or battery).
+    # Previously _ingest_text_into_corpus ran score+dedup+battery per
+    # source, causing N redundant battery runs (each with hundreds of
+    # LLM calls) that made the pipeline appear to hang.
+    _ingest_only(state, findings_text, "researcher")
 
     # Drain any search results queued by parallel after_tool_callbacks.
     # This is the single-threaded point where DuckDB access is safe.
     _drain_search_queue(state)
+
+    # Phase 2: Score, dedup, and run the algorithm battery ONCE for
+    # all conditions ingested in this iteration.
+    _score_and_battery(state)
 
     # Update state with structured corpus for thinker
     state["research_findings"] = corpus.format_for_thinker()
