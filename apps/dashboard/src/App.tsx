@@ -42,6 +42,8 @@ import type {
   RunListItem,
   RunDetail,
   ToolCall,
+  LLMCall,
+  CorpusUpdate,
   Phase,
   RawEvent,
 } from "./types";
@@ -520,6 +522,237 @@ function EventStream({ events, startedAt }: { events: RawEvent[]; startedAt: num
   );
 }
 
+// ── Live corpus growth chart (for live snapshot) ─────────────────
+function LiveCorpusChart({ updates }: { updates: CorpusUpdate[] }) {
+  if (!updates.length) return null;
+  const data = updates.map((u) => ({
+    name: `Iter ${u.iteration}`,
+    total: u.total,
+    admitted: u.admitted,
+  }));
+
+  return (
+    <div className="bg-gray-800/30 rounded-xl p-4 border border-gray-700/30">
+      <h3 className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
+        <Database size={16} className="text-purple-400" /> Corpus Growth
+      </h3>
+      <ResponsiveContainer width="100%" height={200}>
+        <AreaChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
+          <XAxis dataKey="name" tick={{ fill: "#8b949e", fontSize: 11 }} />
+          <YAxis tick={{ fill: "#8b949e", fontSize: 11 }} />
+          <Tooltip
+            contentStyle={{
+              background: "#161b22",
+              border: "1px solid #30363d",
+              borderRadius: 8,
+              color: "#e6edf3",
+            }}
+          />
+          <Area
+            type="monotone"
+            dataKey="total"
+            stroke={COLORS.purple}
+            fill={COLORS.purple}
+            fillOpacity={0.15}
+            name="Total atoms"
+          />
+          <Area
+            type="monotone"
+            dataKey="admitted"
+            stroke={COLORS.success}
+            fill={COLORS.success}
+            fillOpacity={0.15}
+            name="Admitted"
+          />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+// ── Live recent tool calls table ─────────────────────────────────
+function LiveToolCallsTable({ tools }: { tools: ToolCall[] }) {
+  if (!tools.length) return null;
+
+  return (
+    <div className="space-y-2">
+      <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2">
+        <Wrench size={16} className="text-yellow-400" /> Recent Tool Calls ({tools.length})
+      </h3>
+      <div className="overflow-x-auto rounded-lg bg-gray-900/50 border border-gray-700/30">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-gray-500 uppercase tracking-wider border-b border-gray-700/50">
+              <th className="py-2 px-3 text-left">Tool</th>
+              <th className="py-2 px-3 text-left">Agent</th>
+              <th className="py-2 px-3 text-right">Duration</th>
+              <th className="py-2 px-3 text-right">Result</th>
+              <th className="py-2 px-3 text-left">Flags</th>
+            </tr>
+          </thead>
+          <tbody>
+            {tools.map((t, i) => (
+              <tr
+                key={i}
+                className={`border-b border-gray-800/50 hover:bg-gray-800/30 ${
+                  t.error ? "bg-red-900/10" : ""
+                }`}
+              >
+                <td className="py-1.5 px-3">
+                  <code className="bg-gray-800 px-1.5 py-0.5 rounded text-blue-300">
+                    {t.tool_name}
+                  </code>
+                </td>
+                <td className="py-1.5 px-3 text-gray-400">{t.agent}</td>
+                <td className="py-1.5 px-3 text-right font-mono text-gray-300">
+                  {t.duration_secs.toFixed(2)}s
+                </td>
+                <td className="py-1.5 px-3 text-right text-gray-400">
+                  {(t.result_chars || 0).toLocaleString()}
+                </td>
+                <td className="py-1.5 px-3 flex gap-1 flex-wrap">
+                  {t.was_compressed && (
+                    <span className="bg-purple-500/20 text-purple-400 px-1.5 py-0.5 rounded text-xs">
+                      COMPRESSED
+                    </span>
+                  )}
+                  {t.error && (
+                    <span className="bg-red-500/20 text-red-400 px-1.5 py-0.5 rounded text-xs">
+                      {t.error.slice(0, 40)}
+                    </span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── Live recent LLM calls list ───────────────────────────────────
+function LiveLLMCallsList({ calls }: { calls: LLMCall[] }) {
+  if (!calls.length) return null;
+
+  return (
+    <div className="space-y-2">
+      <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2">
+        <Cpu size={16} className="text-blue-400" /> Recent LLM Calls ({calls.length})
+      </h3>
+      <div className="overflow-x-auto rounded-lg bg-gray-900/50 border border-gray-700/30">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-gray-500 uppercase tracking-wider border-b border-gray-700/50">
+              <th className="py-2 px-3 text-left">Agent</th>
+              <th className="py-2 px-3 text-right">Duration</th>
+              <th className="py-2 px-3 text-right">Completion Tokens</th>
+            </tr>
+          </thead>
+          <tbody>
+            {calls.map((c, i) => (
+              <tr
+                key={i}
+                className="border-b border-gray-800/50 hover:bg-gray-800/30"
+              >
+                <td className="py-1.5 px-3 text-blue-300 font-medium">{c.agent}</td>
+                <td className="py-1.5 px-3 text-right font-mono text-gray-300">
+                  {c.duration_secs.toFixed(2)}s
+                </td>
+                <td className="py-1.5 px-3 text-right text-gray-400">
+                  {(c.completion_tokens_est || 0).toLocaleString()}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── Live activity event feed ─────────────────────────────────────
+function LiveEventFeed({ events, startedAt }: { events: RawEvent[]; startedAt: number }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const display = expanded ? events.slice(-200) : events.slice(-30);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [display.length]);
+
+  const badgeColor = (type: string) => {
+    if (type.includes("tool")) return "bg-yellow-500/20 text-yellow-400";
+    if (type.includes("llm")) return "bg-blue-500/20 text-blue-400";
+    if (type.includes("phase")) return "bg-green-500/20 text-green-400";
+    if (type.includes("corpus")) return "bg-purple-500/20 text-purple-400";
+    if (type.includes("stall") || type.includes("force")) return "bg-red-500/20 text-red-400";
+    return "bg-gray-500/20 text-gray-400";
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2">
+          <Activity size={16} className="text-green-400" /> Activity Feed ({events.length})
+        </h3>
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="text-xs text-blue-400 hover:text-blue-300"
+        >
+          {expanded ? "Show last 30" : "Show last 200"}
+        </button>
+      </div>
+      <div
+        ref={scrollRef}
+        className="max-h-80 overflow-y-auto rounded-lg bg-gray-900/50 border border-gray-700/30"
+      >
+        <table className="w-full text-xs">
+          <thead className="sticky top-0 bg-gray-900">
+            <tr className="text-gray-500 uppercase tracking-wider border-b border-gray-700/50">
+              <th className="py-1.5 px-2 text-left w-20">Time</th>
+              <th className="py-1.5 px-2 text-left w-32">Event</th>
+              <th className="py-1.5 px-2 text-left w-24">Agent</th>
+              <th className="py-1.5 px-2 text-left w-24">Phase</th>
+              <th className="py-1.5 px-2 text-left">Data</th>
+            </tr>
+          </thead>
+          <tbody>
+            {display.map((e, i) => {
+              const ts = startedAt ? e.timestamp - startedAt : e.timestamp;
+              return (
+                <tr
+                  key={i}
+                  className="border-b border-gray-800/30 hover:bg-gray-800/20"
+                >
+                  <td className="py-1 px-2 font-mono text-gray-500">
+                    +{ts.toFixed(1)}s
+                  </td>
+                  <td className="py-1 px-2">
+                    <span
+                      className={`px-1.5 py-0.5 rounded text-xs font-medium ${badgeColor(e.event_type)}`}
+                    >
+                      {e.event_type}
+                    </span>
+                  </td>
+                  <td className="py-1 px-2 text-gray-400">{e.agent}</td>
+                  <td className="py-1 px-2 text-gray-500">{e.phase}</td>
+                  <td className="py-1 px-2 text-gray-500 max-w-md truncate font-mono">
+                    {JSON.stringify(e.data).slice(0, 120)}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ── Run history sidebar item ─────────────────────────────────────
 function RunItem({
   run,
@@ -727,6 +960,45 @@ function App() {
               </AlertBanner>
             )}
 
+            {/* Rate metrics bar */}
+            {snap && !isIdle && (snap.llm_per_min !== undefined || snap.tools_per_min !== undefined || snap.secs_since_activity !== undefined) && (
+              <div className="flex flex-wrap gap-3 text-xs">
+                {snap.llm_per_min !== undefined && (
+                  <div className="bg-blue-500/10 border border-blue-500/20 text-blue-400 px-3 py-1.5 rounded-lg flex items-center gap-1.5">
+                    <Cpu size={13} /> {snap.llm_per_min.toFixed(1)} LLM/min
+                  </div>
+                )}
+                {snap.tools_per_min !== undefined && (
+                  <div className="bg-yellow-500/10 border border-yellow-500/20 text-yellow-400 px-3 py-1.5 rounded-lg flex items-center gap-1.5">
+                    <Wrench size={13} /> {snap.tools_per_min.toFixed(1)} tools/min
+                  </div>
+                )}
+                {snap.secs_since_activity !== undefined && (
+                  <div className="bg-gray-700/50 border border-gray-600/30 text-gray-400 px-3 py-1.5 rounded-lg flex items-center gap-1.5">
+                    <Clock size={13} /> {snap.secs_since_activity.toFixed(1)}s since activity
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Pending operations indicator */}
+            {snap && !isIdle && ((snap.pending_tools?.length ?? 0) > 0 || (snap.pending_llm?.length ?? 0) > 0) && (
+              <div className="flex flex-wrap gap-2">
+                {snap.pending_llm?.map((id, i) => (
+                  <span key={`l-${i}`} className="inline-flex items-center gap-1.5 text-xs bg-blue-500/10 border border-blue-500/30 text-blue-400 px-2.5 py-1 rounded-full">
+                    <span className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" />
+                    LLM {id.slice(0, 8)}
+                  </span>
+                ))}
+                {snap.pending_tools?.map((name, i) => (
+                  <span key={`t-${i}`} className="inline-flex items-center gap-1.5 text-xs bg-yellow-500/10 border border-yellow-500/30 text-yellow-400 px-2.5 py-1 rounded-full">
+                    <span className="h-1.5 w-1.5 rounded-full bg-yellow-400 animate-pulse" />
+                    {name}
+                  </span>
+                ))}
+              </div>
+            )}
+
             {/* Pipeline Execution Graph */}
             {snap && !isIdle && (
               <div className="space-y-2">
@@ -742,10 +1014,10 @@ function App() {
               </div>
             )}
 
-            {/* KPI Grid */}
+            {/* KPI Grid — expanded to 8 cards on large screens */}
             {snap && !isIdle && (
               <>
-                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
                   <KPICard
                     label="Tool Calls"
                     value={snap.kpi?.tool_calls || 0}
@@ -778,20 +1050,54 @@ function App() {
                     subtitle="chars generated"
                   />
                   <KPICard
-                    label="Dedup Blocks"
-                    value={snap.kpi?.dedup_blocks || 0}
+                    label="Tool Errors"
+                    value={snap.kpi?.tool_errors || 0}
                     icon={<AlertTriangle size={18} />}
                     color={
-                      (snap.kpi?.dedup_blocks || 0) > 0
-                        ? COLORS.warning
+                      (snap.kpi?.tool_errors || 0) > 0
+                        ? COLORS.danger
                         : COLORS.muted
                     }
+                  />
+                  <KPICard
+                    label="Prompt Tokens"
+                    value={`${((snap.kpi?.prompt_tokens_est || 0) / 1000).toFixed(0)}K`}
+                    icon={<FileText size={18} />}
+                    color={COLORS.accent}
+                    subtitle="estimated"
+                  />
+                  <KPICard
+                    label="Completion"
+                    value={`${((snap.kpi?.completion_tokens_est || 0) / 1000).toFixed(0)}K`}
+                    icon={<FileText size={18} />}
+                    color={COLORS.success}
+                    subtitle="tokens est."
                   />
                 </div>
 
                 {/* Phase timeline */}
                 <PhaseTimeline phases={snap.phases || []} />
               </>
+            )}
+
+            {/* Corpus growth timeline */}
+            {snap && !isIdle && (snap.corpus_history?.length ?? 0) > 0 && (
+              <LiveCorpusChart updates={snap.corpus_history!} />
+            )}
+
+            {/* Recent tool calls table */}
+            {snap && !isIdle && (snap.recent_tools?.length ?? 0) > 0 && (
+              <LiveToolCallsTable tools={snap.recent_tools!} />
+            )}
+
+            {/* Recent LLM calls list */}
+            {snap && !isIdle && (snap.recent_llm?.length ?? 0) > 0 && (
+              <LiveLLMCallsList calls={snap.recent_llm!} />
+            )}
+
+            {/* Activity event feed */}
+            {snap && !isIdle && (snap.recent_events?.length ?? 0) > 0 && (
+              <LiveEventFeed events={snap.recent_events!} startedAt={snap.started_at || 0} />
             )}
           </>
         )}

@@ -31,6 +31,7 @@ The AG-UI endpoint is mounted at POST /  (root).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -254,8 +255,15 @@ class AGUIRunCollectorMiddleware(BaseHTTPMiddleware):
                         session_id,
                         elapsed,
                     )
-                unregister_collector(session_id)
-                set_active_collector(None)
+                # Keep the collector registered for a short grace period
+                # so the dashboard SSE stream has time to pick up the
+                # finalized snapshot before the in-memory source vanishes.
+                # Use a background task to avoid blocking the response.
+                async def _deferred_cleanup():
+                    await asyncio.sleep(5)
+                    unregister_collector(session_id)
+                    set_active_collector(None)
+                _bg = asyncio.create_task(_deferred_cleanup())  # prevent GC
 
         response.body_iterator = _finalizing_iterator()
         return response

@@ -5,24 +5,41 @@ import type { DashboardSnapshot } from "@/types/dashboard";
 
 export type ConnectionStatus = "connected" | "connecting" | "disconnected";
 
-// On localhost we can hit :8000 directly for real-time SSE.
-// On tunnel/deployed URLs only port 3000 is exposed, so we poll
-// the /agui/dashboard/latest JSON endpoint every second instead.
+/**
+ * Maximum consecutive SSE failures before switching to polling.
+ * SSE often fails over public internet (proxy buffering, tunnel timeouts)
+ * so we fall back to polling `/dashboard/latest` every second.
+ */
+const SSE_MAX_FAILURES = 3;
+const POLL_INTERVAL_MS = 1000;
+const SSE_RETRY_MS = 3000;
+
+/** Check if we are running on localhost (direct access to port 8000). */
 function isLocal(): boolean {
   if (typeof window === "undefined") return true;
   const h = window.location.hostname;
   return h === "localhost" || h === "127.0.0.1";
 }
 
+/**
+ * Derive the API base URL.
+ * Priority: env var > localhost direct > origin + /agui proxy prefix.
+ */
+function apiBase(): string {
+  if (typeof window === "undefined") return "http://localhost:8000";
+  const env = process.env.NEXT_PUBLIC_API_BASE_URL;
+  if (env) return env.replace(/\/+$/, "");
+  // On localhost hit :8000 directly; on tunnel/deployed go through /agui/ rewrite
+  if (isLocal()) return `http://${window.location.hostname}:8000`;
+  return `${window.location.origin}/agui`;
+}
+
 function sseUrl(): string {
-  if (typeof window === "undefined") return "http://localhost:8000/dashboard/stream";
-  return `http://${window.location.hostname}:8000/dashboard/stream`;
+  return `${apiBase()}/dashboard/stream`;
 }
 
 function pollUrl(): string {
-  if (typeof window === "undefined") return "http://localhost:8000/dashboard/latest";
-  if (isLocal()) return `http://${window.location.hostname}:8000/dashboard/latest`;
-  return `${window.location.origin}/agui/dashboard/latest`;
+  return `${apiBase()}/dashboard/latest`;
 }
 
 export function useDashboardSSE() {
@@ -31,6 +48,7 @@ export function useDashboardSSE() {
   const esRef = useRef<EventSource | null>(null);
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const sseFailures = useRef(0);
 
   const cleanup = useCallback(() => {
     if (retryRef.current) { clearTimeout(retryRef.current); retryRef.current = null; }
@@ -38,7 +56,7 @@ export function useDashboardSSE() {
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
   }, []);
 
-  // ── Polling mode (tunnel / deployed) ──────────────────────────
+  // ── Polling fallback (public internet / after SSE failures) ───
   const startPolling = useCallback(() => {
     cleanup();
     setStatus("connecting");
@@ -55,40 +73,63 @@ export function useDashboardSSE() {
       }
     };
     poll();
-    pollRef.current = setInterval(poll, 1000);
+    pollRef.current = setInterval(poll, POLL_INTERVAL_MS);
   }, [cleanup]);
 
-  // ── SSE mode (localhost) ──────────────────────────────────────
+  // ── SSE mode (primary) ────────────────────────────────────────
   const startSSE = useCallback(() => {
     cleanup();
     setStatus("connecting");
+
     const es = new EventSource(sseUrl());
     esRef.current = es;
-    es.onopen = () => setStatus("connected");
-    es.onmessage = (ev) => {
-      try {
-        setSnapshot(JSON.parse(ev.data) as DashboardSnapshot);
-        setStatus("connected");
-      } catch { /* ignore */ }
+
+    es.onopen = () => {
+      setStatus("connected");
+      sseFailures.current = 0;
     };
+
+    es.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data) as DashboardSnapshot;
+        setSnapshot(data);
+        setStatus("connected");
+        sseFailures.current = 0;
+      } catch {
+        // ignore parse errors
+      }
+    };
+
     es.onerror = () => {
+      setStatus("disconnected");
       es.close();
       esRef.current = null;
-      setStatus("disconnected");
-      retryRef.current = setTimeout(startSSE, 2000);
+
+      sseFailures.current += 1;
+
+      if (sseFailures.current >= SSE_MAX_FAILURES) {
+        // SSE keeps failing — switch to polling (common over public internet)
+        console.warn(
+          `[Dashboard] SSE failed ${sseFailures.current} times, switching to polling fallback`
+        );
+        startPolling();
+      } else {
+        retryRef.current = setTimeout(startSSE, SSE_RETRY_MS);
+      }
     };
-  }, [cleanup]);
+  }, [cleanup, startPolling]);
 
   // ── Boot ──────────────────────────────────────────────────────
   useEffect(() => {
-    if (isLocal()) startSSE(); else startPolling();
+    startSSE(); // always try SSE first, fall back to polling on failure
     return cleanup;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const reconnect = useCallback(() => {
-    if (isLocal()) startSSE(); else startPolling();
-  }, [startSSE, startPolling]);
+    sseFailures.current = 0;
+    startSSE(); // always try SSE first on manual reconnect
+  }, [startSSE]);
 
   return { snapshot, status, reconnect };
 }
