@@ -44,10 +44,6 @@ _TRUNCATABLE_TOOLS = {
     "scrape", "scrape_website", "firecrawl_scrape", "firecrawl_crawl",
     "crawling_exa", "web_search_exa", "web_search_advanced_exa",
     "brave_web_search", "brave_news_search",
-    # Bright Data scrape tools — full page content, same risk as firecrawl_scrape
-    "scrape_as_markdown", "scrape_as_html",
-    # Wikipedia read — full article content as markdown
-    "read",
 }
 
 # Search tools whose results should be ingested into the Flock corpus.
