@@ -2427,9 +2427,14 @@ class CorpusStore:
             if not line:
                 continue
 
-            # Dedup: skip exact-match facts already in the corpus
+            # Dedup: skip exact-match facts already in the corpus.
+            # Exclude row_type='raw' so we don't match the raw row
+            # just inserted earlier in this method (which would cause
+            # atoms to be silently dropped when the LLM returns text
+            # unchanged or on fallback paths).
             existing = self.conn.execute(
-                "SELECT id FROM conditions WHERE fact = ? LIMIT 1",
+                "SELECT id FROM conditions WHERE fact = ? "
+                "AND row_type != 'raw' LIMIT 1",
                 [line],
             ).fetchone()
             if existing:
