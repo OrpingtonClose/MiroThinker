@@ -428,7 +428,8 @@ async def run_search_executor(state: dict) -> dict[str, int]:
     }
 
     # Collect all search tasks
-    search_tasks: list[tuple[str, str, str]] = []  # (tool, query, source_type)
+    # (tool, query, source_type, target_id_or_None)
+    search_tasks: list[tuple[str, str, str, int | None]] = []
 
     # 1. Expansion targets from the corpus (quality/specificity gates)
     expansion_targets = corpus.get_expansion_targets()
@@ -436,7 +437,7 @@ async def run_search_executor(state: dict) -> dict[str, int]:
         tool = target.get("strategy", "brave_web_search")
         hint = target.get("hint", "")
         if hint:
-            search_tasks.append((tool, hint, f"expansion_{tool}"))
+            search_tasks.append((tool, hint, f"expansion_{tool}", target["id"]))
             stats["expansion_searches"] += 1
 
     # 2. Strategy queries from the thinker
@@ -451,7 +452,7 @@ async def run_search_executor(state: dict) -> dict[str, int]:
             "tavily_deep_research",
         ]
         tool = tools_cycle[idx % len(tools_cycle)]
-        search_tasks.append((tool, query, "strategy_search"))
+        search_tasks.append((tool, query, "strategy_search", None))
         stats["strategy_searches"] += 1
 
     if not search_tasks:
@@ -471,26 +472,30 @@ async def run_search_executor(state: dict) -> dict[str, int]:
 
     async def _bounded_search(
         tool: str, query: str, source_type: str,
-    ) -> tuple[str, str]:
+        target_id: int | None,
+    ) -> tuple[str, str, int | None]:
         async with semaphore:
             result = await _execute_single_search(tool, query)
-            return result, source_type
+            return result, source_type, target_id
 
     tasks = [
-        _bounded_search(tool, query, source_type)
-        for tool, query, source_type in search_tasks
+        _bounded_search(tool, query, source_type, target_id)
+        for tool, query, source_type, target_id in search_tasks
     ]
 
     start = time.monotonic()
     results = await asyncio.gather(*tasks, return_exceptions=True)
     elapsed = time.monotonic() - start
 
+    # Track which expansion target IDs had successful searches
+    fulfilled_target_ids: set[int] = set()
+
     # Ingest results into corpus
     for i, result in enumerate(results):
         if isinstance(result, Exception):
             logger.warning("Search task %d failed: %s", i, result)
             continue
-        text, source_type = result
+        text, source_type, target_id = result
         if not text or not text.strip():
             continue
 
@@ -504,18 +509,21 @@ async def run_search_executor(state: dict) -> dict[str, int]:
                 iteration=iteration,
             )
             stats["total_ingested"] += len(ids)
+            # Only mark as fulfilled if ingestion succeeded
+            if target_id is not None and ids:
+                fulfilled_target_ids.add(target_id)
         except Exception:
             logger.warning(
                 "Failed to ingest search result %d", i, exc_info=True,
             )
 
-    # Mark expansion targets as fulfilled
-    for target in expansion_targets[:6]:
+    # Mark only successfully searched expansion targets as fulfilled
+    for target_id in fulfilled_target_ids:
         try:
             corpus.conn.execute(
                 "UPDATE conditions SET expansion_fulfilled = TRUE "
                 "WHERE id = ? AND expansion_tool != 'none'",
-                [target["id"]],
+                [target_id],
             )
         except Exception:
             pass

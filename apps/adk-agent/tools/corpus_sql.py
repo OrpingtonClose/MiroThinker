@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import time
 
-from google.adk.tools import FunctionTool
+from google.adk.tools import FunctionTool, ToolContext
 
 logger = logging.getLogger(__name__)
 
@@ -38,22 +38,29 @@ _MAX_RESULT_ROWS = 200
 _MAX_CELL_CHARS = 500
 
 
-def _get_corpus_connection():
+def _get_corpus_connection(corpus_key: str = ""):
     """Get the DuckDB connection from the active CorpusStore.
 
     Returns the raw DuckDB connection so the maestro can execute
     arbitrary SQL including Flock functions.
+
+    Args:
+        corpus_key: Session-specific corpus key from state.  When provided,
+            looks up the exact CorpusStore for this session.  Falls back
+            to the most recently created store if the key is missing.
     """
     from callbacks.condition_manager import _corpus_stores
-    # Return the most recently created corpus store's connection
     if not _corpus_stores:
         return None
-    # Get the last store (most recent session)
+    # Prefer the session-specific corpus store
+    if corpus_key and corpus_key in _corpus_stores:
+        return _corpus_stores[corpus_key].conn
+    # Fallback: most recent store (single-session case)
     key = list(_corpus_stores.keys())[-1]
     return _corpus_stores[key].conn
 
 
-async def execute_flock_sql(query: str) -> str:
+async def execute_flock_sql(query: str, tool_context: ToolContext) -> str:
     """Execute arbitrary SQL/Flock on the corpus DuckDB database.
 
     You have UNRESTRICTED access to the corpus.  The ``conditions``
@@ -91,7 +98,8 @@ async def execute_flock_sql(query: str) -> str:
     Returns:
         Query results as formatted text.
     """
-    conn = _get_corpus_connection()
+    corpus_key = tool_context.state.get("_corpus_key", "")
+    conn = _get_corpus_connection(corpus_key)
     if conn is None:
         return "[ERROR] No active corpus connection. The pipeline must be running."
 
