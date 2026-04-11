@@ -258,9 +258,12 @@ class AGUIRunCollectorMiddleware(BaseHTTPMiddleware):
                 # Keep the collector registered for a short grace period
                 # so the dashboard SSE stream has time to pick up the
                 # finalized snapshot before the in-memory source vanishes.
-                await asyncio.sleep(5)
-                unregister_collector(session_id)
-                set_active_collector(None)
+                # Use a background task to avoid blocking the response.
+                async def _deferred_cleanup():
+                    await asyncio.sleep(5)
+                    unregister_collector(session_id)
+                    set_active_collector(None)
+                asyncio.create_task(_deferred_cleanup())
 
         response.body_iterator = _finalizing_iterator()
         return response
