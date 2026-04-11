@@ -263,7 +263,7 @@ class AGUIRunCollectorMiddleware(BaseHTTPMiddleware):
                     await asyncio.sleep(5)
                     unregister_collector(session_id)
                     set_active_collector(None)
-                asyncio.create_task(_deferred_cleanup())
+                _bg = asyncio.create_task(_deferred_cleanup())  # prevent GC
 
         response.body_iterator = _finalizing_iterator()
         return response

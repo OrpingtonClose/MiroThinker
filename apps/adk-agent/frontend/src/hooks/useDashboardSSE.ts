@@ -14,12 +14,24 @@ const SSE_MAX_FAILURES = 3;
 const POLL_INTERVAL_MS = 1000;
 const SSE_RETRY_MS = 3000;
 
-/** Derive the API base URL from env or the current page origin. */
+/** Check if we are running on localhost (direct access to port 8000). */
+function isLocal(): boolean {
+  if (typeof window === "undefined") return true;
+  const h = window.location.hostname;
+  return h === "localhost" || h === "127.0.0.1";
+}
+
+/**
+ * Derive the API base URL.
+ * Priority: env var > localhost direct > origin + /agui proxy prefix.
+ */
 function apiBase(): string {
   if (typeof window === "undefined") return "http://localhost:8000";
   const env = process.env.NEXT_PUBLIC_API_BASE_URL;
   if (env) return env.replace(/\/+$/, "");
-  return window.location.origin;
+  // On localhost hit :8000 directly; on tunnel/deployed go through /agui/ rewrite
+  if (isLocal()) return `http://${window.location.hostname}:8000`;
+  return `${window.location.origin}/agui`;
 }
 
 function sseUrl(): string {
