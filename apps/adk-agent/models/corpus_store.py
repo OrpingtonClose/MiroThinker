@@ -1190,7 +1190,7 @@ class CorpusStore:
             return 0
         self.conn.execute(
             """UPDATE conditions
-               SET staleness_penalty = MIN(
+               SET staleness_penalty = LEAST(
                    0.10,
                    0.02 * (? - iteration)
                )
