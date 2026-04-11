@@ -67,9 +67,12 @@ _SEARCH_TOOLS: dict[str, str] = {
     "get_paper_references": "semantic_scholar",
     "ss_search_papers": "semantic_scholar",
     "ss_get_paper": "semantic_scholar",
+    "ss_get_paper_citations": "semantic_scholar",
+    "ss_get_paper_references": "semantic_scholar",
     "search_by_category": "arxiv",
     "arxiv_search_papers": "arxiv",
     "arxiv_get_paper": "arxiv",
+    "arxiv_search_by_category": "arxiv",
     # Wikipedia — prefixed to avoid collision with generic MCP tool names
     "wikipedia_search": "wikipedia_search",
     "wikipedia_read": "wikipedia_read",
