@@ -226,6 +226,10 @@ def researcher_condition_callback(
 
     Reads ``state["research_findings"]``, ingests via Flock atomisation,
     and updates state with formatted corpus.
+
+    .. deprecated::
+        Kept for backward compatibility.  The new maestro architecture
+        uses :func:`search_executor_callback` + :func:`maestro_condition_callback`.
     """
     state = callback_context.state
 
@@ -283,6 +287,149 @@ def researcher_condition_callback(
     state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
 
     return None  # preserve original researcher output
+
+
+# ---------------------------------------------------------------------------
+# Search Executor callback (new maestro architecture)
+# ---------------------------------------------------------------------------
+
+def search_executor_callback(
+    callback_context: CallbackContext,
+) -> Optional[genai_types.Content]:
+    """Before-agent callback: run the automated search executor.
+
+    Reads expansion targets from the corpus table and the thinker's
+    research strategy, programmatically fires search APIs (no LLM),
+    and ingests results into the corpus.
+
+    This replaces the researcher's search responsibility.  Runs as a
+    before_agent_callback on the maestro so searches complete before
+    the maestro starts organising.
+    """
+    import asyncio
+
+    state = callback_context.state
+    corpus = _get_corpus(state)
+    _c = get_active_collector()
+
+    # Set tracing context
+    iteration = state.get("_corpus_iteration", 0)
+    if _c:
+        corpus.set_trace_context(
+            session_id=_c.session_id,
+            iteration=iteration,
+        )
+
+    # Drain any queued search results from previous tool callbacks
+    _drain_search_queue(state)
+
+    # Run the automated search executor
+    try:
+        import threading
+        from tools.search_executor import run_search_executor
+
+        cancel_event = threading.Event()
+
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            timed_out = False
+            try:
+                future = pool.submit(
+                    asyncio.run,
+                    run_search_executor(state, cancel=cancel_event),
+                )
+                stats = future.result(timeout=120)
+            except concurrent.futures.TimeoutError:
+                timed_out = True
+                logger.warning("Search executor timed out after 120s")
+                # Signal the worker to stop touching DuckDB.
+                cancel_event.set()
+                # Wait briefly for the worker to finish its current
+                # DuckDB call and honour the cancel flag.  This
+                # prevents concurrent DuckDB access on the main thread.
+                try:
+                    future.result(timeout=5)
+                except (concurrent.futures.TimeoutError, Exception):
+                    pass
+                stats = {"timed_out": True}
+            finally:
+                if not timed_out:
+                    cancel_event.set()
+                pool.shutdown(wait=False, cancel_futures=True)
+        else:
+            stats = loop.run_until_complete(
+                run_search_executor(state, cancel=cancel_event),
+            )
+
+        logger.info("Search executor stats: %s", stats)
+
+        # Emit search executor stats to dashboard
+        if _c and isinstance(stats, dict):
+            _c.emit_event("search_executor", data=stats)
+
+    except Exception as exc:
+        logger.warning("Search executor failed (non-fatal): %s", exc, exc_info=True)
+
+    # Update state with current corpus for the maestro
+    state["research_findings"] = corpus.format_for_thinker()
+    state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Maestro callback (new maestro architecture)
+# ---------------------------------------------------------------------------
+
+def maestro_condition_callback(
+    callback_context: CallbackContext,
+) -> Optional[genai_types.Content]:
+    """After-agent callback for the maestro: refresh corpus state.
+
+    The maestro has already modified the corpus directly via
+    ``execute_flock_sql()``.  This callback:
+
+    1. Drains any remaining search results from tool callbacks
+    2. Refreshes state with the updated corpus for the thinker
+    3. Advances the iteration counter
+
+    Unlike the old researcher callback, this does NOT run the algorithm
+    battery — the maestro IS the battery (it runs whatever Flock
+    operations it decides are needed).
+    """
+    state = callback_context.state
+    corpus = _get_corpus(state)
+    _c = get_active_collector()
+
+    # Drain any remaining queued search results
+    _drain_search_queue(state)
+
+    # Update state with the maestro-organised corpus
+    state["research_findings"] = corpus.format_for_thinker()
+    state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
+
+    # Emit corpus stats to dashboard
+    if _c:
+        try:
+            total = corpus.count()
+            iteration = state.get("_corpus_iteration", 0)
+            # Pass 0 for admitted — the maestro organises existing
+            # conditions, it doesn't ingest new ones.
+            _c.corpus_update(0, total, iteration)
+            _c.emit_event("maestro_complete", data={
+                "total_conditions": total,
+                "iteration": iteration,
+            })
+        except Exception:
+            pass
+
+    # Advance iteration at the loop boundary — the maestro is the last
+    # agent in each LoopAgent iteration.
+    state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
+
+    return None  # preserve maestro output
 
 
 # ---------------------------------------------------------------------------

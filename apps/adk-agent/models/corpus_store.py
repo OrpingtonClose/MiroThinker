@@ -1071,7 +1071,7 @@ class CorpusStore:
             return 0
         self.conn.execute(
             """UPDATE conditions
-               SET expansion_tool = 'exa_search',
+               SET expansion_tool = 'web_search_advanced_exa',
                    expansion_hint = 'Low composite quality ('
                        || ROUND(composite_quality, 2) || ') — '
                        || 'search for more specific data on: '
@@ -1110,7 +1110,7 @@ class CorpusStore:
             return 0
         self.conn.execute(
             """UPDATE conditions
-               SET expansion_tool = 'brave_deep',
+               SET expansion_tool = 'brave_web_search',
                    expansion_hint = 'Vague finding — search for '
                        || 'specific names/numbers/dates: '
                        || SUBSTR(fact, 1, 120)
