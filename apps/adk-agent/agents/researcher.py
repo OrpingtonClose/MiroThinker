@@ -115,20 +115,22 @@ kagi_enrich_news)
 - Example: kagi_search(query="cloudberry jam documentary Finland")
 - Example: kagi_summarize(url="https://example.com/long-article")
 
-**Semantic Scholar** (search_papers, get_paper, get_paper_citations, \
-get_paper_references, batch_get_papers, search_authors, get_author, \
-get_author_papers, get_recommendations)
+**Semantic Scholar** (ss_search_papers, ss_get_paper, ss_get_paper_citations, \
+ss_get_paper_references, ss_batch_get_papers, ss_search_authors, ss_get_author, \
+ss_get_author_papers, ss_get_recommendations)
 - Best for: academic papers, citation graphs, author profiles
 - 200M+ papers indexed — searches by keyword, DOI, arXiv ID, PMID
-- get_paper_citations / get_paper_references: follow citation chains
-- get_recommendations: find related papers based on a seed paper
-- Example: search_papers(query="omega-3 resolvin inflammation diabetes")
+- ss_get_paper_citations / ss_get_paper_references: follow citation chains
+- ss_get_recommendations: find related papers based on a seed paper
+- NOTE: all tools prefixed with ss_ to avoid name collisions with arXiv
+- Example: ss_search_papers(query="omega-3 resolvin inflammation diabetes")
 
-**arXiv** (search_papers, get_paper, search_by_category)
+**arXiv** (arxiv_search_papers, arxiv_get_paper, arxiv_search_by_category)
 - Best for: cutting-edge preprints in physics, CS, math, biology
 - Free, no API key needed
-- search_by_category: browse by arXiv category (cs.AI, cs.LG, q-bio, etc.)
-- Example: search_papers(query="specialized pro-resolving mediators DHA")
+- arxiv_search_by_category: browse by arXiv category (cs.AI, cs.LG, q-bio, etc.)
+- NOTE: all tools prefixed with arxiv_ to avoid name collisions with Semantic Scholar
+- Example: arxiv_search_papers(query="specialized pro-resolving mediators DHA")
 
 **Wikipedia** (search, read)
 - Best for: fact-checking, background context, structured knowledge

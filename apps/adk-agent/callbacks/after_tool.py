@@ -44,6 +44,10 @@ _TRUNCATABLE_TOOLS = {
     "scrape", "scrape_website", "firecrawl_scrape", "firecrawl_crawl",
     "crawling_exa", "web_search_exa", "web_search_advanced_exa",
     "brave_web_search", "brave_news_search",
+    # Bright Data scrape tools — full page content, same risk as firecrawl_scrape
+    "scrape_as_markdown", "scrape_as_html",
+    # Wikipedia read — full article content as markdown
+    "read",
 }
 
 # Search tools whose results should be ingested into the Flock corpus.
@@ -60,20 +64,26 @@ _SEARCH_TOOLS: dict[str, str] = {
     "firecrawl_scrape": "firecrawl_scrape",
     "firecrawl_crawl": "firecrawl_crawl",
     "firecrawl_search": "firecrawl_search",
-    # Academic & reference
+    # Academic & reference (both unprefixed and prefixed names)
     "search_papers": "semantic_scholar",
     "get_paper": "semantic_scholar",
     "get_paper_citations": "semantic_scholar",
     "get_paper_references": "semantic_scholar",
+    "ss_search_papers": "semantic_scholar",
+    "ss_get_paper": "semantic_scholar",
     "search_by_category": "arxiv",
-    # Wikipedia — NOTE: bare "search"/"read" names removed because they
-    # collide with tools from other MCP servers.  Wikipedia results are
-    # ingested via the search executor's automated path instead.
+    "arxiv_search_papers": "arxiv",
+    "arxiv_get_paper": "arxiv",
+    # Wikipedia — prefixed to avoid collision with generic MCP tool names
     "wikipedia_search": "wikipedia_search",
     "wikipedia_read": "wikipedia_read",
-    # Bright Data
+    "wiki_search": "wikipedia_search",
+    "wiki_read": "wikipedia_read",
+    # Bright Data (both unprefixed and prefixed)
     "search_engine": "brightdata_search",
     "scrape_as_markdown": "brightdata_scrape",
+    "bd_search_engine": "brightdata_search",
+    "bd_scrape_as_markdown": "brightdata_scrape",
     # Deep research tools
     "perplexity_deep_research": "perplexity_deep",
     "grok_deep_research": "grok_deep",

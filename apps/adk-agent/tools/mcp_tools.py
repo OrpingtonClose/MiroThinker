@@ -356,6 +356,15 @@ _BROWSER_TOOLS = [
 _active_toolsets: List[MCPToolset] = []
 
 
+# Prefixes to namespace tools from MCP servers whose tool names collide.
+# e.g. Semantic Scholar and arXiv both expose "search_papers" and "get_paper".
+# With prefixes, they become "ss_search_papers" and "arxiv_search_papers".
+_TOOL_NAME_PREFIXES: dict[str, str] = {
+    "semantic-scholar": "ss_",
+    "arxiv": "arxiv_",
+}
+
+
 def get_tools(tool_names: List[str]):
     """
     Return a list of ADK tool instances for the requested tool config names.
@@ -363,6 +372,11 @@ def get_tools(tool_names: List[str]):
     All tools in ``_TOOL_CONFIGS`` (including ``"brave-search"`` and
     ``"firecrawl"``) are created as ``MCPToolset`` instances that
     auto-discover their tools from the official MCP servers.
+
+    Servers listed in ``_TOOL_NAME_PREFIXES`` get their tool names
+    prefixed to avoid collisions (e.g. Semantic Scholar and arXiv both
+    expose ``search_papers`` — prefixes make them ``ss_search_papers``
+    and ``arxiv_search_papers``).
 
     Args:
         tool_names: List of config names such as ``"brave-search"``,
@@ -377,8 +391,12 @@ def get_tools(tool_names: List[str]):
             tools.extend(_BROWSER_TOOLS)
         elif name in _TOOL_CONFIGS:
             server_params = _TOOL_CONFIGS[name]()
+            prefix = _TOOL_NAME_PREFIXES.get(name)
             toolset = MCPToolset(
                 connection_params=server_params,
+                **({
+                    "tool_name_prefix": prefix,
+                } if prefix else {}),
             )
             _active_toolsets.append(toolset)
             tools.append(toolset)
