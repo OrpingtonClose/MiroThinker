@@ -334,16 +334,28 @@ def search_executor_callback(
         if loop.is_running():
             import concurrent.futures
             pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            timed_out = False
             try:
                 future = pool.submit(
                     asyncio.run,
                     run_search_executor(state, cancel=cancel_event),
                 )
                 stats = future.result(timeout=120)
-            finally:
-                # Signal the worker to stop touching DuckDB before we
-                # proceed — prevents concurrent connection access.
+            except concurrent.futures.TimeoutError:
+                timed_out = True
+                logger.warning("Search executor timed out after 120s")
+                # Signal the worker to stop touching DuckDB.
                 cancel_event.set()
+                # Wait briefly for the worker to finish its current
+                # DuckDB call and honour the cancel flag.  This
+                # prevents concurrent DuckDB access on the main thread.
+                try:
+                    future.result(timeout=5)
+                except (concurrent.futures.TimeoutError, Exception):
+                    pass
+            finally:
+                if not timed_out:
+                    cancel_event.set()
                 pool.shutdown(wait=False, cancel_futures=True)
         else:
             stats = loop.run_until_complete(

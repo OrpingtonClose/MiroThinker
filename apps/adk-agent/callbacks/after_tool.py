@@ -66,9 +66,11 @@ _SEARCH_TOOLS: dict[str, str] = {
     "get_paper_citations": "semantic_scholar",
     "get_paper_references": "semantic_scholar",
     "search_by_category": "arxiv",
-    # Wikipedia
-    "search": "wikipedia_search",
-    "read": "wikipedia_read",
+    # Wikipedia — NOTE: bare "search"/"read" names removed because they
+    # collide with tools from other MCP servers.  Wikipedia results are
+    # ingested via the search executor's automated path instead.
+    "wikipedia_search": "wikipedia_search",
+    "wikipedia_read": "wikipedia_read",
     # Bright Data
     "search_engine": "brightdata_search",
     "scrape_as_markdown": "brightdata_scrape",
