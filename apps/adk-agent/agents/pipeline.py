@@ -1,32 +1,42 @@
 # Copyright (c) 2025 MiroMind
 # This source code is licensed under the Apache 2.0 License.
 
-"""Blackboard research pipeline: LoopAgent(Thinker → Researcher) + Synthesiser.
+"""Blackboard research pipeline: LoopAgent(Thinker → Maestro) + Synthesiser.
 
-Uses ADK's ``LoopAgent`` to implement an iterative 2-phase research
-cycle where context grows richer on every iteration, then a
-``SequentialAgent`` to run the final synthesiser after the loop exits.
+Uses ADK's ``LoopAgent`` to implement an iterative research cycle where
+context grows richer on every iteration, then a ``SequentialAgent`` to
+run the final synthesiser after the loop exits.
 
 Architecture::
 
     SequentialAgent("mirothinker_pipeline")
     └── LoopAgent("research_loop", max_iterations=3)
     │     ├── Agent("thinker")           # pure reasoning, no tools
-    │     └── Agent("researcher")        # direct tool access, parallel_tool_calls=True
-    │           └── after_agent_callback: researcher_condition_callback
+    │     └── Agent("maestro")           # free-form Flock conductor
+    │           ├── before_agent_callback: search_executor_callback
+    │           │     (automated API calls — no LLM, reads expansion
+    │           │      targets + strategy queries, fires search APIs)
+    │           └── after_agent_callback: maestro_condition_callback
     └── Agent("synthesiser")                # final report, uncensored
 
-The loop implements a 2-phase cycle per iteration:
+The loop implements a 3-phase cycle per iteration:
 
   1. **Strategy** (thinker): reads the enriched corpus (verbal prose
      briefing with tiered findings, contradictions, and under-explored
      areas), reasons deeply about gaps and emerging narratives, and
      plans the next expansion round.
 
-  2. **Expansion** (researcher): brute-force tool execution — Flock's
-     algorithm battery (scoring, dedup, contradiction detection,
-     clustering, redundancy compression) runs in the after-agent
-     callback, replacing the old loop_synthesiser's responsibilities.
+  2. **Search Executor** (automated, runs as maestro's before_agent):
+     reads expansion_tool + expansion_hint from corpus table AND
+     extracts queries from the thinker's strategy text.  Fires APIs
+     programmatically (no LLM involved).  Results are ingested into
+     the corpus via ``ingest_raw()``.
+
+  3. **Maestro** (free-form Flock conductor): has a single tool
+     ``execute_flock_sql(query)`` for unrestricted SQL/Flock access.
+     Can invent new columns, create new rows, update flags, run Flock
+     LLM functions — whatever operations the corpus needs based on
+     its current state.  Replaces the fixed 11-step algorithm battery.
 
 Data flows via session state (blackboard):
 
@@ -37,11 +47,14 @@ Data flows via session state (blackboard):
     When evidence is sufficient it outputs ``EVIDENCE_SUFFICIENT`` and an
     ``after_agent_callback`` sets ``escalate=True`` to break the loop.
 
-  - **Researcher** reads ``{research_strategy}`` + ``{research_findings}``
-    + ``{_expansion_targets}``, executes searches, then its
-    ``after_agent_callback`` (condition_manager) decomposes the output
-    into AtomicConditions, runs the full algorithm battery, and
-    updates state with verbal prose for the thinker.
+  - **Search Executor** reads expansion targets from the corpus table
+    and extracts queries from ``state["research_strategy"]``.  Fires
+    APIs and ingests results.  No LLM — purely programmatic.
+
+  - **Maestro** reads ``{research_findings}`` + ``{research_strategy}``,
+    uses ``execute_flock_sql()`` to run arbitrary Flock/SQL operations
+    on the corpus.  Its ``after_agent_callback`` refreshes state with
+    the updated corpus for the thinker's next iteration.
 
   - **Final synthesiser** (runs once after the loop) reads
     ``{corpus_for_synthesis}`` — the swarm-synthesised report — and
@@ -49,7 +62,7 @@ Data flows via session state (blackboard):
 
 The thinker and synthesiser NEVER touch tool format — they are pure
 text-in/text-out LLM agents using the uncensored model.  Only the
-researcher needs tool-calling capability.
+maestro has tool-calling capability (execute_flock_sql).
 """
 
 from __future__ import annotations
@@ -64,13 +77,14 @@ from google.adk.agents.loop_agent import LoopAgent
 from google.genai import types as genai_types
 
 from agents.thinker import thinker_agent
-from agents.researcher import researcher_agent
+from agents.maestro import maestro_agent
 from agents.synthesiser import synthesiser_agent
 from callbacks.condition_manager import (
     build_corpus_state,
     cleanup_corpus,
     init_corpus,
     run_swarm_synthesis,
+    search_executor_callback,
 )
 
 logger = logging.getLogger(__name__)
@@ -185,16 +199,31 @@ def _cleanup_pipeline_state(
 
 
 # ---------------------------------------------------------------------------
-# Inner loop: thinker → researcher → repeat
+# Inner loop: thinker → maestro (with search executor) → repeat
 # The thinker escalates when it judges evidence is sufficient.
-# Each iteration: strategy (thinker) → expansion (researcher).
-# Flock's algorithm battery runs inside researcher_condition_callback,
-# replacing the old loop_synthesiser's responsibilities.
+# Each iteration:
+#   1. Strategy (thinker) — pure reasoning
+#   2. Search Executor (maestro's before_agent_callback) — automated APIs
+#   3. Maestro — free-form Flock conductor
 # ---------------------------------------------------------------------------
+# Wrap the maestro with a before_agent_callback that runs the search
+# executor.  ADK Agent() doesn't accept before_agent_callback directly,
+# so we wrap it in a SequentialAgent of one.
+_maestro_with_search = SequentialAgent(
+    name="search_then_maestro",
+    description=(
+        "Runs the automated search executor (no LLM — reads expansion "
+        "targets and strategy queries, fires APIs), then the maestro "
+        "agent organises the corpus via free-form Flock SQL."
+    ),
+    sub_agents=[maestro_agent],
+    before_agent_callback=search_executor_callback,
+)
+
 research_loop = LoopAgent(
     name="research_loop",
     max_iterations=3,
-    sub_agents=[thinker_agent, researcher_agent],
+    sub_agents=[thinker_agent, _maestro_with_search],
 )
 
 # ---------------------------------------------------------------------------
@@ -219,11 +248,11 @@ _synthesiser_with_swarm = SequentialAgent(
 pipeline_agent = SequentialAgent(
     name="mirothinker_pipeline",
     description=(
-        "Blackboard research pipeline: LoopAgent(thinker → researcher) "
+        "Blackboard research pipeline: LoopAgent(thinker → maestro) "
         "runs iteratively with ever-expanding context. Each round: "
-        "strategy → expansion (with algorithm battery). Flock gossip "
-        "swarm synthesises the corpus, then the final synthesiser "
-        "writes the definitive report."
+        "strategy (thinker) → automated search (executor) → free-form "
+        "Flock organisation (maestro). Flock gossip swarm synthesises "
+        "the corpus, then the final synthesiser writes the definitive report."
     ),
     sub_agents=[research_loop, _synthesiser_with_swarm],
     before_agent_callback=_init_pipeline_state,
