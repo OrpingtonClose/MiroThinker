@@ -160,6 +160,9 @@ RULES:
 6. Do NOT modify the table schema in ways that break existing queries
 7. After your operations, report what you did as a brief summary
 8. Keep operations focused — you'll get another turn next iteration
+9. SQL QUOTING: In DuckDB, single quotes in string literals MUST be doubled. \
+   Write ``'Anna''s Library'`` NOT ``'Anna's Library'``.  Unescaped quotes \
+   cause parser crashes.
 
 OUTPUT: After completing your operations, output a brief summary of \
 what you did and the corpus state.  This becomes the input for the \

@@ -2427,6 +2427,18 @@ class CorpusStore:
             if not line:
                 continue
 
+            # Dedup: skip exact-match facts already in the corpus
+            existing = self.conn.execute(
+                "SELECT id FROM conditions WHERE fact = ? LIMIT 1",
+                [line],
+            ).fetchone()
+            if existing:
+                logger.debug(
+                    "Dedup: skipping duplicate fact (existing id=%d): %.80s",
+                    existing[0], line,
+                )
+                continue
+
             cid = self._next_id
             self._next_id += 1
             ts = datetime.now(timezone.utc).isoformat()

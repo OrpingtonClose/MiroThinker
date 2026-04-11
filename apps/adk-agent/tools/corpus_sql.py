@@ -26,6 +26,7 @@ not any shared database.  Each pipeline run gets its own file.
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from google.adk.tools import FunctionTool, ToolContext
@@ -36,6 +37,40 @@ logger = logging.getLogger(__name__)
 _MAX_RESULT_ROWS = 200
 # Maximum chars per cell in the result (prevents huge text fields)
 _MAX_CELL_CHARS = 500
+
+
+def _fix_unescaped_quotes(query: str) -> str:
+    """Fix unescaped single quotes inside SQL string literals.
+
+    LLMs routinely generate ``WHERE fact ILIKE '%Anna's Library%'``
+    instead of the correct ``'%Anna''s Library%'``.  The Flock DuckDB
+    extension's parser crashes catastrophically on this — instead of
+    a normal syntax error it emits ``Unknown keyword: SELECT``.
+
+    Strategy: walk the query character-by-character, tracking whether
+    we are inside a string literal.  When we encounter a single quote
+    that is preceded and followed by word characters (i.e. it looks
+    like an apostrophe inside a word), double it.
+    """
+    if "'" not in query:
+        return query
+
+    # We operate on the raw characters.  The idea:
+    # A quote that is NOT at a string-literal boundary (open/close)
+    # but sits between two word-like characters is an unescaped
+    # apostrophe and needs doubling.
+    #
+    # Heuristic: replace pattern  letter'letter  with  letter''letter
+    # inside SQL string bodies.  This handles  Anna's  →  Anna''s
+    # while leaving real SQL quote boundaries alone.
+    fixed = re.sub(
+        r"([A-Za-z])'([A-Za-z])",
+        r"\1''\2",
+        query,
+    )
+    if fixed != query:
+        logger.debug("Fixed unescaped quotes in SQL: %s → %s", query[:200], fixed[:200])
+    return fixed
 
 
 def _get_corpus_connection(corpus_key: str = ""):
@@ -102,6 +137,9 @@ async def execute_flock_sql(query: str, tool_context: ToolContext) -> str:
     conn = _get_corpus_connection(corpus_key)
     if conn is None:
         return "[ERROR] No active corpus connection. The pipeline must be running."
+
+    # Fix unescaped single quotes (LLMs write Anna's not Anna''s)
+    query = _fix_unescaped_quotes(query)
 
     start = time.monotonic()
     try:

@@ -241,6 +241,37 @@ async def _search_perplexity(query: str) -> str:
         return ""
 
 
+async def _search_jina(query: str) -> str:
+    """Execute a Jina reader search and return formatted results."""
+    if not _JINA_API_KEY:
+        return ""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                f"https://s.jina.ai/{query}",
+                headers={
+                    "Authorization": f"Bearer {_JINA_API_KEY}",
+                    "Accept": "application/json",
+                    "X-Return-Format": "text",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            results = data.get("data", [])
+            if not results:
+                return ""
+            lines = [f"Jina search: {query}"]
+            for r in results[:5]:
+                title = r.get("title", "")
+                url = r.get("url", "")
+                content = r.get("content", "")[:500]
+                lines.append(f"- {title} [{url}]: {content}")
+            return "\n".join(lines)
+    except Exception as exc:
+        logger.warning("Jina search failed for '%s': %s", query[:60], exc)
+        return ""
+
+
 async def _search_mojeek(query: str, num_results: int = 5) -> str:
     """Execute a Mojeek search and return formatted results."""
     if not _MOJEEK_API_KEY:
@@ -298,16 +329,20 @@ _TOOL_DISPATCH: dict[str, Any] = {
     "perplexity_deep_research": _search_perplexity,
     # Mojeek
     "mojeek_search": _search_mojeek,
+    # Jina
+    "jina_search": _search_jina,
+    "jina_reader": _search_jina,
 }
 
 # Fallback search order when the specified tool isn't available
 _FALLBACK_ORDER = [
     _search_exa,
     _search_brave,
-    _search_kagi,
     _search_tavily,
+    _search_jina,
     _search_mojeek,
     _search_perplexity,
+    _search_kagi,
 ]
 
 
@@ -337,9 +372,17 @@ async def _execute_single_search(
 # Strategy query extraction
 # ---------------------------------------------------------------------------
 
+# Patterns that extract explicit search queries from the thinker's
+# strategy.  ORDER MATTERS — explicit "SEARCH_QUERY:" markers are
+# checked first, then verb-based patterns, then numbered lists last
+# (numbered lists are noisy and often pick up meta-instructions).
 _QUERY_PATTERNS = [
-    # "Search for X" / "search X"
-    re.compile(r"[Ss]earch\s+(?:for\s+)?['\"]?(.+?)['\"]?\s*(?:\.|$)", re.M),
+    # Explicit marker: "SEARCH_QUERY: ..." or "QUERY: ..."
+    re.compile(r"(?:SEARCH_)?QUERY:\s*['\"]?(.+?)['\"]?\s*$", re.M),
+    # Quoted queries: "search for 'X'" / search for "X"
+    re.compile(r"[Ss]earch\s+(?:for\s+)?['\"](.+?)['\"]\s*(?:\.|$)", re.M),
+    # "Search for X" (unquoted)
+    re.compile(r"[Ss]earch\s+(?:for\s+)?(.+?)\s*(?:\.|$)", re.M),
     # "Look up X" / "look into X"
     re.compile(r"[Ll]ook\s+(?:up|into)\s+['\"]?(.+?)['\"]?\s*(?:\.|$)", re.M),
     # "Find X" / "find information about X"
@@ -351,8 +394,22 @@ _QUERY_PATTERNS = [
     re.compile(r"[Ii]nvestigate\s+['\"]?(.+?)['\"]?\s*(?:\.|$)", re.M),
     # "Research X"
     re.compile(r"[Rr]esearch\s+['\"]?(.+?)['\"]?\s*(?:\.|$)", re.M),
-    # Numbered list items: "1. Query text" / "- Query text"
+    # Numbered list items: "1. Query text" — ONLY if short and looks
+    # like a search query (no verbs like "should", "must", "consider")
     re.compile(r"^\s*(?:\d+[.)]\s*|-\s+)(.{15,120})\s*$", re.M),
+]
+
+
+# Words that indicate a line is a meta-instruction, not a search query
+_SKIP_WORDS = [
+    "evidence_sufficient", "stop searching", "do not", "don't",
+    "the researcher", "the thinker", "the maestro",
+    "should ", "must ", "consider ", "ensure ", "focus on",
+    "prioritize", "prioritise", "important to", "note that",
+    "strategy", "approach", "methodology", "framework",
+    "we need to", "we should", "next step", "in order to",
+    "this will", "this would", "hypothesis", "assess ",
+    "evaluate ", "determine ", "analyze ", "analyse ",
 ]
 
 
@@ -360,6 +417,8 @@ def extract_search_queries(strategy_text: str) -> list[str]:
     """Extract search queries from the thinker's research strategy.
 
     Uses pattern matching to find explicit search instructions.
+    Heavily filters meta-instructions that the thinker produces
+    (e.g. "Consider investigating…", "We should focus on…").
     Returns deduplicated queries, capped at 8.
     """
     if not strategy_text or not strategy_text.strip():
@@ -376,20 +435,18 @@ def extract_search_queries(strategy_text: str) -> list[str]:
             # Skip too short or too long
             if len(q) < 10 or len(q) > 200:
                 continue
-            # Skip if it's a meta-instruction, not a query
+            # Skip if it's a meta-instruction, not a search query
             lower = q.lower()
-            if any(
-                skip in lower
-                for skip in [
-                    "evidence_sufficient",
-                    "stop searching",
-                    "do not",
-                    "the researcher",
-                    "the thinker",
-                    "the maestro",
-                ]
-            ):
+            if any(skip in lower for skip in _SKIP_WORDS):
                 continue
+            # Skip if it starts with a verb that suggests instruction
+            if re.match(
+                r"^(how|why|whether|if|when|what|where|which|this|that|the|a|an|some|all|each|every|for)\b",
+                lower,
+            ):
+                # Allow "how to" and "what is" — those are valid queries
+                if not re.match(r"^(how to|what is|what are|where to|where can)", lower):
+                    continue
             normalised = lower.strip()
             if normalised not in seen:
                 seen.add(normalised)
@@ -454,17 +511,20 @@ async def run_search_executor(
     # 2. Strategy queries from the thinker
     strategy_queries = extract_search_queries(strategy)
     for query in strategy_queries[:6]:
-        # Distribute across different search engines for diversity
+        # Distribute across ALL available search engines for diversity
         idx = len(search_tasks)
         tools_cycle = [
             "web_search_advanced_exa",
             "brave_web_search",
-            "kagi_search",
             "tavily_deep_research",
+            "perplexity_deep_research",
+            "mojeek_search",
+            "kagi_search",
         ]
         tool = tools_cycle[idx % len(tools_cycle)]
         search_tasks.append((tool, query, "strategy_search", None))
         stats["strategy_searches"] += 1
+        logger.info("Strategy query [%s]: %s", tool, query[:80])
 
     if not search_tasks:
         logger.info("Search executor: no searches to execute")
