@@ -253,7 +253,6 @@ async def _search_jina(query: str) -> str:
                 headers={
                     "Authorization": f"Bearer {_JINA_API_KEY}",
                     "Accept": "application/json",
-                    "X-Return-Format": "text",
                 },
             )
             resp.raise_for_status()
