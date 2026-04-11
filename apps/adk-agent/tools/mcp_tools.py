@@ -356,12 +356,15 @@ _BROWSER_TOOLS = [
 _active_toolsets: List[MCPToolset] = []
 
 
-# Prefixes to namespace tools from MCP servers whose tool names collide.
+# Prefixes to namespace tools from MCP servers whose tool names collide
+# or have overly generic names ("search", "read", "search_engine").
 # e.g. Semantic Scholar and arXiv both expose "search_papers" and "get_paper".
-# With prefixes, they become "ss_search_papers" and "arxiv_search_papers".
+# Wikipedia exposes "search" and "read" — extremely collision-prone.
 _TOOL_NAME_PREFIXES: dict[str, str] = {
     "semantic-scholar": "ss_",
     "arxiv": "arxiv_",
+    "wikipedia": "wiki_",
+    "brightdata": "bd_",
 }
 
 

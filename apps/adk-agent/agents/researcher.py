@@ -132,19 +132,21 @@ ss_get_author_papers, ss_get_recommendations)
 - NOTE: all tools prefixed with arxiv_ to avoid name collisions with Semantic Scholar
 - Example: arxiv_search_papers(query="specialized pro-resolving mediators DHA")
 
-**Wikipedia** (search, read)
+**Wikipedia** (wiki_search, wiki_read)
 - Best for: fact-checking, background context, structured knowledge
-- search: find Wikipedia articles by keyword
-- read: get full article content as clean markdown
-- Example: search(query="resolvin biochemistry")
+- wiki_search: find Wikipedia articles by keyword
+- wiki_read: get full article content as clean markdown
+- NOTE: all tools prefixed with wiki_ to avoid collisions with generic names
+- Example: wiki_search(query="resolvin biochemistry")
 
-**Bright Data** (search_engine, scrape_as_markdown, scrape_as_html)
+**Bright Data** (bd_search_engine, bd_scrape_as_markdown, bd_scrape_as_html)
 - Best for: scraping sites that block regular scrapers (paywalls, \
   CAPTCHAs, geo-restrictions, anti-bot)
-- search_engine: web search via Bright Data's unblocking proxy
-- scrape_as_markdown: extract page content as markdown through anti-block
+- bd_search_engine: web search via Bright Data's unblocking proxy
+- bd_scrape_as_markdown: extract page content as markdown through anti-block
+- NOTE: all tools prefixed with bd_ to avoid collisions with generic names
 - Use when Firecrawl or Exa fail with 403/429 errors
-- Example: scrape_as_markdown(url="https://blocked-site.com/article")
+- Example: bd_scrape_as_markdown(url="https://blocked-site.com/article")
 
 **DuckDB** (query, describe_table, list_tables, load_csv, load_parquet, etc.)
 - Best for: SQL queries on local data, loading CSV/Parquet files
