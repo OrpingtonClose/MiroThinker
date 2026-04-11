@@ -361,10 +361,10 @@ _active_toolsets: List[MCPToolset] = []
 # e.g. Semantic Scholar and arXiv both expose "search_papers" and "get_paper".
 # Wikipedia exposes "search" and "read" — extremely collision-prone.
 _TOOL_NAME_PREFIXES: dict[str, str] = {
-    "semantic-scholar": "ss_",
-    "arxiv": "arxiv_",
-    "wikipedia": "wiki_",
-    "brightdata": "bd_",
+    "semantic-scholar": "ss",
+    "arxiv": "arxiv",
+    "wikipedia": "wiki",
+    "brightdata": "bd",
 }
 
 
