@@ -353,6 +353,7 @@ def search_executor_callback(
                     future.result(timeout=5)
                 except (concurrent.futures.TimeoutError, Exception):
                     pass
+                stats = {"timed_out": True}
             finally:
                 if not timed_out:
                     cancel_event.set()
