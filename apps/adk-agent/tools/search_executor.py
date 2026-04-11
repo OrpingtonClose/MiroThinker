@@ -28,6 +28,7 @@ import re
 import threading
 import time
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -248,7 +249,7 @@ async def _search_jina(query: str) -> str:
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
-                f"https://s.jina.ai/{query}",
+                f"https://s.jina.ai/{quote(query, safe='')}",
                 headers={
                     "Authorization": f"Bearer {_JINA_API_KEY}",
                     "Accept": "application/json",
@@ -400,13 +401,16 @@ _QUERY_PATTERNS = [
 ]
 
 
-# Words that indicate a line is a meta-instruction, not a search query
+# Words that indicate a line is a meta-instruction, not a search query.
+# NOTE: words that are also common research topics (strategy, approach,
+# methodology, framework) have a trailing space to avoid matching inside
+# compound terms like "AI strategy developments".
 _SKIP_WORDS = [
     "evidence_sufficient", "stop searching", "do not", "don't",
     "the researcher", "the thinker", "the maestro",
     "should ", "must ", "consider ", "ensure ", "focus on",
     "prioritize", "prioritise", "important to", "note that",
-    "strategy", "approach", "methodology", "framework",
+    "strategy ", "approach ", "methodology ", "framework ",
     "we need to", "we should", "next step", "in order to",
     "this will", "this would", "hypothesis", "assess ",
     "evaluate ", "determine ", "analyze ", "analyse ",
@@ -439,14 +443,11 @@ def extract_search_queries(strategy_text: str) -> list[str]:
             lower = q.lower()
             if any(skip in lower for skip in _SKIP_WORDS):
                 continue
-            # Skip if it starts with a verb that suggests instruction
-            if re.match(
-                r"^(how|why|whether|if|when|what|where|which|this|that|the|a|an|some|all|each|every|for)\b",
-                lower,
-            ):
-                # Allow "how to" and "what is" — those are valid queries
-                if not re.match(r"^(how to|what is|what are|where to|where can)", lower):
-                    continue
+            # Skip queries that look like meta-instructions rather
+            # than actual search topics.  Only apply to the numbered-
+            # list pattern (last in _QUERY_PATTERNS) which is noisy.
+            # Verb-prefixed patterns ("search for X", "find X") already
+            # have strong signal so we trust those extractions.
             normalised = lower.strip()
             if normalised not in seen:
                 seen.add(normalised)
