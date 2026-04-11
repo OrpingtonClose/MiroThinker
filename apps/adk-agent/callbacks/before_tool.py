@@ -183,6 +183,9 @@ def before_tool_callback(
     # ── Deep research budget gate (must be first — blocks expensive calls) ──
     budget_block = _enforce_deep_research_budget(tool_name, args, tool_context)
     if budget_block is not None:
+        _c = get_active_collector()
+        if _c:
+            _c.emit_event("budget_blocked", tool_name, {"tool": tool_name, "reason": budget_block})
         return {"result": budget_block}
 
     # ── Source-level context budget for Exa ───────────────────────────

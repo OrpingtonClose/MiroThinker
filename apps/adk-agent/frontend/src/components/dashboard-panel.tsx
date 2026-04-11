@@ -222,7 +222,7 @@ function CorpusTimeline({ updates }: { updates: CorpusUpdate[] }) {
   const [openIdx, setOpenIdx] = useState<number | null>(null);
   if (!updates?.length) return null;
 
-  const maxTotal = Math.max(...updates.map((u) => u.total), 1);
+  const maxAdmitted = Math.max(...updates.map((u) => u.admitted), 1);
 
   return (
     <div className="space-y-1.5">
@@ -236,7 +236,7 @@ function CorpusTimeline({ updates }: { updates: CorpusUpdate[] }) {
             <div className="flex-1 bg-slate-800 rounded-full h-3 overflow-hidden">
               <div
                 className="h-full rounded-full bg-gradient-to-r from-green-600 to-green-400 transition-all"
-                style={{ width: `${(u.admitted / maxTotal) * 100}%` }}
+                style={{ width: `${(u.admitted / maxAdmitted) * 100}%` }}
               />
             </div>
             <span className="text-xs font-mono text-green-400 w-12 text-right">{u.admitted}</span>
@@ -369,9 +369,11 @@ export function DashboardPanel() {
                 </div>
               </div>
               <div className="text-right flex-shrink-0">
-                <div className="text-2xl font-bold text-indigo-400">
-                  <LiveTimer startedAt={snap.started_at} />
-                </div>
+                  <div className="text-2xl font-bold text-indigo-400">
+                    {snap.finalized
+                      ? <span className="tabular-nums font-mono">{elapsed(snap.elapsed_secs)}</span>
+                      : <LiveTimer startedAt={snap.started_at} />}
+                  </div>
                 <div className="text-xs text-slate-500">elapsed</div>
               </div>
             </div>

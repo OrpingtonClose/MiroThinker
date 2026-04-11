@@ -12,8 +12,7 @@ The pipeline architecture separates reasoning from tool execution:
     SequentialAgent("mirothinker_pipeline")
     └── LoopAgent("research_loop", max_iterations=3)
     │     ├── thinker           → uncensored reasoning, no web tools
-    │     ├── researcher        → tool-capable, calls executor
-    │     └── loop_synthesiser  → fermentation, output re-ingested into corpus
+    │     └── researcher        → tool-capable, calls executor
     └── synthesiser  → final uncensored report writing, no tools
 
 Logging and observability is sent to **three frontends simultaneously**:

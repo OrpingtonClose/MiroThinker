@@ -439,6 +439,7 @@ class PipelineCollector:
         secs_since_activity = round(now - last_activity, 1)
 
         return {
+            "status": "finalized" if self._finalized else "running",
             "session_id": self.session_id,
             "query": self.query[:200],
             "started_at": self.started_at,
