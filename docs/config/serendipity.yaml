@@ -1,0 +1,197 @@
+# MiroThinker Serendipity Configuration
+# Version: 1.0
+
+serendipity:
+  # Master toggle for serendipity features
+  enabled: true
+  
+  # Implementation phase
+  # Options: quick_wins | core | advanced
+  phase: "quick_wins"
+  
+  # Logging configuration
+  logging:
+    level: "INFO"
+    log_scores: true
+    log_decisions: true
+  
+  # Primary algorithm selection
+  algorithm:
+    name: "sog"           # sog | kfn | sccf | sirup | tangent | serencdr
+    fallback: "sog"       # Fallback if primary fails
+    params:
+      lambda_param: 0.5   # Balance parameter (0-1)
+  
+  # Reranking configuration
+  reranking:
+    enabled: true
+    top_k: 10
+    apply_to:
+      - tool_calls
+      - research_results
+      - knowledge_retrieval
+  
+  # Static balance configuration (used when adaptive is disabled)
+  balance:
+    relevance_weight: 0.7
+    unexpectedness_weight: 0.3
+  
+  # Adaptive weight configuration (Phase 2+)
+  adaptive_weights:
+    enabled: false        # Enable for Phase 2
+    strategy: "curiosity_driven"  # curiosity_driven | performance_driven | hybrid
+    min_serendipity: 0.1
+    max_serendipity: 0.7
+    adaptation_rate: 0.1
+  
+  # Curiosity profiling configuration (Phase 2+)
+  curiosity:
+    profiling:
+      enabled: false      # Enable for Phase 2
+      update_frequency: "per_session"  # per_task | per_session | per_query
+      persistence: "user_profile"      # session_only | user_profile
+    
+    # Dimensions to track
+    dimensions:
+      - novelty_seeking
+      - diversity_appreciation
+      - surprise_tolerance
+      - exploration_depth
+    
+    # Initial values for new users
+    initial_profile:
+      novelty_seeking: 0.5
+      diversity_appreciation: 0.5
+      surprise_tolerance: 0.5
+      exploration_depth: 0.5
+  
+  # Exploration strategy configuration
+  exploration:
+    strategy: "epsilon_greedy"  # epsilon_greedy | ucb | thompson_sampling
+    epsilon: 0.2                # Exploration probability
+    temperature: 0.5            # Sampling temperature
+  
+  # Individual algorithm configurations
+  algorithms:
+    sog:
+      enabled: true
+      lambda_param: 0.5
+      diversity_weight: 0.3
+      similarity_threshold: 0.7
+    
+    kfn:
+      enabled: false      # Enable for Phase 2
+      k: 5
+      distance_metric: "cosine"
+      min_distance_threshold: 0.3
+    
+    sccf:
+      enabled: false      # Enable for Phase 2
+      n_clusters: 10
+      cluster_method: "kmeans"
+    
+    sirup:
+      enabled: false      # Enable for Phase 3
+      curiosity_model: "multi_dim"
+      content_features:
+        - semantic
+        - structural
+        - temporal
+    
+    tangent:
+      enabled: false      # Enable for Phase 3
+      graph_depth: 3
+      relationship_types:
+        - similarity
+        - complementarity
+        - contrast
+    
+    serencdr:
+      enabled: false      # Enable for Phase 3
+      model_path: "models/serencdr_v1.pt"
+      domains:
+        - research
+        - code
+        - documentation
+  
+  # Full pipeline configuration (Phase 3)
+  pipeline:
+    enabled: false        # Enable for Phase 3
+    stages:
+      - name: "tool_selection"
+        enabled: true
+        serendipity_weight: 0.3
+      
+      - name: "result_reranking"
+        enabled: true
+        serendipity_weight: 0.4
+      
+      - name: "context_enhancement"
+        enabled: true
+        serendipity_weight: 0.2
+      
+      - name: "follow_up_generation"
+        enabled: true
+        serendipity_weight: 0.5
+  
+  # User control settings
+  user_control:
+    opt_in: true
+    default_curiosity_level: "medium"  # low | medium | high
+    
+    curiosity_levels:
+      low:
+        serendipity_weight: 0.2
+        exploration_rate: 0.1
+      medium:
+        serendipity_weight: 0.4
+        exploration_rate: 0.2
+      high:
+        serendipity_weight: 0.6
+        exploration_rate: 0.3
+  
+  # Experimentation framework (Phase 3)
+  experimentation:
+    ab_testing:
+      enabled: false      # Enable for Phase 3
+      
+      variants:
+        - name: "control"
+          serendipity_level: 0.0
+          description: "No serendipity"
+        
+        - name: "low"
+          serendipity_level: 0.3
+          description: "Low serendipity"
+        
+        - name: "medium"
+          serendipity_level: 0.5
+          description: "Medium serendipity"
+        
+        - name: "high"
+          serendipity_level: 0.7
+          description: "High serendipity"
+      
+      metrics:
+        - task_completion
+        - user_satisfaction
+        - discovery_rate
+        - time_to_completion
+  
+  # Feedback loop configuration (Phase 3)
+  feedback:
+    enabled: false        # Enable for Phase 3
+    
+    types:
+      - explicit_rating
+      - implicit_dwell_time
+      - follow_up_actions
+      - skip_behavior
+    
+    update_frequency: "immediate"  # immediate | batch | daily
+    
+    weights:
+      explicit_rating: 1.0
+      implicit_dwell_time: 0.5
+      follow_up_actions: 0.7
+      skip_behavior: 0.3
