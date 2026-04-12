@@ -320,10 +320,11 @@ def _wait_for_pending_scoring(timeout: float = 300) -> None:
                 "Background scoring thread did not finish within %.0fs", timeout,
             )
     with _scoring_lock:
-        # Only clear the reference if the thread actually finished.
-        # If it timed out, keep the reference so future callers still
-        # wait (prevents concurrent DuckDB access / use-after-close).
-        if t is None or not t.is_alive():
+        # Only clear the reference if it still points to the same thread
+        # we waited on AND that thread actually finished.  If
+        # maestro_condition_callback assigned a *new* thread between the
+        # two lock acquisitions, we must not clear it (TOCTOU guard).
+        if _scoring_thread is t and (t is None or not t.is_alive()):
             _scoring_thread = None
 
 
@@ -496,12 +497,21 @@ def maestro_condition_callback(
         # Wait for any leftover thread from a previous iteration
         if _scoring_thread is not None and _scoring_thread.is_alive():
             _scoring_thread.join(timeout=10)
-        _scoring_thread = threading.Thread(
-            target=_background_scoring,
-            daemon=True,
-            name="maestro-safety-scoring",
-        )
-        _scoring_thread.start()
+        # Only start a new thread if the old one actually finished.
+        # Starting a second thread while the first is still running
+        # would cause concurrent DuckDB access on the same connection.
+        if _scoring_thread is not None and _scoring_thread.is_alive():
+            logger.warning(
+                "Previous scoring thread still alive after 10s — "
+                "skipping safety-net scoring to avoid concurrent DuckDB access",
+            )
+        else:
+            _scoring_thread = threading.Thread(
+                target=_background_scoring,
+                daemon=True,
+                name="maestro-safety-scoring",
+            )
+            _scoring_thread.start()
 
     # Advance iteration at the loop boundary — the maestro is the last
     # agent in each LoopAgent iteration.
