@@ -147,13 +147,7 @@ def _init_pipeline_state(
         for k, v in build_corpus_state(db_path=prev_db).items():
             state[k] = v
         init_corpus(state)
-        if prev_db:
-            logger.info(
-                "Pipeline state initialised (session continuation): "
-                "corpus_key=%s db=%s", state["_corpus_key"], prev_db,
-            )
-        else:
-            logger.info("Pipeline state initialised: corpus_key=%s", state["_corpus_key"])
+        logger.info("Pipeline state initialised: corpus_key=%s", state["_corpus_key"])
 
         # Track cumulative cost across expansion iterations
         if "_cumulative_api_cost" not in state:
