@@ -461,9 +461,19 @@ async def search_executor_callback(
     except Exception as exc:
         logger.warning("Search executor failed (non-fatal): %s", exc, exc_info=True)
 
-    # Update state with current corpus for the maestro
+    # Update state with current corpus for the maestro.
+    # For the thinker briefing, use swarm-digested synthesis when the
+    # corpus is large enough — synthesise() auto-selects single-pass
+    # (≤GOSSIP_THRESHOLD findings) vs gossip protocol for large corpora.
+    # Falls back to format_for_thinker() if synthesis fails or returns empty.
     iteration = state.get("_corpus_iteration", 0)
-    state["research_findings"] = corpus.format_for_thinker(current_iteration=iteration)
+    user_query = state.get("user_query", "")
+    try:
+        briefing = corpus.synthesise(user_query) if user_query else ""
+    except Exception:
+        logger.warning("Swarm-digested briefing failed (non-fatal)", exc_info=True)
+        briefing = ""
+    state["research_findings"] = briefing or corpus.format_for_thinker(current_iteration=iteration)
     state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
 
     return None
@@ -883,16 +893,8 @@ def cleanup_corpus(state: dict) -> None:
                 logger.warning("Could not log corpus stats before close", exc_info=True)
             corpus.close()
             del _corpus_stores[key]
-    # Clear corpus-related state keys so _init_pipeline_state
-    # re-initialises cleanly on session reuse.
-    # NOTE: _prev_corpus_db_path, _prev_synthesiser_report, and
-    # _cumulative_api_cost are intentionally NOT cleared — they are
-    # the continuity bridge between pipeline runs in the same session.
-    # ADK State objects don't support .pop(); use del with guard.
-    for k in ("_corpus_key", "_corpus_db_path", "_corpus_iteration",
-              "_expansion_targets",
-              "research_findings", "corpus_for_synthesis", "loop_synthesis"):
-        try:
-            del state[k]
-        except (KeyError, TypeError, AttributeError):
-            pass
+    # No state cleaning — corpus keys (_corpus_key, _corpus_db_path,
+    # _corpus_iteration, etc.) persist in session state so follow-up
+    # messages reopen the same DuckDB file.  _get_corpus() lazily
+    # recreates the CorpusStore from the surviving _corpus_db_path.
+    # "Runs are episodes, the swarm is eternal." (PR #54 architecture)
