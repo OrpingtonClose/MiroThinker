@@ -302,12 +302,17 @@ def researcher_condition_callback(
 # Search Executor callback (new maestro architecture)
 # ---------------------------------------------------------------------------
 
-def _wait_for_pending_scoring(timeout: float = 300) -> None:
+def _wait_for_pending_scoring(timeout: float = 300) -> bool:
     """Block until the background scoring thread completes.
 
     Called at the start of ``search_executor_callback`` to ensure
     DuckDB isn't accessed concurrently.  Safe to call even when no
     scoring thread is active.
+
+    Returns ``True`` if DuckDB is safe to access (thread finished or
+    was never running).  Returns ``False`` if the thread is **still
+    alive** after the timeout — callers MUST NOT touch DuckDB in
+    this case.
     """
     global _scoring_thread
     with _scoring_lock:
@@ -319,6 +324,7 @@ def _wait_for_pending_scoring(timeout: float = 300) -> None:
             logger.warning(
                 "Background scoring thread did not finish within %.0fs", timeout,
             )
+            return False
     with _scoring_lock:
         # Only clear the reference if it still points to the same thread
         # we waited on AND that thread actually finished.  If
@@ -326,6 +332,7 @@ def _wait_for_pending_scoring(timeout: float = 300) -> None:
         # two lock acquisitions, we must not clear it (TOCTOU guard).
         if _scoring_thread is t and (t is None or not t.is_alive()):
             _scoring_thread = None
+    return True
 
 
 def search_executor_callback(
@@ -609,7 +616,9 @@ def get_corpus_text(state: dict) -> str:
     Used to dump partial results when the pipeline stalls before
     the synthesiser can produce its report.
     """
-    _wait_for_pending_scoring(timeout=60)
+    if not _wait_for_pending_scoring(timeout=60):
+        logger.warning("get_corpus_text: scoring thread still alive — returning cached state")
+        return state.get("corpus_for_synthesis", "")
     key = state.get("_corpus_key")
     if key and key in _corpus_stores:
         return _corpus_stores[key].format_for_synthesiser()
@@ -635,7 +644,11 @@ def run_swarm_synthesis(state: dict) -> str:
     user_query = state.get("user_query", "")
 
     # Wait for background scoring to finish before accessing DuckDB.
-    _wait_for_pending_scoring()
+    if not _wait_for_pending_scoring():
+        logger.warning(
+            "run_swarm_synthesis: scoring thread still alive — "
+            "proceeding with pre-scoring corpus snapshot",
+        )
 
     # Ensure trace context is set for swarm LLM calls
     _c = get_active_collector()
@@ -709,19 +722,31 @@ def cleanup_corpus(state: dict) -> None:
     pipeline run within the same session.
     """
     # Ensure background scoring is done before closing the DB.
-    _wait_for_pending_scoring(timeout=60)
+    scoring_done = _wait_for_pending_scoring(timeout=60)
     key = state.get("_corpus_key")
     if key and key in _corpus_stores:
         corpus = _corpus_stores[key]
-        try:
-            logger.info(
-                "Closing CorpusStore for key=%s  db=%s  (%d conditions)",
-                key, corpus.db_path, corpus.count(),
+        if not scoring_done:
+            # Scoring thread still alive — do NOT close the connection
+            # while it's mid-query.  Drop our reference and let the
+            # daemon thread finish naturally; the connection will be
+            # garbage-collected once the thread exits.
+            logger.warning(
+                "cleanup_corpus: scoring thread still alive after 60s — "
+                "abandoning CorpusStore for key=%s (will GC after thread exits)",
+                key,
             )
-        except Exception:
-            logger.warning("Could not log corpus stats before close", exc_info=True)
-        corpus.close()
-        del _corpus_stores[key]
+            del _corpus_stores[key]
+        else:
+            try:
+                logger.info(
+                    "Closing CorpusStore for key=%s  db=%s  (%d conditions)",
+                    key, corpus.db_path, corpus.count(),
+                )
+            except Exception:
+                logger.warning("Could not log corpus stats before close", exc_info=True)
+            corpus.close()
+            del _corpus_stores[key]
     # Clear corpus-related state keys so _init_pipeline_state
     # re-initialises cleanly on session reuse.
     # ADK State objects don't support .pop(); use del with guard.
