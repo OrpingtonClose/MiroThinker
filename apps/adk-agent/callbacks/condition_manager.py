@@ -41,6 +41,15 @@ logger = logging.getLogger(__name__)
 _pending_search_results: list[tuple[str, str, str, int]] = []  # (corpus_key, text, source_type, iteration)
 _pending_search_lock = threading.Lock()
 
+# ---------------------------------------------------------------------------
+# Background scoring thread — the maestro callback fires scoring in a
+# daemon thread so the asyncio event loop stays responsive (keepalives
+# can fire, SSE events are delivered).  The *next* search_executor
+# callback waits for this thread before touching DuckDB.
+# ---------------------------------------------------------------------------
+_scoring_thread: Optional[threading.Thread] = None
+_scoring_lock = threading.Lock()
+
 
 def queue_search_result(
     corpus_key: str, text: str, source_type: str, iteration: int,
@@ -293,6 +302,27 @@ def researcher_condition_callback(
 # Search Executor callback (new maestro architecture)
 # ---------------------------------------------------------------------------
 
+def _wait_for_pending_scoring(timeout: float = 300) -> None:
+    """Block until the background scoring thread completes.
+
+    Called at the start of ``search_executor_callback`` to ensure
+    DuckDB isn't accessed concurrently.  Safe to call even when no
+    scoring thread is active.
+    """
+    global _scoring_thread
+    with _scoring_lock:
+        t = _scoring_thread
+    if t is not None and t.is_alive():
+        logger.info("Waiting for background scoring thread to finish…")
+        t.join(timeout=timeout)
+        if t.is_alive():
+            logger.warning(
+                "Background scoring thread did not finish within %.0fs", timeout,
+            )
+    with _scoring_lock:
+        _scoring_thread = None
+
+
 def search_executor_callback(
     callback_context: CallbackContext,
 ) -> Optional[genai_types.Content]:
@@ -311,6 +341,10 @@ def search_executor_callback(
     state = callback_context.state
     corpus = _get_corpus(state)
     _c = get_active_collector()
+
+    # Wait for any background scoring from the previous maestro
+    # callback to finish before touching DuckDB.
+    _wait_for_pending_scoring()
 
     # Set tracing context
     iteration = state.get("_corpus_iteration", 0)
@@ -392,13 +426,17 @@ def maestro_condition_callback(
     ``execute_flock_sql()``.  This callback:
 
     1. Drains any remaining search results from tool callbacks
-    2. Refreshes state with the updated corpus for the thinker
-    3. Advances the iteration counter
+    2. Kicks off safety-net scoring in a **background thread** so the
+       asyncio event loop stays responsive (SSE keepalives can fire)
+    3. Refreshes state with the current corpus for the thinker
+    4. Advances the iteration counter
 
-    Unlike the old researcher callback, this does NOT run the algorithm
-    battery — the maestro IS the battery (it runs whatever Flock
-    operations it decides are needed).
+    The background scoring thread is joined at the start of the next
+    ``search_executor_callback`` to guarantee DuckDB is not accessed
+    concurrently.
     """
+    global _scoring_thread
+
     state = callback_context.state
     corpus = _get_corpus(state)
     _c = get_active_collector()
@@ -410,18 +448,39 @@ def maestro_condition_callback(
     # search executor + maestro phase are scored and deduped.  The
     # maestro may have created new rows via execute_flock_sql() that
     # bypassed the normal ingestion scoring path.
+    #
+    # IMPORTANT: This runs in a daemon thread so the asyncio event
+    # loop is NOT blocked.  Previously it ran synchronously which
+    # froze the event loop for minutes, preventing SSE keepalive
+    # comments from being delivered and causing client disconnects.
     user_query = state.get("user_query", "")
-    try:
-        scored = corpus.score_new_conditions(user_query)
-        if scored:
-            logger.info("Maestro safety-net: scored %d conditions", scored)
-        deduped = corpus.compute_duplications()
-        if deduped:
-            logger.info("Maestro safety-net: deduped %d pairs", deduped)
-    except Exception:
-        logger.warning("Maestro safety-net scoring failed", exc_info=True)
 
-    # Update state with the maestro-organised corpus
+    def _background_scoring() -> None:
+        """Run scoring + dedup in a background thread."""
+        try:
+            scored = corpus.score_new_conditions(user_query)
+            if scored:
+                logger.info("Maestro safety-net: scored %d conditions", scored)
+            deduped = corpus.compute_duplications()
+            if deduped:
+                logger.info("Maestro safety-net: deduped %d pairs", deduped)
+        except Exception:
+            logger.warning("Maestro safety-net scoring failed", exc_info=True)
+
+    with _scoring_lock:
+        # Wait for any leftover thread from a previous iteration
+        if _scoring_thread is not None and _scoring_thread.is_alive():
+            _scoring_thread.join(timeout=10)
+        _scoring_thread = threading.Thread(
+            target=_background_scoring,
+            daemon=True,
+            name="maestro-safety-scoring",
+        )
+        _scoring_thread.start()
+
+    # Update state with the maestro-organised corpus (current snapshot
+    # before scoring — the next search_executor_callback will wait for
+    # scoring to finish and refresh again).
     state["research_findings"] = corpus.format_for_thinker()
     state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
 
@@ -631,6 +690,8 @@ def cleanup_corpus(state: dict) -> None:
     :func:`_init_pipeline_state` properly re-initialises on the next
     pipeline run within the same session.
     """
+    # Ensure background scoring is done before closing the DB.
+    _wait_for_pending_scoring(timeout=60)
     key = state.get("_corpus_key")
     if key and key in _corpus_stores:
         corpus = _corpus_stores[key]
