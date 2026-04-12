@@ -219,7 +219,7 @@ class CorpusStore:
                 source_type TEXT DEFAULT '',
                 source_ref TEXT DEFAULT '',
 
-                -- Row type: 'finding' | 'similarity' | 'contradiction' | 'raw' | 'synthesis'
+                -- Row type: 'finding' | 'similarity' | 'contradiction' | 'raw' | 'synthesis' | 'thought' | 'insight'
                 row_type TEXT DEFAULT 'finding',
 
                 -- Hierarchical relationships (parent-child in the SAME table)
