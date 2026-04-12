@@ -155,10 +155,13 @@ async def _search_kagi(query: str) -> str:
         return ""
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.get(
+            resp = await client.post(
                 "https://kagi.com/api/v0/fastgpt",
-                params={"query": query},
-                headers={"Authorization": f"Bot {_KAGI_API_KEY}"},
+                json={"query": query},
+                headers={
+                    "Authorization": f"Bot {_KAGI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
             )
             resp.raise_for_status()
             data = resp.json()
