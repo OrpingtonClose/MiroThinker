@@ -245,7 +245,7 @@ class AGUIRunCollectorMiddleware(BaseHTTPMiddleware):
                     else:
                         # No real event within keepalive window — send
                         # an SSE comment that clients silently ignore.
-                        yield ": keepalive\n\n"
+                        yield b": keepalive\n\n"
             except Exception:
                 collector.phase_end("ag_ui_request", "error")
                 collector.finalize(result_text="")
