@@ -42,12 +42,17 @@ _pending_search_results: list[tuple[str, str, str, int]] = []  # (corpus_key, te
 _pending_search_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
-# Background scoring thread — the maestro callback fires scoring in a
+# Background scoring threads — the maestro callback fires scoring in a
 # daemon thread so the asyncio event loop stays responsive (keepalives
 # can fire, SSE events are delivered).  The *next* search_executor
 # callback waits for this thread before touching DuckDB.
+#
+# Keyed by corpus_key so concurrent sessions don't block each other.
+# Each session has its own CorpusStore / DuckDB connection, so cross-
+# session synchronisation is unnecessary and harmful (it would block
+# unrelated event loops, defeating the purpose of this PR).
 # ---------------------------------------------------------------------------
-_scoring_thread: Optional[threading.Thread] = None
+_scoring_threads: dict[str, threading.Thread] = {}
 _scoring_lock = threading.Lock()
 
 
@@ -302,8 +307,8 @@ def researcher_condition_callback(
 # Search Executor callback (new maestro architecture)
 # ---------------------------------------------------------------------------
 
-def _wait_for_pending_scoring(timeout: float = 300) -> bool:
-    """Block until the background scoring thread completes.
+def _wait_for_pending_scoring(corpus_key: str, timeout: float = 300) -> bool:
+    """Block until the background scoring thread for *corpus_key* completes.
 
     Called at the start of ``search_executor_callback`` to ensure
     DuckDB isn't accessed concurrently.  Safe to call even when no
@@ -314,15 +319,15 @@ def _wait_for_pending_scoring(timeout: float = 300) -> bool:
     alive** after the timeout — callers MUST NOT touch DuckDB in
     this case.
     """
-    global _scoring_thread
     with _scoring_lock:
-        t = _scoring_thread
+        t = _scoring_threads.get(corpus_key)
     if t is not None and t.is_alive():
-        logger.info("Waiting for background scoring thread to finish…")
+        logger.info("Waiting for background scoring thread to finish (key=%s)…", corpus_key)
         t.join(timeout=timeout)
         if t.is_alive():
             logger.warning(
-                "Background scoring thread did not finish within %.0fs", timeout,
+                "Background scoring thread did not finish within %.0fs (key=%s)",
+                timeout, corpus_key,
             )
             return False
     with _scoring_lock:
@@ -330,8 +335,8 @@ def _wait_for_pending_scoring(timeout: float = 300) -> bool:
         # we waited on AND that thread actually finished.  If
         # maestro_condition_callback assigned a *new* thread between the
         # two lock acquisitions, we must not clear it (TOCTOU guard).
-        if _scoring_thread is t and (t is None or not t.is_alive()):
-            _scoring_thread = None
+        if _scoring_threads.get(corpus_key) is t and (t is None or not t.is_alive()):
+            _scoring_threads.pop(corpus_key, None)
     return True
 
 
@@ -356,7 +361,8 @@ def search_executor_callback(
 
     # Wait for any background scoring from the previous maestro
     # callback to finish before touching DuckDB.
-    if not _wait_for_pending_scoring():
+    corpus_key = state.get("_corpus_key", "default")
+    if not _wait_for_pending_scoring(corpus_key):
         logger.warning(
             "search_executor_callback: scoring thread still alive — "
             "skipping search executor to avoid concurrent DuckDB access",
@@ -452,8 +458,6 @@ def maestro_condition_callback(
     ``search_executor_callback`` to guarantee DuckDB is not accessed
     concurrently.
     """
-    global _scoring_thread
-
     state = callback_context.state
     corpus = _get_corpus(state)
     _c = get_active_collector()
@@ -475,6 +479,16 @@ def maestro_condition_callback(
     # Snapshot corpus state BEFORE starting the background thread.
     # DuckDB connections are not thread-safe, so all reads must happen
     # on the main thread before the scoring thread starts writing.
+    #
+    # Trade-off: the *thinker* (which runs before search_executor_callback
+    # in the next iteration) will see this pre-scoring snapshot.  Unscored
+    # conditions appear with composite_quality=0 ("WEAK FINDINGS" tier).
+    # This is acceptable because:
+    #  1. Safety-net scoring is a backup — the maestro should handle most
+    #     scoring itself via execute_flock_sql().
+    #  2. search_executor_callback waits for scoring and refreshes state
+    #     before the maestro runs, so the maestro always sees scored data.
+    #  3. Blocking the event loop here would defeat the purpose of this PR.
     state["research_findings"] = corpus.format_for_thinker()
     state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
 
@@ -505,25 +519,29 @@ def maestro_condition_callback(
         except Exception:
             logger.warning("Maestro safety-net scoring failed", exc_info=True)
 
+    corpus_key = state.get("_corpus_key", "default")
     with _scoring_lock:
         # Wait for any leftover thread from a previous iteration
-        if _scoring_thread is not None and _scoring_thread.is_alive():
-            _scoring_thread.join(timeout=10)
+        old_t = _scoring_threads.get(corpus_key)
+        if old_t is not None and old_t.is_alive():
+            old_t.join(timeout=10)
         # Only start a new thread if the old one actually finished.
         # Starting a second thread while the first is still running
         # would cause concurrent DuckDB access on the same connection.
-        if _scoring_thread is not None and _scoring_thread.is_alive():
+        if old_t is not None and old_t.is_alive():
             logger.warning(
-                "Previous scoring thread still alive after 10s — "
+                "Previous scoring thread still alive after 10s (key=%s) — "
                 "skipping safety-net scoring to avoid concurrent DuckDB access",
+                corpus_key,
             )
         else:
-            _scoring_thread = threading.Thread(
+            t = threading.Thread(
                 target=_background_scoring,
                 daemon=True,
-                name="maestro-safety-scoring",
+                name=f"maestro-safety-scoring-{corpus_key}",
             )
-            _scoring_thread.start()
+            _scoring_threads[corpus_key] = t
+            t.start()
 
     # Advance iteration at the loop boundary — the maestro is the last
     # agent in each LoopAgent iteration.
@@ -621,7 +639,8 @@ def get_corpus_text(state: dict) -> str:
     Used to dump partial results when the pipeline stalls before
     the synthesiser can produce its report.
     """
-    if not _wait_for_pending_scoring(timeout=60):
+    corpus_key = state.get("_corpus_key", "default")
+    if not _wait_for_pending_scoring(corpus_key, timeout=60):
         logger.warning("get_corpus_text: scoring thread still alive — returning cached state")
         return state.get("corpus_for_synthesis", "")
     key = state.get("_corpus_key")
@@ -649,7 +668,8 @@ def run_swarm_synthesis(state: dict) -> str:
     user_query = state.get("user_query", "")
 
     # Wait for background scoring to finish before accessing DuckDB.
-    if not _wait_for_pending_scoring():
+    corpus_key = key  # reuse the key we already validated above
+    if not _wait_for_pending_scoring(corpus_key):
         logger.warning(
             "run_swarm_synthesis: scoring thread still alive — "
             "returning cached corpus_for_synthesis to avoid concurrent DuckDB access",
@@ -728,7 +748,8 @@ def cleanup_corpus(state: dict) -> None:
     pipeline run within the same session.
     """
     # Ensure background scoring is done before closing the DB.
-    scoring_done = _wait_for_pending_scoring(timeout=60)
+    corpus_key = state.get("_corpus_key", "default")
+    scoring_done = _wait_for_pending_scoring(corpus_key, timeout=60)
     key = state.get("_corpus_key")
     if key and key in _corpus_stores:
         corpus = _corpus_stores[key]
