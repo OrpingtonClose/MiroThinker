@@ -22,6 +22,19 @@ from callbacks.before_model import release_llm_semaphore_if_held
 from dashboard import get_active_collector
 from utils.boxed import extract_boxed_content
 
+# Lazy import to avoid circular dependency at module load time.
+# _get_corpus lives in callbacks.condition_manager which imports models
+# that may reference this module's logger.
+_get_corpus = None
+
+
+def _lazy_get_corpus():
+    global _get_corpus
+    if _get_corpus is None:
+        from callbacks.condition_manager import _get_corpus as _gc
+        _get_corpus = _gc
+    return _get_corpus
+
 logger = logging.getLogger(__name__)
 
 
@@ -69,20 +82,38 @@ def after_model_callback(
         return None
 
     # ── Reasoning content capture ────────────────────────────────────
-    # Save reasoning traces to state for observability, but do NOT feed
-    # them back into the conversation context (that wastes tokens).
+    # Persist full reasoning to DuckDB as a row_type='thought' row via
+    # CorpusStore.admit_thought().  Only a lightweight reference is kept
+    # in session state (agent name, char counts, thought row ID) to
+    # avoid state bloat.
     if reasoning_text:
         if "reasoning_traces" not in state:
             state["reasoning_traces"] = []
         agent_name = getattr(callback_context, "agent_name", "unknown")
+        thought_row_id = None
+        try:
+            get_corpus = _lazy_get_corpus()
+            corpus = get_corpus(state)
+            thought_row_id = corpus.admit_thought(
+                reasoning=reasoning_text,
+                angle=agent_name,
+                strategy="reasoning_capture",
+                iteration=state.get("_corpus_iteration", 0),
+            )
+        except Exception:
+            logger.debug(
+                "Could not persist reasoning to DuckDB (non-fatal)",
+                exc_info=True,
+            )
         state["reasoning_traces"].append({
             "agent": agent_name,
-            "reasoning": reasoning_text[:5000],  # cap to avoid state bloat
-            "response_preview": response_text[:500],
+            "reasoning_chars": len(reasoning_text),
+            "response_preview_chars": len(response_text),
+            "thought_row_id": thought_row_id,
         })
         logger.info(
-            "Reasoning content captured from %s: %d chars",
-            agent_name, len(reasoning_text),
+            "Reasoning content captured from %s: %d chars (thought_row_id=%s)",
+            agent_name, len(reasoning_text), thought_row_id,
         )
 
     # ── Boxed answer extraction ──────────────────────────────────────

@@ -602,7 +602,28 @@ def maestro_condition_callback(
 
     # Advance iteration at the loop boundary — the maestro is the last
     # agent in each LoopAgent iteration.
-    state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
+    iteration = state.get("_corpus_iteration", 0)
+
+    # ── Periodic synthesis ────────────────────────────────────────────
+    # After refreshing corpus state and before advancing the iteration
+    # counter, run a swarm synthesis and persist it as a thought row so
+    # the thinker can integrate cross-angle insights.
+    synthesis_interval = int(os.environ.get("SYNTHESIS_INTERVAL", "1"))
+    if iteration > 0 and iteration % synthesis_interval == 0:
+        try:
+            swarm_report = run_swarm_synthesis(state)
+            if swarm_report and swarm_report.strip():
+                corpus = _get_corpus(state)
+                corpus.admit_thought(
+                    reasoning=swarm_report,
+                    angle="periodic_synthesis",
+                    strategy="periodic_synthesis_report",
+                    iteration=iteration,
+                )
+        except Exception:
+            logger.warning("Periodic synthesis failed (non-fatal)", exc_info=True)
+
+    state["_corpus_iteration"] = iteration + 1
 
     return None  # preserve maestro output
 

@@ -98,8 +98,13 @@ This is synthesis, integration, and reflection — the kind of insight \
 that only comes from deeply reading and thinking about the evidence, \
 not from following a mechanical process.
 
-Reference specific finding IDs where relevant (e.g. "Finding [3] mentions \
-a forwarding service but lacks pricing — search for that").
+The corpus may contain rows with row_type='thought' from prior iterations \
+or runs. These are peer contributions from specialist analysts — reasoning \
+traces that represent independent lines of investigation. You should:
+- Integrate their insights into your strategic planning
+- Challenge their conclusions where evidence warrants a different reading
+- Build on their analysis rather than repeating what they have already covered
+- Treat them as informed colleagues, not authoritative sources
 
 FOR EVERY QUERY, REASON ABOUT:
 

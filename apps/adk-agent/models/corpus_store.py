@@ -529,6 +529,67 @@ class CorpusStore:
                 ids.append(cid)
         return ids
 
+    def admit_thought(
+        self,
+        reasoning: str,
+        parent_thought_id: int | None = None,
+        angle: str = "",
+        strategy: str = "",
+        iteration: int = 0,
+        expansion_depth: int = 0,
+    ) -> int:
+        """Persist a full reasoning trace as a ``row_type='thought'`` row.
+
+        Thought rows form parent-child lineage chains via ``parent_id``.
+        They are IMMUTABLE — the maestro must never UPDATE, DELETE, or
+        set ``consider_for_use=FALSE`` on them.
+
+        Returns the new row's ID.
+        """
+        fact = reasoning.strip()
+        if not fact:
+            raise ValueError("Cannot admit empty thought")
+
+        cid = self._next_id
+        self._next_id += 1
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            """INSERT INTO conditions
+               (id, fact, row_type, parent_id, angle, strategy,
+                iteration, expansion_depth, consider_for_use, created_at)
+               VALUES (?, ?, 'thought', ?, ?, ?, ?, ?, TRUE, ?)""",
+            [cid, fact, parent_thought_id, angle, strategy,
+             iteration, expansion_depth, now],
+        )
+        logger.debug("Admitted thought #%d: %d chars (parent=%s)", cid, len(fact), parent_thought_id)
+        return cid
+
+    def get_latest_thought(self, angle: str | None = None) -> dict | None:
+        """Return the most recent ``row_type='thought'`` row, or None.
+
+        Optionally filtered by *angle* (e.g. a specific agent name).
+        """
+        if angle is not None:
+            rows = self.conn.execute(
+                """SELECT * FROM conditions
+                   WHERE row_type = 'thought' AND angle = ?
+                   ORDER BY id DESC LIMIT 1""",
+                [angle],
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT * FROM conditions
+                   WHERE row_type = 'thought'
+                   ORDER BY id DESC LIMIT 1""",
+            ).fetchall()
+        if not rows:
+            return None
+        cols = [d[0] for d in self.conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'conditions' ORDER BY ordinal_position"
+        ).fetchall()]
+        return dict(zip(cols, rows[0]))
+
     # ------------------------------------------------------------------
     # Counting helpers
     # ------------------------------------------------------------------
@@ -2212,7 +2273,9 @@ class CorpusStore:
     def get_for_synthesiser(self) -> list[dict]:
         """Return findings for the synthesiser.
 
-        Stricter than thinker: also excludes high fabrication risk.
+        Stricter than thinker: also excludes high fabrication risk and
+        thought rows (the synthesiser works from findings, not internal
+        reasoning).
         """
         rows = self.conn.execute(
             """SELECT id, fact, source_url, confidence, trust_score,
@@ -2229,6 +2292,7 @@ class CorpusStore:
                FROM conditions
                WHERE consider_for_use = TRUE
                  AND row_type = 'finding'
+                 AND row_type != 'thought'
                  AND fabrication_risk < 0.80
                ORDER BY composite_quality DESC, confidence DESC, id ASC"""
         ).fetchall()
