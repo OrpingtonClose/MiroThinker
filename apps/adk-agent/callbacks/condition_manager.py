@@ -43,6 +43,21 @@ _pending_search_results: list[tuple[str, str, str, int]] = []  # (corpus_key, te
 _pending_search_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
+# Module-level corpus continuity — survives across AG-UI HTTP requests.
+#
+# The AG-UI adapter may overwrite session state between requests (the
+# frontend sends ``"state": {}`` which can wipe backend-only keys like
+# ``_prev_corpus_db_path``).  This module-level variable is the robust
+# fallback: it tracks the last closed corpus DB path so that the next
+# pipeline run in the same server process can reopen it.
+#
+# For multi-tenant safety we key by a stable identifier — the user query
+# fingerprint — so different conversations don't cross-contaminate.
+# ---------------------------------------------------------------------------
+_last_corpus_db_path: str = ""
+_corpus_continuity_map: dict[str, str] = {}  # query_fingerprint → db_path
+
+# ---------------------------------------------------------------------------
 # Background scoring threads — the maestro callback fires scoring in a
 # daemon thread so the asyncio event loop stays responsive (keepalives
 # can fire, SSE events are delivered).  The *next* search_executor
@@ -256,12 +271,13 @@ def researcher_condition_callback(
     if not findings_text or findings_text.strip() in _SENTINELS:
         # No new findings, but still restore corpus format so the thinker
         # doesn't lose context from previous iterations.
-        state["research_findings"] = corpus.format_for_thinker()
+        iteration = state.get("_corpus_iteration", 0)
+        state["research_findings"] = corpus.format_for_thinker(current_iteration=iteration)
         state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
         # Still advance iteration so stale-expansion cleanup and the
         # thinker see a fresh round number even when the researcher
         # produced no new findings.
-        state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
+        state["_corpus_iteration"] = iteration + 1
         return None
 
     # Phase 1: Ingest all text (lightweight, no scoring or battery).
@@ -279,7 +295,8 @@ def researcher_condition_callback(
     _score_and_battery(state)
 
     # Update state with structured corpus for thinker
-    state["research_findings"] = corpus.format_for_thinker()
+    iteration = state.get("_corpus_iteration", 0)
+    state["research_findings"] = corpus.format_for_thinker(current_iteration=iteration)
 
     # Also store synthesiser-formatted version for the final stage
     state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
@@ -445,7 +462,8 @@ async def search_executor_callback(
         logger.warning("Search executor failed (non-fatal): %s", exc, exc_info=True)
 
     # Update state with current corpus for the maestro
-    state["research_findings"] = corpus.format_for_thinker()
+    iteration = state.get("_corpus_iteration", 0)
+    state["research_findings"] = corpus.format_for_thinker(current_iteration=iteration)
     state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
 
     return None
@@ -504,7 +522,8 @@ def maestro_condition_callback(
     #  2. search_executor_callback waits for scoring and refreshes state
     #     before the maestro runs, so the maestro always sees scored data.
     #  3. Blocking the event loop here would defeat the purpose of this PR.
-    state["research_findings"] = corpus.format_for_thinker()
+    iteration = state.get("_corpus_iteration", 0)
+    state["research_findings"] = corpus.format_for_thinker(current_iteration=iteration)
     state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
 
     # Emit corpus stats to dashboard (also before thread start)
@@ -523,14 +542,29 @@ def maestro_condition_callback(
             pass
 
     def _background_scoring() -> None:
-        """Run scoring + dedup in a background thread."""
+        """Run scoring + dedup in a background thread.
+
+        P2 improvement: skip scoring for conditions already scored by
+        the maestro via execute_flock_sql().  ``score_new_conditions``
+        already checks ``score_version = 0`` so it naturally skips
+        maestro-scored rows.  We also skip the full algorithm battery
+        here — it runs during ``_score_and_battery`` in the main
+        ingestion path — to avoid redundant LLM calls.
+        """
         try:
+            # Only score conditions the maestro missed (score_version=0)
             scored = corpus.score_new_conditions(user_query)
             if scored:
                 logger.info("Maestro safety-net: scored %d conditions", scored)
+
+            # Dedup is cheap (SQL only) — always run it
             deduped = corpus.compute_duplications()
             if deduped:
                 logger.info("Maestro safety-net: deduped %d pairs", deduped)
+
+            # Composite quality is also cheap — refresh for newly scored
+            if scored:
+                corpus.compute_composite_quality()
         except Exception:
             logger.warning("Maestro safety-net scoring failed", exc_info=True)
 
@@ -614,6 +648,11 @@ def build_corpus_state(db_path: str = "") -> dict:
         # "(no findings yet)" matches the thinker's first-iteration check.
         "corpus_for_synthesis": "(no findings)",
         "research_findings": "(no findings yet)",
+        # Iteration context for thinker (P1)
+        "_prev_thinker_strategies": "(first iteration — no previous strategies)",
+        "_last_thinker_strategy": "",
+        # Cumulative cost tracking (P3) — only set if not already present
+        # (preserved across runs by cleanup_corpus)
     }
 
 
@@ -734,7 +773,8 @@ def synthesis_condition_callback(
 
     # Refresh corpus views so the thinker sees the enriched corpus
     corpus = _get_corpus(state)
-    state["research_findings"] = corpus.format_for_thinker()
+    iteration = state.get("_corpus_iteration", 0)
+    state["research_findings"] = corpus.format_for_thinker(current_iteration=iteration)
     state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
 
     # Save post-synthesis corpus snapshot for iteration diffs
@@ -776,6 +816,52 @@ def cleanup_corpus(state: dict) -> None:
     key = state.get("_corpus_key")
     if key and key in _corpus_stores:
         corpus = _corpus_stores[key]
+        # ── Corpus continuity: preserve the DB path for the next run ──
+        # Save to BOTH state AND module-level variables.  The AG-UI
+        # adapter may overwrite session state between requests, so the
+        # module-level fallback ensures continuity even when state is lost.
+        global _last_corpus_db_path
+        try:
+            db_path_str = str(corpus.db_path)
+            state["_prev_corpus_db_path"] = db_path_str
+            _last_corpus_db_path = db_path_str
+
+            # Also save to per-query map for multi-tenant safety
+            query_fp = state.get("user_query", "")[:200].strip().lower()
+            if query_fp:
+                _corpus_continuity_map[query_fp] = db_path_str
+
+            logger.info(
+                "cleanup_corpus: saved corpus path for continuity: %s "
+                "(module-level + state + query-map)",
+                db_path_str,
+            )
+        except Exception:
+            logger.warning("cleanup_corpus: failed to save continuity path", exc_info=True)
+
+        # ── P1: Save previous synthesiser report for next iteration ──
+        # The synthesiser can build on the previous report rather than
+        # starting fresh each time.
+        try:
+            synth = state.get("corpus_for_synthesis", "")
+            if synth and synth.strip() and synth != "(no findings)":
+                state["_prev_synthesiser_report"] = synth
+        except Exception:
+            pass
+
+        # ── P3: Accumulate cost from this run ──
+        try:
+            from tools.cost_tracker import get_session_cost
+            run_cost = get_session_cost()
+            prev = state.get("_cumulative_api_cost", 0.0)
+            state["_cumulative_api_cost"] = prev + run_cost
+            logger.info(
+                "cleanup_corpus: cumulative cost %.4f (this run %.4f)",
+                prev + run_cost, run_cost,
+            )
+        except Exception:
+            pass
+
         if not scoring_done:
             # Scoring thread still alive — do NOT close the connection
             # while it's mid-query.  Drop our reference and let the
@@ -799,6 +885,9 @@ def cleanup_corpus(state: dict) -> None:
             del _corpus_stores[key]
     # Clear corpus-related state keys so _init_pipeline_state
     # re-initialises cleanly on session reuse.
+    # NOTE: _prev_corpus_db_path, _prev_synthesiser_report, and
+    # _cumulative_api_cost are intentionally NOT cleared — they are
+    # the continuity bridge between pipeline runs in the same session.
     # ADK State objects don't support .pop(); use del with guard.
     for k in ("_corpus_key", "_corpus_db_path", "_corpus_iteration",
               "_expansion_targets",

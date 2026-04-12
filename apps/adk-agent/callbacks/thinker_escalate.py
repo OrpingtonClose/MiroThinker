@@ -37,9 +37,47 @@ def thinker_escalate_callback(
     session state.  If the text contains the ``EVIDENCE_SUFFICIENT`` sentinel
     the callback sets ``escalate = True`` so the ``LoopAgent`` exits.
 
+    Also tracks thinker strategies across iterations for context injection
+    and convergence detection.
+
     Returns ``None`` so the thinker's original output is preserved.
     """
-    strategy = callback_context.state.get("research_strategy", "")
+    state = callback_context.state
+    strategy = state.get("research_strategy", "")
+
+    # ── P1: Track strategies for iteration context injection ──
+    # Save a condensed summary of this strategy for the next iteration's
+    # thinker prompt so it knows what was tried before.
+    if strategy and strategy.strip():
+        iteration = state.get("_corpus_iteration", 0)
+        # Keep last ~500 chars per iteration to avoid prompt bloat
+        summary = strategy[:500]
+        prev = state.get("_prev_thinker_strategies", "")
+        separator = f"\n--- Iteration {iteration} strategy ---\n"
+        # Cap total history at ~2000 chars to prevent prompt overflow
+        new_history = prev + separator + summary
+        if len(new_history) > 2000:
+            new_history = new_history[-2000:]
+        state["_prev_thinker_strategies"] = new_history
+
+    # ── P1: Convergence detection ──
+    # If the thinker's strategy is very similar to the previous one,
+    # the pipeline has converged and should stop early.
+    if strategy and not (strategy and _SENTINEL in strategy):
+        prev_strategy = state.get("_last_thinker_strategy", "")
+        if prev_strategy and _strategies_converged(strategy, prev_strategy):
+            logger.info(
+                "Convergence detected — thinker strategy is repeating "
+                "previous iteration's queries. Escalating."
+            )
+            callback_context.actions.escalate = True
+            _c = get_active_collector()
+            if _c:
+                _c.emit_event("convergence_detected", data={
+                    "iteration": state.get("_corpus_iteration", 0),
+                })
+        state["_last_thinker_strategy"] = strategy
+
     if _SENTINEL in strategy:
         logger.info("Thinker signalled EVIDENCE_SUFFICIENT — escalating out of research loop")
         callback_context.actions.escalate = True
@@ -47,3 +85,32 @@ def thinker_escalate_callback(
         if _c:
             _c.thinker_escalate()
     return None
+
+
+def _strategies_converged(current: str, previous: str) -> bool:
+    """Detect if two strategies are substantively the same.
+
+    Uses keyword overlap as a lightweight convergence signal.
+    If >80% of the meaningful words in the current strategy appeared
+    in the previous one, the thinker is repeating itself.
+    """
+    import re as _re
+
+    def _keywords(text: str) -> set[str]:
+        words = set(_re.findall(r'\b[a-z]{4,}\b', text.lower()))
+        # Remove common stop words
+        stops = {
+            "this", "that", "with", "from", "have", "been", "will",
+            "would", "could", "should", "about", "which", "their",
+            "there", "these", "those", "then", "than", "when", "what",
+            "search", "find", "look", "also", "more", "most", "some",
+            "into", "each", "such", "much", "very", "just", "only",
+        }
+        return words - stops
+
+    curr_kw = _keywords(current)
+    prev_kw = _keywords(previous)
+    if not curr_kw or len(curr_kw) < 5:
+        return False
+    overlap = len(curr_kw & prev_kw) / len(curr_kw)
+    return overlap > 0.80

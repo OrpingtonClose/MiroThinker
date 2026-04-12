@@ -266,6 +266,8 @@ class CorpusStore:
                 expansion_tool TEXT DEFAULT 'none',
                 expansion_hint TEXT DEFAULT '',
                 expansion_fulfilled BOOLEAN DEFAULT FALSE,
+                expansion_gap TEXT DEFAULT '',
+                expansion_priority FLOAT DEFAULT 0.0,
 
                 -- Clustering
                 cluster_id INTEGER DEFAULT -1,
@@ -1234,7 +1236,14 @@ class CorpusStore:
                 final_chains.append(chain)
                 covered.update(chain)
 
-        # Store each chain as a narrative_chain row
+        # Remove stale narrative chains before rebuilding.
+        # This ensures chains reflect the current state of the corpus.
+        self.conn.execute(
+            "DELETE FROM conditions WHERE row_type = 'narrative_chain'"
+        )
+
+        # Store each chain as a narrative_chain row, tagged with the
+        # max iteration of its members for cross-iteration tracking.
         chain_count = 0
         for chain in final_chains:
             # Verify all members still exist and are active
@@ -1249,16 +1258,23 @@ class CorpusStore:
             if active < 2:
                 continue
 
+            # Tag chain with the max iteration of its members
+            max_iter = self.conn.execute(
+                f"SELECT COALESCE(MAX(iteration), 0) FROM conditions "
+                f"WHERE id IN ({placeholders_c})",
+                chain,
+            ).fetchone()[0]
+
             chain_id = self._next_id
             self._next_id += 1
             chain_fact = "chain:" + ",".join(str(x) for x in chain)
             self.conn.execute(
                 "INSERT INTO conditions "
                 "(id, fact, row_type, parent_id, related_id, "
-                "consider_for_use, relationship_score) "
-                "VALUES (?, ?, 'narrative_chain', ?, ?, FALSE, ?)",
+                "consider_for_use, relationship_score, iteration) "
+                "VALUES (?, ?, 'narrative_chain', ?, ?, FALSE, ?, ?)",
                 [chain_id, chain_fact,
-                 chain[0], chain[-1], float(len(chain))],
+                 chain[0], chain[-1], float(len(chain)), max_iter],
             )
             chain_count += 1
 
@@ -2358,43 +2374,100 @@ class CorpusStore:
             if src in atom_ids or tgt in atom_ids
         ]
 
-    def format_for_thinker(self) -> str:
-        """Format the corpus as 3-layer narrative for the thinker.
+    def format_for_thinker(self, current_iteration: int = 0) -> str:
+        """Format the corpus as two-tier briefing for the thinker.
 
-        Layer 1: Source chunks with original nuance preserved
-        Layer 2: Extracted atoms with quality annotations
-        Layer 3: Relationship edges and narrative chains
+        **Tier 1 — DELTA**: New findings from the current iteration get
+        the full 3-layer treatment (chunk text + atoms + relationships).
 
-        The thinker receives the full context needed to reason
-        about implications — that is the thinker's job.
+        **Tier 2 — SUMMARY**: Older findings are condensed into a
+        compact digest (one line per finding, grouped by angle/topic).
+
+        This dramatically reduces context size on later iterations
+        while still giving the thinker full visibility into what's new.
+
+        Args:
+            current_iteration: The current corpus iteration number.
+                When 0 or when all findings are from the same iteration,
+                falls back to the full 3-layer view.
         """
         conditions = self.get_for_thinker()
         if not conditions:
             return "(no findings yet)"
 
+        # Split into delta (current iteration) and prior findings
+        if current_iteration > 0:
+            delta = [c for c in conditions if c.get("iteration", 0) >= current_iteration]
+            prior = [c for c in conditions if c.get("iteration", 0) < current_iteration]
+        else:
+            delta = conditions
+            prior = []
+
         atom_ids = {c["id"] for c in conditions}
         cond_by_id = {c["id"]: c for c in conditions}
 
-        # Group atoms by their parent chunk
+        lines: list[str] = [
+            f"RESEARCH BRIEFING: {len(conditions)} findings "
+            f"({len(delta)} new this iteration, {len(prior)} from prior iterations)\n",
+        ]
+
+        # ── Tier 2: Condensed summary of PRIOR findings ──
+        if prior:
+            lines.append("=" * 60)
+            lines.append("PRIOR FINDINGS (condensed summary)")
+            lines.append("=" * 60)
+            lines.append("")
+
+            # Group prior findings by angle/topic for compact display
+            by_angle: dict[str, list[dict]] = defaultdict(list)
+            for c in prior:
+                angle = c.get("angle", "") or "general"
+                by_angle[angle].append(c)
+
+            for angle, findings in sorted(by_angle.items()):
+                lines.append(f"[{angle}] ({len(findings)} findings):")
+                # Show top findings by quality, one-line each
+                top = sorted(
+                    findings,
+                    key=lambda x: x.get("composite_quality") or 0,
+                    reverse=True,
+                )[:15]  # Cap at 15 per angle to keep it compact
+                for c in top:
+                    q = c.get("composite_quality") or 0
+                    fact = (c.get("fact") or "")[:200]
+                    lines.append(f"  [{c['id']}] (q={q:.2f}) {fact}")
+                if len(findings) > 15:
+                    lines.append(f"  ... and {len(findings) - 15} more findings")
+                lines.append("")
+
+        # ── Tier 1: Full detail for DELTA (new) findings ──
+        # Group delta atoms by their parent chunk
         by_chunk: dict[int, list[dict]] = defaultdict(list)
         orphans: list[dict] = []
-        for c in conditions:
+        for c in delta:
             pid = c.get("parent_id")
             if pid and pid > 0:
                 by_chunk[pid].append(c)
             else:
                 orphans.append(c)
 
-        lines: list[str] = [
-            f"RESEARCH BRIEFING: {len(conditions)} findings from "
-            f"{len(by_chunk)} source passages\n",
-        ]
-
-        # ------ Layer 1 + 2: Chunks with their atoms ------
-        lines.append("=" * 60)
-        lines.append("LAYER 1 & 2: SOURCE PASSAGES AND EXTRACTED FINDINGS")
-        lines.append("=" * 60)
-        lines.append("")
+        if delta:
+            lines.append("=" * 60)
+            lines.append("NEW FINDINGS (full detail)")
+            lines.append("=" * 60)
+            lines.append("")
+        else:
+            lines.append("=" * 60)
+            lines.append("ALL FINDINGS (full detail)")
+            lines.append("=" * 60)
+            lines.append("")
+            # No delta/prior split — show everything in full
+            for c in conditions:
+                pid = c.get("parent_id")
+                if pid and pid > 0:
+                    by_chunk[pid].append(c)
+                else:
+                    orphans.append(c)
 
         for chunk_id in sorted(by_chunk.keys()):
             atoms = by_chunk[chunk_id]
@@ -2503,7 +2576,27 @@ class CorpusStore:
             f"{awaiting} awaiting enrichment."
         )
 
-        return "\n".join(lines)
+        result = "\n".join(lines)
+
+        # ── Context overflow safeguard ──
+        # gpt-4o-mini has 128K tokens (~512K chars).  The thinker prompt
+        # also includes system instructions + conversation history, so
+        # cap the corpus briefing at ~300K chars (~75K tokens) to leave
+        # headroom.  Prefer keeping the corpus health summary (end) and
+        # the most recent findings (later chunks = higher iteration).
+        _MAX_THINKER_CHARS = 300_000
+        if len(result) > _MAX_THINKER_CHARS:
+            # Keep the last N chars (most recent findings + health summary)
+            truncation_note = (
+                f"[CORPUS TRUNCATED: {len(result)} chars → {_MAX_THINKER_CHARS} chars. "
+                f"Oldest findings omitted to fit context window. "
+                f"Focus on the newest material below.]\n\n"
+            )
+            result = truncation_note + result[-(
+                _MAX_THINKER_CHARS - len(truncation_note)
+            ):]
+
+        return result
 
     def format_for_synthesiser(self) -> str:
         """Format the corpus for the synthesiser — chunk-based layout.
@@ -2589,7 +2682,20 @@ class CorpusStore:
             f"{contradictions} contradictions to address."
         )
 
-        return "\n".join(lines)
+        result = "\n".join(lines)
+
+        # ── Context overflow safeguard (same as format_for_thinker) ──
+        _MAX_SYNTH_CHARS = 300_000
+        if len(result) > _MAX_SYNTH_CHARS:
+            truncation_note = (
+                f"[CORPUS TRUNCATED: {len(result)} chars → {_MAX_SYNTH_CHARS} chars. "
+                f"Oldest findings omitted to fit context window.]\n\n"
+            )
+            result = truncation_note + result[-(
+                _MAX_SYNTH_CHARS - len(truncation_note)
+            ):]
+
+        return result
 
     # ------------------------------------------------------------------
     # Unified ingestion (Flock atomisation)
@@ -2817,13 +2923,62 @@ class CorpusStore:
             existing = self.conn.execute(
                 "SELECT id FROM conditions WHERE fact = ? "
                 "AND row_type NOT IN ('raw', 'chunk') LIMIT 1",
-                [line],
+                [stripped],
             ).fetchone()
             if existing:
                 logger.debug(
-                    "Dedup: skipping duplicate fact (existing id=%d): %.80s",
-                    existing[0], line,
+                    "Dedup: skipping exact duplicate (existing id=%d): %.80s",
+                    existing[0], stripped,
                 )
+                continue
+
+            # Semantic dedup: keyword-overlap pre-filter.
+            # If >80% of this atom's significant words appear in an
+            # existing finding, it's likely a paraphrase — skip it.
+            _stop = {
+                "the", "a", "an", "is", "are", "was", "were", "be",
+                "been", "being", "have", "has", "had", "do", "does",
+                "did", "will", "would", "could", "should", "may",
+                "might", "shall", "can", "to", "of", "in", "for",
+                "on", "with", "at", "by", "from", "as", "into",
+                "through", "during", "before", "after", "and", "but",
+                "or", "nor", "not", "so", "yet", "both", "either",
+                "neither", "each", "every", "all", "any", "few",
+                "more", "most", "other", "some", "such", "no", "only",
+                "own", "same", "than", "too", "very", "that", "this",
+                "these", "those", "it", "its", "they", "their", "them",
+                "which", "what", "who", "whom", "when", "where", "how",
+            }
+            new_words = {
+                w for w in re.findall(r'\w+', stripped.lower())
+                if len(w) > 2 and w not in _stop
+            }
+            is_semantic_dup = False
+            if len(new_words) >= 3:
+                # Check against recent findings (last 200 to keep it fast)
+                recent = self.conn.execute(
+                    "SELECT id, fact FROM conditions "
+                    "WHERE row_type = 'finding' "
+                    "AND consider_for_use = TRUE "
+                    "ORDER BY id DESC LIMIT 200",
+                ).fetchall()
+                for eid, efact in recent:
+                    existing_words = {
+                        w for w in re.findall(r'\w+', (efact or "").lower())
+                        if len(w) > 2 and w not in _stop
+                    }
+                    if not existing_words:
+                        continue
+                    overlap = len(new_words & existing_words) / len(new_words)
+                    if overlap > 0.80:
+                        logger.debug(
+                            "Semantic dedup: %.0f%% overlap with id=%d, "
+                            "skipping: %.80s",
+                            overlap * 100, eid, stripped,
+                        )
+                        is_semantic_dup = True
+                        break
+            if is_semantic_dup:
                 continue
 
             # Insert atom with parent_id → chunk for lineage

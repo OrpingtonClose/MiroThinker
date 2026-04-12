@@ -102,10 +102,56 @@ def _init_pipeline_state(
     """
     state = callback_context.state
     if "_corpus_key" not in state:
-        for k, v in build_corpus_state().items():
+        # ── Corpus continuity: reopen the previous run's corpus ──
+        # Try state first, then module-level fallbacks (query map, last path).
+        # The AG-UI adapter may overwrite session state between requests,
+        # so the module-level variables are the robust fallback.
+        from callbacks.condition_manager import (
+            _corpus_continuity_map,
+            _last_corpus_db_path,
+        )
+
+        prev_db = state.get("_prev_corpus_db_path", "")
+        if not prev_db:
+            # Fallback 1: query-fingerprint map (multi-tenant safe)
+            query_fp = state.get("user_query", "")[:200].strip().lower()
+            if query_fp and query_fp in _corpus_continuity_map:
+                prev_db = _corpus_continuity_map[query_fp]
+                logger.info(
+                    "Corpus continuity (query-map fallback): %s",
+                    prev_db,
+                )
+        if not prev_db and _last_corpus_db_path:
+            # Fallback 2: last corpus in this process (single-tenant)
+            prev_db = _last_corpus_db_path
+            logger.info(
+                "Corpus continuity (module-level fallback): %s",
+                prev_db,
+            )
+
+        # Verify the file actually exists before trying to reopen
+        import os as _os
+        if prev_db and not _os.path.exists(prev_db):
+            logger.warning(
+                "Corpus continuity: previous DB file not found: %s",
+                prev_db,
+            )
+            prev_db = ""
+
+        is_continuation = bool(prev_db)
+        if prev_db:
+            logger.info(
+                "Corpus continuity: reopening previous corpus at %s",
+                prev_db,
+            )
+        for k, v in build_corpus_state(db_path=prev_db).items():
             state[k] = v
         init_corpus(state)
         logger.info("Pipeline state initialised: corpus_key=%s", state["_corpus_key"])
+
+        # Track cumulative cost across expansion iterations
+        if "_cumulative_api_cost" not in state:
+            state["_cumulative_api_cost"] = 0.0
 
         # Reset per-session cost tracker so each pipeline run starts fresh
         try:
@@ -114,42 +160,48 @@ def _init_pipeline_state(
         except Exception:
             pass
 
-        # Run Phase 0 scout if this is a fresh pipeline
-        query = state.get("user_query", "")
-        if query:
-            from tools.scout import run_scout_phase
-            import threading as _threading
+        # ── P0: Skip scout on corpus re-open ──
+        # The scout decomposes the query and probes with cheap searches.
+        # On continuation runs the thinker already has the full corpus,
+        # so re-running the scout wastes 30-60s and may overwrite the
+        # thinker's accumulated context with a fresh landscape assessment.
+        if is_continuation:
+            logger.info(
+                "Skipping scout — corpus continuity re-open "
+                "(previous corpus has existing findings)"
+            )
+        else:
+            # Run Phase 0 scout only on fresh pipelines
+            query = state.get("user_query", "")
+            if query:
+                from tools.scout import run_scout_phase
+                import threading as _threading
 
-            # Cancel event prevents a timed-out scout from writing to
-            # state after the research loop has started.
-            cancel_event = _threading.Event()
+                # Cancel event prevents a timed-out scout from writing to
+                # state after the research loop has started.
+                cancel_event = _threading.Event()
 
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # ADK's event loop is already running — run in a
-                    # separate thread with its own event loop.
-                    # Do NOT use ThreadPoolExecutor as a context manager:
-                    # __exit__ calls shutdown(wait=True), which blocks
-                    # until the task finishes even after timeout.
-                    import concurrent.futures
-                    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                    try:
-                        future = pool.submit(
-                            asyncio.run,
-                            run_scout_phase(query, state, _cancel=cancel_event),
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        import concurrent.futures
+                        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                        try:
+                            future = pool.submit(
+                                asyncio.run,
+                                run_scout_phase(query, state, _cancel=cancel_event),
+                            )
+                            future.result(timeout=90)
+                        finally:
+                            cancel_event.set()
+                            pool.shutdown(wait=False, cancel_futures=True)
+                    else:
+                        loop.run_until_complete(
+                            run_scout_phase(query, state, _cancel=cancel_event)
                         )
-                        future.result(timeout=90)
-                    finally:
-                        cancel_event.set()
-                        pool.shutdown(wait=False, cancel_futures=True)
-                else:
-                    loop.run_until_complete(
-                        run_scout_phase(query, state, _cancel=cancel_event)
-                    )
-            except Exception as exc:
-                cancel_event.set()
-                logger.warning("Phase 0 scout failed (non-fatal): %s", exc)
+                except Exception as exc:
+                    cancel_event.set()
+                    logger.warning("Phase 0 scout failed (non-fatal): %s", exc)
 
     return None
 
