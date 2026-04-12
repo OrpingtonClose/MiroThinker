@@ -320,7 +320,11 @@ def _wait_for_pending_scoring(timeout: float = 300) -> None:
                 "Background scoring thread did not finish within %.0fs", timeout,
             )
     with _scoring_lock:
-        _scoring_thread = None
+        # Only clear the reference if the thread actually finished.
+        # If it timed out, keep the reference so future callers still
+        # wait (prevents concurrent DuckDB access / use-after-close).
+        if t is None or not t.is_alive():
+            _scoring_thread = None
 
 
 def search_executor_callback(
