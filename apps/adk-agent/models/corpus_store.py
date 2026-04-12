@@ -24,6 +24,7 @@ import json as _json
 import logging
 import os
 import re
+import threading
 import time
 import urllib.request
 from collections import defaultdict
@@ -127,6 +128,7 @@ class CorpusStore:
 
         self._setup_tables()
         self._next_id = self._compute_next_id()
+        self._write_lock = threading.Lock()
 
         # -- Tracing context (set by caller before battery runs) --
         self._trace_session_id: str = ""
@@ -544,23 +546,27 @@ class CorpusStore:
         They are IMMUTABLE — the maestro must never UPDATE, DELETE, or
         set ``consider_for_use=FALSE`` on them.
 
+        Thread-safe: uses ``_write_lock`` so parallel specialist thinkers
+        can call this concurrently without ID collisions.
+
         Returns the new row's ID.
         """
         fact = reasoning.strip()
         if not fact:
             raise ValueError("Cannot admit empty thought")
 
-        cid = self._next_id
-        self._next_id += 1
         now = datetime.now(timezone.utc).isoformat()
-        self.conn.execute(
-            """INSERT INTO conditions
-               (id, fact, row_type, parent_id, angle, strategy,
-                iteration, expansion_depth, consider_for_use, created_at)
-               VALUES (?, ?, 'thought', ?, ?, ?, ?, ?, TRUE, ?)""",
-            [cid, fact, parent_thought_id, angle, strategy,
-             iteration, expansion_depth, now],
-        )
+        with self._write_lock:
+            cid = self._next_id
+            self._next_id += 1
+            self.conn.execute(
+                """INSERT INTO conditions
+                   (id, fact, row_type, parent_id, angle, strategy,
+                    iteration, expansion_depth, consider_for_use, created_at)
+                   VALUES (?, ?, 'thought', ?, ?, ?, ?, ?, TRUE, ?)""",
+                [cid, fact, parent_thought_id, angle, strategy,
+                 iteration, expansion_depth, now],
+            )
         logger.debug("Admitted thought #%d: %d chars (parent=%s)", cid, len(fact), parent_thought_id)
         return cid
 
@@ -589,6 +595,90 @@ class CorpusStore:
             "WHERE table_name = 'conditions' ORDER BY ordinal_position"
         ).fetchall()]
         return dict(zip(cols, rows[0]))
+
+    def get_thoughts_by_angle(self, angle: str) -> list[dict]:
+        """Return all thought rows for a given *angle*, newest first."""
+        rows = self.conn.execute(
+            """SELECT id, fact, angle, strategy, iteration,
+                      expansion_depth, parent_id, created_at
+               FROM conditions
+               WHERE row_type = 'thought' AND angle = ?
+               ORDER BY id DESC""",
+            [angle],
+        ).fetchall()
+        cols = [
+            "id", "fact", "angle", "strategy", "iteration",
+            "expansion_depth", "parent_id", "created_at",
+        ]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def get_thought_chain(self, thought_id: int) -> list[dict]:
+        """Walk the parent chain from *thought_id* up to the root.
+
+        Returns a list ordered root-first (oldest ancestor first).
+        """
+        chain: list[dict] = []
+        seen: set[int] = set()
+        current_id: int | None = thought_id
+        while current_id is not None and current_id not in seen:
+            seen.add(current_id)
+            row = self.conn.execute(
+                """SELECT id, fact, angle, strategy, iteration,
+                          expansion_depth, parent_id, created_at
+                   FROM conditions
+                   WHERE id = ? AND row_type = 'thought'""",
+                [current_id],
+            ).fetchone()
+            if row is None:
+                break
+            cols = [
+                "id", "fact", "angle", "strategy", "iteration",
+                "expansion_depth", "parent_id", "created_at",
+            ]
+            d = dict(zip(cols, row))
+            chain.append(d)
+            current_id = d["parent_id"]
+        chain.reverse()
+        return chain
+
+    def get_thought_children(self, parent_id: int) -> list[dict]:
+        """Return all direct child thoughts of a given thought."""
+        rows = self.conn.execute(
+            """SELECT id, fact, angle, strategy, iteration,
+                      expansion_depth, parent_id, created_at
+               FROM conditions
+               WHERE row_type = 'thought' AND parent_id = ?
+               ORDER BY id ASC""",
+            [parent_id],
+        ).fetchall()
+        cols = [
+            "id", "fact", "angle", "strategy", "iteration",
+            "expansion_depth", "parent_id", "created_at",
+        ]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def count_thoughts(self, angle: str | None = None) -> int:
+        """Count thought rows, optionally filtered by angle."""
+        if angle is not None:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions "
+                "WHERE row_type = 'thought' AND angle = ?",
+                [angle],
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions WHERE row_type = 'thought'"
+            ).fetchone()
+        return row[0] if row else 0
+
+    def get_distinct_thought_angles(self) -> list[str]:
+        """Return all distinct angle values from thought rows."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT angle FROM conditions "
+            "WHERE row_type = 'thought' AND angle != '' "
+            "ORDER BY angle"
+        ).fetchall()
+        return [r[0] for r in rows]
 
     # ------------------------------------------------------------------
     # Counting helpers

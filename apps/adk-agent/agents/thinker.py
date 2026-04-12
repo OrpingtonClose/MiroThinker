@@ -149,6 +149,19 @@ Otherwise, output your next round of search tasks. Each task should specify:
 - Why this search matters (what gap it fills)
 - Language/locale considerations
 
+SPECIALIST ANGLES: After your search tasks, if you have identified \
+distinct research angles that would benefit from deep independent \
+analysis, list them in this exact format:
+
+SPECIALIST_ANGLES: [angle1, angle2, angle3]
+
+Each angle should be a concise label (2-6 words) naming a distinct line \
+of investigation — e.g. "regulatory compliance", "pricing mechanisms", \
+"community sentiment", "safety profile". Specialists will run parallel \
+deep-dives on these angles and contribute their findings as thought rows \
+for your next iteration. Only list angles where the corpus already has \
+enough evidence to support meaningful analysis.
+
 Be thorough. The downstream researcher will execute your plan literally, \
 so be specific about queries, angles, and priorities.
 """

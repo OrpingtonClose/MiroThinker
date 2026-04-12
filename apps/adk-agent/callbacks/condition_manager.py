@@ -623,6 +623,25 @@ def maestro_condition_callback(
         except Exception:
             logger.warning("Periodic synthesis failed (non-fatal)", exc_info=True)
 
+    # ── Thought swarm cycle ───────────────────────────────────────────
+    # Spawn parallel specialist thinkers for angles identified by the
+    # main thinker, then arbitrate competing conclusions and split broad
+    # thoughts into focused sub-claims.  All non-fatal — DuckDB failures
+    # or LLM errors never block the pipeline.
+    try:
+        from tools.swarm_thinkers import run_swarm_cycle
+        corpus = _get_corpus(state)
+        swarm_ids = run_swarm_cycle(state, corpus)
+        if swarm_ids:
+            logger.info(
+                "Swarm cycle produced %d new thoughts at iteration %d",
+                len(swarm_ids), iteration,
+            )
+            # Refresh corpus views so the thinker sees specialist thoughts
+            state["research_findings"] = corpus.format_for_thinker()
+    except Exception:
+        logger.warning("Swarm cycle failed (non-fatal)", exc_info=True)
+
     state["_corpus_iteration"] = iteration + 1
 
     return None  # preserve maestro output
@@ -919,3 +938,10 @@ def cleanup_corpus(state: dict) -> None:
     # messages reopen the same DuckDB file.  _get_corpus() lazily
     # recreates the CorpusStore from the surviving _corpus_db_path.
     # "Runs are episodes, the swarm is eternal." (PR #54 architecture)
+
+    # Reset the swarm router so the next pipeline run starts fresh.
+    try:
+        from tools.swarm_thinkers import reset_swarm_router
+        reset_swarm_router()
+    except Exception:
+        pass
