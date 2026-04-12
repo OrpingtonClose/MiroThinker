@@ -222,7 +222,7 @@ _maestro_with_search = SequentialAgent(
 
 research_loop = LoopAgent(
     name="research_loop",
-    max_iterations=3,
+    max_iterations=5,
     sub_agents=[thinker_agent, _maestro_with_search],
 )
 

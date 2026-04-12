@@ -406,6 +406,21 @@ def maestro_condition_callback(
     # Drain any remaining queued search results
     _drain_search_queue(state)
 
+    # Scoring safety net: ensure all conditions ingested during the
+    # search executor + maestro phase are scored and deduped.  The
+    # maestro may have created new rows via execute_flock_sql() that
+    # bypassed the normal ingestion scoring path.
+    user_query = state.get("user_query", "")
+    try:
+        scored = corpus.score_new_conditions(user_query)
+        if scored:
+            logger.info("Maestro safety-net: scored %d conditions", scored)
+        deduped = corpus.compute_duplications()
+        if deduped:
+            logger.info("Maestro safety-net: deduped %d pairs", deduped)
+    except Exception:
+        logger.warning("Maestro safety-net scoring failed", exc_info=True)
+
     # Update state with the maestro-organised corpus
     state["research_findings"] = corpus.format_for_thinker()
     state["corpus_for_synthesis"] = corpus.format_for_synthesiser()

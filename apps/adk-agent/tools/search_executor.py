@@ -2,18 +2,24 @@
 # This source code is licensed under the Apache 2.0 License.
 
 """
-Automated search executor — reads expansion targets, fires APIs programmatically.
+Maximally rich search executor -- multi-API fan-out, content extraction,
+academic search, citation following.
 
-This module replaces the researcher's search responsibility.  It reads
-``expansion_tool`` + ``expansion_hint`` from the corpus table and
-programmatically fires the specified API — no LLM involved.
+This module implements a 4-phase search strategy:
 
-The search executor runs between the thinker and maestro in the loop:
+  Phase A: Multi-API Surface Search
+    Send each query to 3+ APIs simultaneously for diverse results.
 
-  Thinker (strategy) → Search Executor (automated) → Maestro (organise)
+  Phase B: Content Extraction
+    Top URLs from Phase A -> Jina Reader / Apify for full article text.
 
-It also executes searches from the thinker's research strategy by
-extracting search queries from the strategy text.
+  Phase C: Academic Search (conditional)
+    Semantic Scholar + arXiv for research papers when thinker flags
+    academic sub-questions.
+
+  Phase D: Citation Following
+    Parse URLs from extracted content; follow the most promising ones
+    one hop deep.
 
 Results are ingested into the corpus via ``ingest_raw()`` and the
 expansion targets are marked as fulfilled.
@@ -28,7 +34,7 @@ import re
 import threading
 import time
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote as url_quote, urlparse
 
 import httpx
 
@@ -46,9 +52,24 @@ _TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 _JINA_API_KEY = os.environ.get("JINA_API_KEY", "")
 _MOJEEK_API_KEY = os.environ.get("MOJEEK_API_KEY", "")
 _APIFY_API_KEY = os.environ.get("APIFY_API_KEY", "")
+_MARGINALIA_API_KEY = os.environ.get("MARGINALIA_API_KEY", "")
+_SCITE_CLIENT_ID = os.environ.get("SCITE_CLIENT_ID", "")
+_SCITE_REFRESH_TOKEN = os.environ.get("SCITE_REFRESH_TOKEN", "")
+_SEMANTIC_SCHOLAR_API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
 
 # Maximum concurrent searches to prevent API rate limiting
 _MAX_CONCURRENT = int(os.environ.get("SEARCH_EXECUTOR_CONCURRENCY", "4"))
+
+# Content extraction budget per iteration — Jina Reader / Apify are
+# expensive (~$0.01-0.05 each).  Keep low to stay under ~$2/run.
+_MAX_CONTENT_EXTRACTIONS = int(
+    os.environ.get("MAX_CONTENT_EXTRACTIONS", "3"),
+)
+
+# Citation following budget per iteration — uses Jina/Apify too.
+_MAX_CITATION_FOLLOWS = int(
+    os.environ.get("MAX_CITATION_FOLLOWS", "2"),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -134,10 +155,13 @@ async def _search_kagi(query: str) -> str:
         return ""
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.get(
+            resp = await client.post(
                 "https://kagi.com/api/v0/fastgpt",
-                params={"query": query},
-                headers={"Authorization": f"Bot {_KAGI_API_KEY}"},
+                json={"query": query},
+                headers={
+                    "Authorization": f"Bot {_KAGI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
             )
             resp.raise_for_status()
             data = resp.json()
@@ -242,17 +266,18 @@ async def _search_perplexity(query: str) -> str:
         return ""
 
 
-async def _search_jina(query: str) -> str:
-    """Execute a Jina reader search and return formatted results."""
+async def _search_jina(query: str, num_results: int = 5) -> str:
+    """Execute a Jina search and return formatted results."""
     if not _JINA_API_KEY:
         return ""
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
-                f"https://s.jina.ai/{quote(query, safe='')}",
+                "https://s.jina.ai/" + url_quote(query),
                 headers={
                     "Authorization": f"Bearer {_JINA_API_KEY}",
                     "Accept": "application/json",
+                    "X-Retain-Images": "none",
                 },
             )
             resp.raise_for_status()
@@ -261,7 +286,7 @@ async def _search_jina(query: str) -> str:
             if not results:
                 return ""
             lines = [f"Jina search: {query}"]
-            for r in results[:5]:
+            for r in results[:num_results]:
                 title = r.get("title", "")
                 url = r.get("url", "")
                 content = r.get("content", "")[:500]
@@ -304,37 +329,357 @@ async def _search_mojeek(query: str, num_results: int = 5) -> str:
         return ""
 
 
+async def _search_marginalia(query: str, num_results: int = 5) -> str:
+    """Execute a Marginalia search (independent index, non-commercial web)."""
+    if not _MARGINALIA_API_KEY:
+        return ""
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.get(
+                "https://api.marginalia.nu/public/search/"
+                + url_quote(query),
+                params={"count": num_results, "index": 0},
+                headers={"X-Api-Key": _MARGINALIA_API_KEY},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            results = data.get("results", [])
+            if not results:
+                return ""
+            lines = [f"Marginalia search: {query}"]
+            for r in results[:num_results]:
+                title = r.get("title", "")
+                url = r.get("url", "")
+                desc = r.get("description", "")[:200]
+                lines.append(f"- {title} [{url}]: {desc}")
+            return "\n".join(lines)
+    except Exception as exc:
+        logger.warning("Marginalia search failed for '%s': %s", query[:60], exc)
+        return ""
+
+
 # ---------------------------------------------------------------------------
-# Tool routing — maps expansion_tool values to API functions
+# Content extraction APIs (Phase B)
+# ---------------------------------------------------------------------------
+
+async def _jina_reader(url: str) -> str:
+    """Extract full markdown content from a URL via Jina Reader.
+
+    Returns clean markdown text (up to 5000 chars) or empty string.
+    """
+    if not _JINA_API_KEY:
+        return ""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                f"https://r.jina.ai/{url}",
+                headers={
+                    "Authorization": f"Bearer {_JINA_API_KEY}",
+                    "Accept": "application/json",
+                    "X-Retain-Images": "none",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data.get("data", {}).get("content", "")
+            title = data.get("data", {}).get("title", "")
+            if not content:
+                return ""
+            lines = [f"Content extracted from: {title} [{url}]"]
+            lines.append(content[:5000])
+            return "\n".join(lines)
+    except Exception as exc:
+        logger.warning("Jina reader failed for '%s': %s", url[:80], exc)
+        return ""
+
+
+async def _apify_extract(url: str) -> str:
+    """Extract content via Apify web scraper (JS-heavy sites fallback)."""
+    if not _APIFY_API_KEY:
+        return ""
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                "https://api.apify.com/v2/acts/apify~website-content-crawler"
+                "/run-sync-get-dataset-items",
+                params={
+                    "token": _APIFY_API_KEY,
+                    "timeout": 30,
+                    "memory": 256,
+                },
+                json={
+                    "startUrls": [{"url": url}],
+                    "maxCrawlPages": 1,
+                    "crawlerType": "cheerio",
+                },
+                timeout=60.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if not data:
+                return ""
+            item = data[0] if isinstance(data, list) else data
+            text = item.get("text", "") or item.get("markdown", "")
+            title = (
+                item.get("metadata", {}).get("title", "")
+                or item.get("title", "")
+            )
+            if not text:
+                return ""
+            lines = [f"Content extracted (Apify) from: {title} [{url}]"]
+            lines.append(text[:5000])
+            return "\n".join(lines)
+    except Exception as exc:
+        logger.warning("Apify extract failed for '%s': %s", url[:80], exc)
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Academic search APIs (Phase C)
+# ---------------------------------------------------------------------------
+
+async def _search_semantic_scholar(
+    query: str, num_results: int = 5,
+) -> str:
+    """Search Semantic Scholar for academic papers."""
+    try:
+        headers: dict[str, str] = {}
+        if _SEMANTIC_SCHOLAR_API_KEY:
+            headers["x-api-key"] = _SEMANTIC_SCHOLAR_API_KEY
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.get(
+                "https://api.semanticscholar.org/graph/v1/paper/search",
+                params={
+                    "query": query,
+                    "limit": num_results,
+                    "fields": (
+                        "title,abstract,url,year,citationCount,"
+                        "authors.name,externalIds"
+                    ),
+                },
+                headers=headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            papers = data.get("data", [])
+            if not papers:
+                return ""
+            lines = [f"Semantic Scholar: {query}"]
+            for p in papers[:num_results]:
+                title = p.get("title", "")
+                year = p.get("year", "")
+                citations = p.get("citationCount", 0)
+                abstract = (p.get("abstract") or "")[:400]
+                url = p.get("url", "")
+                authors = ", ".join(
+                    a.get("name", "")
+                    for a in (p.get("authors") or [])[:3]
+                )
+                doi = (p.get("externalIds") or {}).get("DOI", "")
+                ref = f"[{url}]" if url else ""
+                if doi:
+                    ref = f"[https://doi.org/{doi}]"
+                lines.append(
+                    f"- {title} ({year}, {citations} citations, "
+                    f"{authors}) {ref}: {abstract}"
+                )
+            return "\n".join(lines)
+    except Exception as exc:
+        logger.warning(
+            "Semantic Scholar search failed for '%s': %s", query[:60], exc,
+        )
+        return ""
+
+
+async def _search_arxiv(query: str, num_results: int = 3) -> str:
+    """Search arXiv for preprints via the Atom feed API."""
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.get(
+                "http://export.arxiv.org/api/query",
+                params={
+                    "search_query": f"all:{query}",
+                    "start": 0,
+                    "max_results": num_results,
+                    "sortBy": "relevance",
+                },
+            )
+            resp.raise_for_status()
+            text = resp.text
+            entries = re.findall(
+                r"<entry>(.*?)</entry>", text, re.DOTALL,
+            )
+            if not entries:
+                return ""
+            lines = [f"arXiv search: {query}"]
+            for entry in entries[:num_results]:
+                title_m = re.search(
+                    r"<title>(.*?)</title>", entry, re.DOTALL,
+                )
+                title = (title_m.group(1).strip() if title_m else "")
+                title = re.sub(r"\s+", " ", title)
+                summary_m = re.search(
+                    r"<summary>(.*?)</summary>", entry, re.DOTALL,
+                )
+                summary = (
+                    summary_m.group(1).strip()[:400] if summary_m else ""
+                )
+                summary = re.sub(r"\s+", " ", summary)
+                id_m = re.search(r"<id>(.*?)</id>", entry)
+                entry_url = id_m.group(1).strip() if id_m else ""
+                authors = re.findall(r"<name>(.*?)</name>", entry)
+                author_str = ", ".join(authors[:3])
+                lines.append(
+                    f"- {title} ({author_str}) [{entry_url}]: {summary}"
+                )
+            return "\n".join(lines)
+    except Exception as exc:
+        logger.warning("arXiv search failed for '%s': %s", query[:60], exc)
+        return ""
+
+
+async def _search_scite(query: str, num_results: int = 5) -> str:
+    """Search scite.ai for smart citations (support/contradict analysis)."""
+    if not _SCITE_REFRESH_TOKEN or not _SCITE_CLIENT_ID:
+        return ""
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            token_resp = await client.post(
+                "https://api.scite.ai/oauth/token",
+                json={
+                    "grant_type": "refresh_token",
+                    "refresh_token": _SCITE_REFRESH_TOKEN,
+                    "client_id": _SCITE_CLIENT_ID,
+                },
+            )
+            token_resp.raise_for_status()
+            access_token = token_resp.json().get("access_token", "")
+            if not access_token:
+                return ""
+
+            resp = await client.get(
+                "https://api.scite.ai/search",
+                params={"q": query, "limit": num_results},
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            results = data.get("results", data.get("hits", []))
+            if not results:
+                return ""
+            lines = [f"scite.ai search: {query}"]
+            for r in results[:num_results]:
+                title = r.get("title", "")
+                doi = r.get("doi", "")
+                supporting = r.get("supporting", 0)
+                contradicting = r.get("contradicting", 0)
+                mentioning = r.get("mentioning", 0)
+                ref_url = f"https://doi.org/{doi}" if doi else ""
+                lines.append(
+                    f"- {title} [{ref_url}]: "
+                    f"{supporting} supporting, {contradicting} contradicting, "
+                    f"{mentioning} mentioning citations"
+                )
+            return "\n".join(lines)
+    except Exception as exc:
+        logger.warning("scite.ai search failed for '%s': %s", query[:60], exc)
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Multi-API fan-out
+# ---------------------------------------------------------------------------
+
+
+def _available_search_fns() -> list[Any]:
+    """Return all search functions whose API keys are configured."""
+    fns: list[Any] = []
+    if _EXA_API_KEY:
+        fns.append(_search_exa)
+    if _BRAVE_API_KEY:
+        fns.append(_search_brave)
+    if _TAVILY_API_KEY:
+        fns.append(_search_tavily)
+    if _PERPLEXITY_API_KEY:
+        fns.append(_search_perplexity)
+    if _JINA_API_KEY:
+        fns.append(_search_jina)
+    if _MOJEEK_API_KEY:
+        fns.append(_search_mojeek)
+    if _MARGINALIA_API_KEY:
+        fns.append(_search_marginalia)
+    if _KAGI_API_KEY:
+        fns.append(_search_kagi)
+    return fns
+
+
+_FAN_OUT_WIDTH = int(os.environ.get("FAN_OUT_WIDTH", "2"))
+
+
+def _pick_fan_out_apis(query_index: int) -> list[Any]:
+    """Pick APIs for a query using a rotating window.
+
+    Width is controlled by ``FAN_OUT_WIDTH`` (default 2) to keep
+    costs under ~$2/run.  Each query gets a different pair so overall
+    coverage is maximised across queries.
+    """
+    available = _available_search_fns()
+    width = min(_FAN_OUT_WIDTH, len(available))
+    if len(available) <= width:
+        return available
+
+    start = (query_index * width) % len(available)
+    picked: list[Any] = []
+    for i in range(width):
+        picked.append(available[(start + i) % len(available)])
+    return picked
+
+
+async def _execute_fan_out_search(
+    query: str, query_index: int,
+) -> list[str]:
+    """Execute a single query against multiple APIs simultaneously.
+
+    Returns a list of result strings (one per successful API).
+    """
+    apis = _pick_fan_out_apis(query_index)
+    if not apis:
+        return []
+
+    tasks = [api(query) for api in apis]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    return [
+        r for r in results
+        if isinstance(r, str) and r and r.strip()
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Tool routing
 # ---------------------------------------------------------------------------
 
 _TOOL_DISPATCH: dict[str, Any] = {
-    # Exa tools
     "web_search_exa": _search_exa,
     "web_search_advanced_exa": _search_exa,
     "crawling_exa": _search_exa,
-    # Brave tools
     "brave_web_search": _search_brave,
     "brave_news_search": _search_brave,
-    # Kagi tools
     "kagi_search": _search_kagi,
     "kagi_enrich_web": _search_kagi,
     "kagi_enrich_news": _search_kagi,
-    # Firecrawl — use Exa as fallback (firecrawl needs MCP)
     "firecrawl_search": _search_exa,
     "firecrawl_scrape": _search_exa,
-    # Tavily
     "tavily_deep_research": _search_tavily,
-    # Perplexity
     "perplexity_deep_research": _search_perplexity,
-    # Mojeek
     "mojeek_search": _search_mojeek,
-    # Jina
     "jina_search": _search_jina,
-    "jina_reader": _search_jina,
+    "jina_reader": _jina_reader,
+    "marginalia_search": _search_marginalia,
+    "semantic_scholar": _search_semantic_scholar,
+    "arxiv_search": _search_arxiv,
+    "scite_search": _search_scite,
 }
 
-# Fallback search order when the specified tool isn't available
 _FALLBACK_ORDER = [
     _search_exa,
     _search_brave,
@@ -342,6 +687,7 @@ _FALLBACK_ORDER = [
     _search_jina,
     _search_mojeek,
     _search_perplexity,
+    _search_marginalia,
     _search_kagi,
 ]
 
@@ -350,17 +696,15 @@ async def _execute_single_search(
     tool_name: str, query: str,
 ) -> str:
     """Execute a single search using the specified tool or fallback."""
-    # Try the specified tool first
     fn = _TOOL_DISPATCH.get(tool_name)
     if fn:
         result = await fn(query)
         if result:
             return result
 
-    # Fallback: try each search API in order until one works
     for fallback_fn in _FALLBACK_ORDER:
         if fallback_fn == fn:
-            continue  # Already tried this one
+            continue
         result = await fallback_fn(query)
         if result:
             return result
@@ -369,60 +713,96 @@ async def _execute_single_search(
 
 
 # ---------------------------------------------------------------------------
+# URL extraction from search results
+# ---------------------------------------------------------------------------
+
+_BARE_URL_RE = re.compile(r"(https?://[^\s)\]\"'>]+)")
+
+_SKIP_DOMAINS = {
+    "google.com", "bing.com", "yahoo.com", "duckduckgo.com",
+    "facebook.com", "twitter.com", "x.com", "instagram.com",
+    "youtube.com", "linkedin.com", "pinterest.com",
+    "amazon.com", "reddit.com",
+}
+
+
+def _extract_urls_from_text(text: str) -> list[str]:
+    """Extract unique URLs from search result text."""
+    urls: list[str] = []
+    seen: set[str] = set()
+    for match in _BARE_URL_RE.finditer(text):
+        url = match.group(1).rstrip(".,;:")
+        normalised = url.lower()
+        if normalised in seen:
+            continue
+        try:
+            domain = urlparse(url).netloc.lower().removeprefix("www.")
+            if domain in _SKIP_DOMAINS or any(
+                domain.endswith("." + skip) for skip in _SKIP_DOMAINS
+            ):
+                continue
+        except Exception:
+            continue
+        seen.add(normalised)
+        urls.append(url)
+    return urls
+
+
+def _select_diverse_urls(
+    urls: list[str], max_count: int,
+) -> list[str]:
+    """Select URLs prioritising domain diversity and authority."""
+    by_domain: dict[str, list[str]] = {}
+    for url in urls:
+        try:
+            domain = urlparse(url).netloc.lower().removeprefix("www.")
+        except Exception:
+            domain = "unknown"
+        by_domain.setdefault(domain, []).append(url)
+
+    priority_suffixes = (".edu", ".gov", ".org", ".ac.uk")
+    selected: list[str] = []
+    seen_domains: set[str] = set()
+
+    for domain, domain_urls in sorted(by_domain.items()):
+        if len(selected) >= max_count:
+            break
+        if any(domain.endswith(s) for s in priority_suffixes):
+            selected.append(domain_urls[0])
+            seen_domains.add(domain)
+
+    for domain, domain_urls in by_domain.items():
+        if len(selected) >= max_count:
+            break
+        if domain not in seen_domains:
+            selected.append(domain_urls[0])
+            seen_domains.add(domain)
+
+    return selected
+
+
+# ---------------------------------------------------------------------------
 # Strategy query extraction
 # ---------------------------------------------------------------------------
 
-# Patterns that extract explicit search queries from the thinker's
-# strategy.  ORDER MATTERS — explicit "SEARCH_QUERY:" markers are
-# checked first, then verb-based patterns, then numbered lists last
-# (numbered lists are noisy and often pick up meta-instructions).
 _QUERY_PATTERNS = [
-    # Explicit marker: "SEARCH_QUERY: ..." or "QUERY: ..."
     re.compile(r"(?:SEARCH_)?QUERY:\s*['\"]?(.+?)['\"]?\s*$", re.M),
-    # Quoted queries: "search for 'X'" / search for "X"
-    re.compile(r"[Ss]earch\s+(?:for\s+)?['\"](.+?)['\"]\s*(?:\.|$)", re.M),
-    # "Search for X" (unquoted)
-    re.compile(r"[Ss]earch\s+(?:for\s+)?(.+?)\s*(?:\.|$)", re.M),
-    # "Look up X" / "look into X"
+    re.compile(r"[Ss]earch\s+(?:for\s+)?['\"]?(.+?)['\"]?\s*(?:\.|$)", re.M),
     re.compile(r"[Ll]ook\s+(?:up|into)\s+['\"]?(.+?)['\"]?\s*(?:\.|$)", re.M),
-    # "Find X" / "find information about X"
     re.compile(
         r"[Ff]ind\s+(?:information\s+(?:about|on)\s+)?['\"]?(.+?)['\"]?\s*(?:\.|$)",
         re.M,
     ),
-    # "Investigate X"
     re.compile(r"[Ii]nvestigate\s+['\"]?(.+?)['\"]?\s*(?:\.|$)", re.M),
-    # "Research X"
     re.compile(r"[Rr]esearch\s+['\"]?(.+?)['\"]?\s*(?:\.|$)", re.M),
-    # Numbered list items: "1. Query text" — ONLY if short and looks
-    # like a search query (no verbs like "should", "must", "consider")
     re.compile(r"^\s*(?:\d+[.)]\s*|-\s+)(.{15,120})\s*$", re.M),
-]
-
-
-# Words that indicate a line is a meta-instruction, not a search query.
-# NOTE: words that are also common research topics (strategy, approach,
-# methodology, framework) have a trailing space to avoid matching inside
-# compound terms like "AI strategy developments".
-_SKIP_WORDS = [
-    "evidence_sufficient", "stop searching", "do not", "don't",
-    "the researcher", "the thinker", "the maestro",
-    "should ", "must ", "consider ", "ensure ", "focus on",
-    "prioritize", "prioritise", "important to", "note that",
-    "strategy ", "approach ", "methodology ", "framework ",
-    "we need to", "we should", "next step", "in order to",
-    "this will", "this would", "hypothesis", "assess ",
-    "evaluate ", "determine ", "analyze ", "analyse ",
 ]
 
 
 def extract_search_queries(strategy_text: str) -> list[str]:
     """Extract search queries from the thinker's research strategy.
 
-    Uses pattern matching to find explicit search instructions.
-    Heavily filters meta-instructions that the thinker produces
-    (e.g. "Consider investigating…", "We should focus on…").
-    Returns deduplicated queries, capped at 8.
+    Returns deduplicated queries, capped at 10.
     """
     if not strategy_text or not strategy_text.strip():
         return []
@@ -430,33 +810,47 @@ def extract_search_queries(strategy_text: str) -> list[str]:
     queries: list[str] = []
     seen: set[str] = set()
 
-    # The last pattern in _QUERY_PATTERNS is the numbered-list pattern
-    # which is noisy and captures meta-instructions.  Verb-prefixed
-    # patterns ("search for X", "find X") already have strong signal
-    # so we trust those extractions without skip-word filtering.
-    noisy_pattern = _QUERY_PATTERNS[-1]
-
     for pattern in _QUERY_PATTERNS:
         for match in pattern.finditer(strategy_text):
             q = match.group(1).strip()
-            # Clean up: remove trailing punctuation, quotes
             q = q.rstrip(".,;:!?\"')")
-            # Skip too short or too long
             if len(q) < 10 or len(q) > 200:
                 continue
-            # Only apply meta-instruction filter to the noisy
-            # numbered-list pattern — high-signal verb patterns
-            # ("search for X", "find X") are trusted as-is.
             lower = q.lower()
-            if pattern is noisy_pattern:
-                if any(skip in lower for skip in _SKIP_WORDS):
-                    continue
+            if any(
+                skip in lower
+                for skip in [
+                    "evidence_sufficient",
+                    "stop searching",
+                    "do not",
+                    "the researcher",
+                    "the thinker",
+                    "the maestro",
+                ]
+            ):
+                continue
             normalised = lower.strip()
             if normalised not in seen:
                 seen.add(normalised)
                 queries.append(q)
 
-    return queries[:8]
+    return queries[:10]
+
+
+def _detect_academic_need(strategy_text: str) -> bool:
+    """Detect if the thinker's strategy flags academic research needs."""
+    if not strategy_text:
+        return False
+    lower = strategy_text.lower()
+    academic_signals = [
+        "academic", "research paper", "peer-reviewed", "journal",
+        "pubmed", "clinical trial", "meta-analysis", "systematic review",
+        "scientific", "study", "mechanism", "pathophysiology",
+        "molecular", "in vivo", "in vitro", "randomized controlled",
+        "literature review", "evidence-based",
+        "arxiv", "semantic scholar", "preprint",
+    ]
+    return sum(1 for s in academic_signals if s in lower) >= 2
 
 
 # ---------------------------------------------------------------------------
@@ -467,17 +861,17 @@ async def run_search_executor(
     state: dict,
     cancel: threading.Event | None = None,
 ) -> dict[str, int]:
-    """Run the automated search executor.
+    """Run the maximally rich search executor.
 
-    Reads expansion targets from the corpus and the thinker's strategy,
-    fires the appropriate APIs, and ingests results into the corpus.
+    4-phase search strategy:
+      A. Multi-API Surface Search -- each query to 3 APIs simultaneously
+      B. Content Extraction -- top URLs via Jina Reader / Apify
+      C. Academic Search -- Semantic Scholar + arXiv (when flagged)
+      D. Citation Following -- parse extracted content for more URLs
 
     Args:
         state: Pipeline session state dict.
-        cancel: Optional threading.Event.  When set, the executor stops
-            ingesting results and returns early.  Used by
-            ``search_executor_callback`` to prevent an orphaned worker
-            thread from accessing DuckDB after timeout.
+        cancel: Optional threading.Event for early stop.
 
     Returns a dict with execution stats.
     """
@@ -487,7 +881,6 @@ async def run_search_executor(
     iteration = state.get("_corpus_iteration", 0)
     strategy = state.get("research_strategy", "")
 
-    # Check for EVIDENCE_SUFFICIENT — don't search if thinker says stop
     if strategy and "EVIDENCE_SUFFICIENT" in strategy:
         logger.info("Search executor: thinker says EVIDENCE_SUFFICIENT, skipping")
         return {"skipped": True, "reason": "EVIDENCE_SUFFICIENT"}
@@ -495,55 +888,49 @@ async def run_search_executor(
     stats: dict[str, int] = {
         "expansion_searches": 0,
         "strategy_searches": 0,
+        "fan_out_searches": 0,
+        "content_extractions": 0,
+        "academic_searches": 0,
+        "citation_follows": 0,
         "total_results": 0,
         "total_ingested": 0,
     }
 
-    # Collect all search tasks
-    # (tool, query, source_type, target_id_or_None)
+    semaphore = asyncio.Semaphore(_MAX_CONCURRENT)
+
+    # -------------------------------------------------------------------
+    # Phase A: Multi-API Surface Search
+    # -------------------------------------------------------------------
+
     search_tasks: list[tuple[str, str, str, int | None]] = []
 
-    # 1. Expansion targets from the corpus (quality/specificity gates)
+    # A1. Expansion targets from the corpus
     expansion_targets = corpus.get_expansion_targets()
     for target in expansion_targets[:6]:
         tool = target.get("strategy", "brave_web_search")
         hint = target.get("hint", "")
         if hint:
-            search_tasks.append((tool, hint, f"expansion_{tool}", target["id"]))
+            search_tasks.append(
+                (tool, hint, f"expansion_{tool}", target["id"]),
+            )
             stats["expansion_searches"] += 1
 
-    # 2. Strategy queries from the thinker
+    # A2. Strategy queries -- fan-out to multiple APIs
     strategy_queries = extract_search_queries(strategy)
-    for query in strategy_queries[:6]:
-        # Distribute across ALL available search engines for diversity
-        idx = len(search_tasks)
-        tools_cycle = [
-            "web_search_advanced_exa",
-            "brave_web_search",
-            "tavily_deep_research",
-            "perplexity_deep_research",
-            "mojeek_search",
-            "kagi_search",
-        ]
-        tool = tools_cycle[idx % len(tools_cycle)]
-        search_tasks.append((tool, query, "strategy_search", None))
+    fan_out_tasks: list[tuple[str, int]] = []
+    for i, query in enumerate(strategy_queries[:6]):
+        fan_out_tasks.append((query, i))
         stats["strategy_searches"] += 1
-        logger.info("Strategy query [%s]: %s", tool, query[:80])
 
-    if not search_tasks:
+    if not search_tasks and not fan_out_tasks:
         logger.info("Search executor: no searches to execute")
         return stats
 
     logger.info(
-        "Search executor: %d searches to execute "
-        "(%d expansion, %d strategy)",
-        len(search_tasks),
+        "Search executor Phase A: %d expansion + %d strategy (fan-out)",
         stats["expansion_searches"],
         stats["strategy_searches"],
     )
-
-    # Execute searches with concurrency limit
-    semaphore = asyncio.Semaphore(_MAX_CONCURRENT)
 
     async def _bounded_search(
         tool: str, query: str, source_type: str,
@@ -553,33 +940,73 @@ async def run_search_executor(
             result = await _execute_single_search(tool, query)
             return result, source_type, target_id
 
-    tasks = [
+    expansion_coros = [
         _bounded_search(tool, query, source_type, target_id)
         for tool, query, source_type, target_id in search_tasks
     ]
 
+    async def _bounded_fan_out(
+        query: str, idx: int,
+    ) -> list[tuple[str, str, None]]:
+        async with semaphore:
+            results = await _execute_fan_out_search(query, idx)
+            return [(r, "strategy_fan_out", None) for r in results]
+
+    fan_out_coros = [
+        _bounded_fan_out(query, idx) for query, idx in fan_out_tasks
+    ]
+
     start = time.monotonic()
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    elapsed = time.monotonic() - start
 
-    # Track which expansion target IDs had successful searches
+    # Run both expansion and fan-out in parallel
+    gather_tasks: list[Any] = []
+    if expansion_coros:
+        gather_tasks.append(asyncio.gather(*expansion_coros, return_exceptions=True))
+    if fan_out_coros:
+        gather_tasks.append(asyncio.gather(*fan_out_coros, return_exceptions=True))
+
+    all_results = await asyncio.gather(*gather_tasks, return_exceptions=True)
+
+    flat_results: list[tuple[str, str, int | None]] = []
+
+    result_idx = 0
+    if expansion_coros:
+        expansion_results = (
+            all_results[result_idx]
+            if not isinstance(all_results[result_idx], Exception) else []
+        )
+        for result in expansion_results:
+            if isinstance(result, Exception):
+                continue
+            flat_results.append(result)
+        result_idx += 1
+
+    if fan_out_coros:
+        fan_out_results = (
+            all_results[result_idx]
+            if not isinstance(all_results[result_idx], Exception) else []
+        )
+        for result in fan_out_results:
+            if isinstance(result, Exception):
+                continue
+            if isinstance(result, list):
+                flat_results.extend(result)
+                stats["fan_out_searches"] += len(result)
+
+    elapsed_a = time.monotonic() - start
+
     fulfilled_target_ids: set[int] = set()
+    all_result_text: list[str] = []
 
-    # Ingest results into corpus
-    for i, result in enumerate(results):
-        # Check cancellation before each corpus write
+    for text, source_type, target_id in flat_results:
         if cancel and cancel.is_set():
-            logger.info("Search executor: cancelled, stopping ingestion")
+            logger.info("Search executor: cancelled, stopping")
             break
-
-        if isinstance(result, Exception):
-            logger.warning("Search task %d failed: %s", i, result)
-            continue
-        text, source_type, target_id = result
         if not text or not text.strip():
             continue
 
         stats["total_results"] += 1
+        all_result_text.append(text)
         try:
             ids = corpus.ingest_raw(
                 raw_text=text,
@@ -589,15 +1016,208 @@ async def run_search_executor(
                 iteration=iteration,
             )
             stats["total_ingested"] += len(ids)
-            # Only mark as fulfilled if ingestion succeeded
             if target_id is not None and ids:
                 fulfilled_target_ids.add(target_id)
         except Exception:
             logger.warning(
-                "Failed to ingest search result %d", i, exc_info=True,
+                "Failed to ingest search result", exc_info=True,
             )
 
-    # Mark only successfully searched expansion targets as fulfilled
+    logger.info(
+        "Phase A complete: %d results, %d ingested (%.1fs)",
+        stats["total_results"], stats["total_ingested"], elapsed_a,
+    )
+
+    # -------------------------------------------------------------------
+    # Phase B: Content Extraction (Jina Reader + Apify fallback)
+    # -------------------------------------------------------------------
+    extracted_text: list[str] = []
+    diverse_urls: list[str] = []
+
+    if not (cancel and cancel.is_set()):
+        combined_text = "\n".join(all_result_text)
+        all_urls = _extract_urls_from_text(combined_text)
+        diverse_urls = _select_diverse_urls(
+            all_urls, _MAX_CONTENT_EXTRACTIONS,
+        )
+
+        if diverse_urls:
+            logger.info(
+                "Phase B: extracting content from %d URLs (of %d found)",
+                len(diverse_urls), len(all_urls),
+            )
+
+            async def _bounded_extract(
+                ext_url: str,
+            ) -> tuple[str, str]:
+                async with semaphore:
+                    content = await _jina_reader(ext_url)
+                    if not content:
+                        content = await _apify_extract(ext_url)
+                    return content, ext_url
+
+            extract_coros = [_bounded_extract(u) for u in diverse_urls]
+            extract_results = await asyncio.gather(
+                *extract_coros, return_exceptions=True,
+            )
+
+            for result in extract_results:
+                if cancel and cancel.is_set():
+                    break
+                if isinstance(result, Exception):
+                    continue
+                content, ext_url = result
+                if not content or not content.strip():
+                    continue
+
+                stats["content_extractions"] += 1
+                extracted_text.append(content)
+                try:
+                    ids = corpus.ingest_raw(
+                        raw_text=content,
+                        source_type="content_extraction",
+                        source_ref=ext_url,
+                        angle=f"iteration_{iteration}",
+                        iteration=iteration,
+                    )
+                    stats["total_ingested"] += len(ids)
+                except Exception:
+                    logger.warning(
+                        "Failed to ingest extracted content from %s",
+                        ext_url[:80], exc_info=True,
+                    )
+
+            logger.info(
+                "Phase B complete: %d content extractions",
+                stats["content_extractions"],
+            )
+
+    # -------------------------------------------------------------------
+    # Phase C: Academic Search (conditional)
+    # -------------------------------------------------------------------
+    if not (cancel and cancel.is_set()) and _detect_academic_need(strategy):
+        logger.info(
+            "Phase C: academic search triggered by thinker strategy",
+        )
+
+        academic_queries = strategy_queries[:3]
+
+        async def _bounded_academic(coro: Any) -> str:
+            async with semaphore:
+                return await coro
+
+        academic_coros: list[Any] = []
+        for q in academic_queries:
+            academic_coros.append(_bounded_academic(_search_semantic_scholar(q)))
+            academic_coros.append(_bounded_academic(_search_arxiv(q)))
+
+        if _SCITE_REFRESH_TOKEN and _SCITE_CLIENT_ID:
+            for q in academic_queries[:2]:
+                academic_coros.append(_bounded_academic(_search_scite(q)))
+
+        academic_results = await asyncio.gather(
+            *academic_coros, return_exceptions=True,
+        )
+
+        for result in academic_results:
+            if cancel and cancel.is_set():
+                break
+            if isinstance(result, Exception) or not result:
+                continue
+            if not isinstance(result, str) or not result.strip():
+                continue
+
+            stats["academic_searches"] += 1
+            try:
+                ids = corpus.ingest_raw(
+                    raw_text=result,
+                    source_type="academic_search",
+                    source_ref="search_executor",
+                    angle=f"iteration_{iteration}_academic",
+                    iteration=iteration,
+                )
+                stats["total_ingested"] += len(ids)
+            except Exception:
+                logger.warning(
+                    "Failed to ingest academic result", exc_info=True,
+                )
+
+        logger.info(
+            "Phase C complete: %d academic results ingested",
+            stats["academic_searches"],
+        )
+
+    # -------------------------------------------------------------------
+    # Phase D: Citation Following (one hop)
+    # -------------------------------------------------------------------
+    if (
+        not (cancel and cancel.is_set())
+        and extracted_text
+        and stats.get("content_extractions", 0) > 0
+    ):
+        citation_text = "\n".join(extracted_text)
+        citation_urls = _extract_urls_from_text(citation_text)
+        already_extracted = set(diverse_urls)
+        new_urls = [
+            u for u in citation_urls if u not in already_extracted
+        ]
+        follow_urls = _select_diverse_urls(
+            new_urls, _MAX_CITATION_FOLLOWS,
+        )
+
+        if follow_urls:
+            logger.info(
+                "Phase D: following %d citations (of %d new URLs)",
+                len(follow_urls), len(new_urls),
+            )
+
+            async def _bounded_follow(
+                follow_url: str,
+            ) -> tuple[str, str]:
+                async with semaphore:
+                    content = await _jina_reader(follow_url)
+                    if not content:
+                        content = await _apify_extract(follow_url)
+                    return content, follow_url
+
+            follow_coros = [_bounded_follow(u) for u in follow_urls]
+            follow_results = await asyncio.gather(
+                *follow_coros, return_exceptions=True,
+            )
+
+            for result in follow_results:
+                if cancel and cancel.is_set():
+                    break
+                if isinstance(result, Exception):
+                    continue
+                content, follow_url = result
+                if not content or not content.strip():
+                    continue
+
+                stats["citation_follows"] += 1
+                try:
+                    ids = corpus.ingest_raw(
+                        raw_text=content,
+                        source_type="citation_follow",
+                        source_ref=follow_url,
+                        angle=f"iteration_{iteration}_citations",
+                        iteration=iteration,
+                    )
+                    stats["total_ingested"] += len(ids)
+                except Exception:
+                    logger.warning(
+                        "Failed to ingest citation from %s",
+                        follow_url[:80], exc_info=True,
+                    )
+
+            logger.info(
+                "Phase D complete: %d citations followed",
+                stats["citation_follows"],
+            )
+
+    # -------------------------------------------------------------------
+    # Mark expansion targets as fulfilled
+    # -------------------------------------------------------------------
     if not (cancel and cancel.is_set()):
         for target_id in fulfilled_target_ids:
             try:
@@ -609,12 +1229,15 @@ async def run_search_executor(
             except Exception:
                 pass
 
+    total_elapsed = time.monotonic() - start
     logger.info(
-        "Search executor complete: %d searches, %d results, "
-        "%d atoms ingested (%.1fs)",
-        len(search_tasks),
+        "Search executor complete: %d surface, %d extractions, "
+        "%d academic, %d citations, %d total ingested (%.1fs)",
         stats["total_results"],
+        stats["content_extractions"],
+        stats["academic_searches"],
+        stats["citation_follows"],
         stats["total_ingested"],
-        elapsed,
+        total_elapsed,
     )
     return stats
