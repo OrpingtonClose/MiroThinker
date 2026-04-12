@@ -20,6 +20,7 @@ Flock turns it into queryable atoms with gradient-flag scoring.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import TYPE_CHECKING, Optional
 
@@ -139,12 +140,14 @@ def _ingest_only(
             iteration=iteration,
         )
 
+    user_query = state.get("user_query", "")
     ids = corpus.ingest_raw(
         raw_text=text,
         source_type=source_type,
         source_ref="",
         angle=f"iteration_{iteration}",
         iteration=iteration,
+        user_query=user_query,
     )
     admitted_count = len(ids)
     total_count = corpus.count()
@@ -408,11 +411,12 @@ async def search_executor_callback(
                 # loop responsive so SSE keepalive comments fire during
                 # long search operations.  Previously future.result()
                 # blocked the event loop for up to 120s.
+                _se_timeout = int(os.environ.get("SEARCH_EXECUTOR_TIMEOUT", "300"))
                 wrapped = asyncio.wrap_future(future)
-                stats = await asyncio.wait_for(wrapped, timeout=120)
+                stats = await asyncio.wait_for(wrapped, timeout=_se_timeout)
             except asyncio.TimeoutError:
                 timed_out = True
-                logger.warning("Search executor timed out after 120s")
+                logger.warning("Search executor timed out after %ds", _se_timeout)
                 # Signal the worker to stop touching DuckDB.
                 cancel_event.set()
                 # Non-blocking wait for the worker to honour the cancel
