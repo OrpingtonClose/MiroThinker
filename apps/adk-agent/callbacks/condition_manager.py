@@ -455,6 +455,27 @@ def maestro_condition_callback(
     # comments from being delivered and causing client disconnects.
     user_query = state.get("user_query", "")
 
+    # Snapshot corpus state BEFORE starting the background thread.
+    # DuckDB connections are not thread-safe, so all reads must happen
+    # on the main thread before the scoring thread starts writing.
+    state["research_findings"] = corpus.format_for_thinker()
+    state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
+
+    # Emit corpus stats to dashboard (also before thread start)
+    if _c:
+        try:
+            total = corpus.count()
+            iteration = state.get("_corpus_iteration", 0)
+            # Pass 0 for admitted — the maestro organises existing
+            # conditions, it doesn't ingest new ones.
+            _c.corpus_update(0, total, iteration)
+            _c.emit_event("maestro_complete", data={
+                "total_conditions": total,
+                "iteration": iteration,
+            })
+        except Exception:
+            pass
+
     def _background_scoring() -> None:
         """Run scoring + dedup in a background thread."""
         try:
@@ -477,27 +498,6 @@ def maestro_condition_callback(
             name="maestro-safety-scoring",
         )
         _scoring_thread.start()
-
-    # Update state with the maestro-organised corpus (current snapshot
-    # before scoring — the next search_executor_callback will wait for
-    # scoring to finish and refresh again).
-    state["research_findings"] = corpus.format_for_thinker()
-    state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
-
-    # Emit corpus stats to dashboard
-    if _c:
-        try:
-            total = corpus.count()
-            iteration = state.get("_corpus_iteration", 0)
-            # Pass 0 for admitted — the maestro organises existing
-            # conditions, it doesn't ingest new ones.
-            _c.corpus_update(0, total, iteration)
-            _c.emit_event("maestro_complete", data={
-                "total_conditions": total,
-                "iteration": iteration,
-            })
-        except Exception:
-            pass
 
     # Advance iteration at the loop boundary — the maestro is the last
     # agent in each LoopAgent iteration.
