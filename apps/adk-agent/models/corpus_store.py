@@ -2811,6 +2811,21 @@ class CorpusStore:
             if not stripped:
                 continue
 
+            # Dedup: skip exact-match facts already in the corpus.
+            # Exclude row_type='raw' and 'chunk' so we don't match rows
+            # just inserted earlier in this method.
+            existing = self.conn.execute(
+                "SELECT id FROM conditions WHERE fact = ? "
+                "AND row_type NOT IN ('raw', 'chunk') LIMIT 1",
+                [line],
+            ).fetchone()
+            if existing:
+                logger.debug(
+                    "Dedup: skipping duplicate fact (existing id=%d): %.80s",
+                    existing[0], line,
+                )
+                continue
+
             # Insert atom with parent_id → chunk for lineage
             cid = self._next_id
             self._next_id += 1
