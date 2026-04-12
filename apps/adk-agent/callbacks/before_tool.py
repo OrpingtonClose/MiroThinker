@@ -42,6 +42,11 @@ _provider_semaphores: Dict[str, threading.Semaphore] = {
     "exa": threading.Semaphore(_EXA_CONCURRENCY),
     "firecrawl": threading.Semaphore(_FIRECRAWL_CONCURRENCY),
     "kagi": threading.Semaphore(_KAGI_CONCURRENCY),
+    # New MCP servers (PR #47) — moderate concurrency
+    "semantic_scholar": threading.Semaphore(3),
+    "arxiv": threading.Semaphore(3),
+    "wikipedia": threading.Semaphore(3),
+    "brightdata": threading.Semaphore(3),
     # Deep research tools — low concurrency (1 each) to prevent
     # parallel expensive calls from blowing through the budget.
     "perplexity": threading.Semaphore(1),
@@ -71,6 +76,24 @@ _TOOL_TO_PROVIDER: Dict[str, str] = {
     "kagi_fastgpt": "kagi",
     "kagi_enrich_web": "kagi",
     "kagi_enrich_news": "kagi",
+    # New MCP servers (PR #47) — prefixed tools
+    "ss_search_papers": "semantic_scholar",
+    "ss_get_paper": "semantic_scholar",
+    "ss_get_paper_citations": "semantic_scholar",
+    "ss_get_paper_references": "semantic_scholar",
+    "ss_batch_get_papers": "semantic_scholar",
+    "ss_search_authors": "semantic_scholar",
+    "ss_get_author": "semantic_scholar",
+    "ss_get_author_papers": "semantic_scholar",
+    "ss_get_recommendations": "semantic_scholar",
+    "arxiv_search_papers": "arxiv",
+    "arxiv_get_paper": "arxiv",
+    "arxiv_search_by_category": "arxiv",
+    "wiki_search": "wikipedia",
+    "wiki_read": "wikipedia",
+    "bd_search_engine": "brightdata",
+    "bd_scrape_as_markdown": "brightdata",
+    "bd_scrape_as_html": "brightdata",
     # Deep research tools (budget-gated)
     "perplexity_deep_research": "perplexity",
     "grok_deep_research": "grok",
