@@ -356,7 +356,12 @@ def search_executor_callback(
 
     # Wait for any background scoring from the previous maestro
     # callback to finish before touching DuckDB.
-    _wait_for_pending_scoring()
+    if not _wait_for_pending_scoring():
+        logger.warning(
+            "search_executor_callback: scoring thread still alive — "
+            "skipping search executor to avoid concurrent DuckDB access",
+        )
+        return None
 
     # Set tracing context
     iteration = state.get("_corpus_iteration", 0)
@@ -647,8 +652,9 @@ def run_swarm_synthesis(state: dict) -> str:
     if not _wait_for_pending_scoring():
         logger.warning(
             "run_swarm_synthesis: scoring thread still alive — "
-            "proceeding with pre-scoring corpus snapshot",
+            "returning cached corpus_for_synthesis to avoid concurrent DuckDB access",
         )
+        return state.get("corpus_for_synthesis", "")
 
     # Ensure trace context is set for swarm LLM calls
     _c = get_active_collector()
