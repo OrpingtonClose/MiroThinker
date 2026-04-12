@@ -307,32 +307,29 @@ def researcher_condition_callback(
 # Search Executor callback (new maestro architecture)
 # ---------------------------------------------------------------------------
 
-def _wait_for_pending_scoring(corpus_key: str, timeout: float = 300) -> bool:
-    """Block until the background scoring thread for *corpus_key* completes.
+def _wait_for_pending_scoring(corpus_key: str) -> bool:
+    """NON-BLOCKING check whether the background scoring thread has finished.
 
-    Called at the start of ``search_executor_callback`` to ensure
-    DuckDB isn't accessed concurrently.  Safe to call even when no
-    scoring thread is active.
+    This function NEVER calls ``thread.join()`` or any other blocking
+    primitive.  Blocking here would freeze the asyncio event loop and
+    prevent SSE keepalive comments from being delivered — exactly the
+    bug this PR fixes.
 
     Returns ``True`` if DuckDB is safe to access (thread finished or
     was never running).  Returns ``False`` if the thread is **still
-    alive** after the timeout — callers MUST NOT touch DuckDB in
-    this case.
+    alive** — callers MUST NOT touch DuckDB in this case.
     """
     with _scoring_lock:
         t = _scoring_threads.get(corpus_key)
     if t is not None and t.is_alive():
-        logger.info("Waiting for background scoring thread to finish (key=%s)…", corpus_key)
-        t.join(timeout=timeout)
-        if t.is_alive():
-            logger.warning(
-                "Background scoring thread did not finish within %.0fs (key=%s)",
-                timeout, corpus_key,
-            )
-            return False
+        logger.info(
+            "Scoring thread still alive (key=%s) — returning False",
+            corpus_key,
+        )
+        return False
     with _scoring_lock:
         # Only clear the reference if it still points to the same thread
-        # we waited on AND that thread actually finished.  If
+        # we checked AND that thread actually finished.  If
         # maestro_condition_callback assigned a *new* thread between the
         # two lock acquisitions, we must not clear it (TOCTOU guard).
         if _scoring_threads.get(corpus_key) is t and (t is None or not t.is_alive()):
@@ -340,7 +337,7 @@ def _wait_for_pending_scoring(corpus_key: str, timeout: float = 300) -> bool:
     return True
 
 
-def search_executor_callback(
+async def search_executor_callback(
     callback_context: CallbackContext,
 ) -> Optional[genai_types.Content]:
     """Before-agent callback: run the automated search executor.
@@ -352,6 +349,11 @@ def search_executor_callback(
     This replaces the researcher's search responsibility.  Runs as a
     before_agent_callback on the maestro so searches complete before
     the maestro starts organising.
+
+    ASYNC: ADK awaits this callback (``inspect.isawaitable`` check in
+    ``base_agent.py``).  Using ``await`` instead of blocking
+    ``future.result()`` keeps the event loop responsive so SSE
+    keepalive comments can fire during long search operations.
     """
     import asyncio
 
@@ -359,8 +361,7 @@ def search_executor_callback(
     corpus = _get_corpus(state)
     _c = get_active_collector()
 
-    # Wait for any background scoring from the previous maestro
-    # callback to finish before touching DuckDB.
+    # Non-blocking check: is the background scoring thread still alive?
     corpus_key = state.get("_corpus_key", "default")
     if not _wait_for_pending_scoring(corpus_key):
         logger.warning(
@@ -402,15 +403,20 @@ def search_executor_callback(
                     asyncio.run,
                     run_search_executor(state, cancel=cancel_event),
                 )
-                stats = future.result(timeout=120)
-            except concurrent.futures.TimeoutError:
+                # NON-BLOCKING: wrap the concurrent.futures.Future as
+                # an asyncio.Future and await it.  This keeps the event
+                # loop responsive so SSE keepalive comments fire during
+                # long search operations.  Previously future.result()
+                # blocked the event loop for up to 120s.
+                wrapped = asyncio.wrap_future(future)
+                stats = await asyncio.wait_for(wrapped, timeout=120)
+            except asyncio.TimeoutError:
                 timed_out = True
                 logger.warning("Search executor timed out after 120s")
                 # Signal the worker to stop touching DuckDB.
                 cancel_event.set()
-                # Wait briefly for the worker to finish its current
-                # DuckDB call and honour the cancel flag.  This
-                # prevents concurrent DuckDB access on the main thread.
+                # Brief blocking wait for the worker to honour the cancel
+                # flag.  5s is short enough to not starve keepalives.
                 try:
                     future.result(timeout=5)
                 except (concurrent.futures.TimeoutError, Exception):
@@ -526,24 +532,14 @@ def maestro_condition_callback(
 
     corpus_key = state.get("_corpus_key", "default")
 
-    # Read thread reference under lock, then join OUTSIDE the lock.
-    # Holding _scoring_lock during join() would block all concurrent
-    # sessions for up to 10s — exactly the event-loop freeze this PR
-    # aims to prevent.
+    # NON-BLOCKING check: is the previous scoring thread still alive?
+    # We NEVER call join() here — even a 10s join blocks the event loop
+    # and prevents SSE keepalive comments from being delivered.
     with _scoring_lock:
         old_t = _scoring_threads.get(corpus_key)
-
-    if old_t is not None and old_t.is_alive():
-        old_t.join(timeout=10)
-
-    with _scoring_lock:
-        # Re-check: another callback may have already replaced the thread.
-        current = _scoring_threads.get(corpus_key)
-        if current is not None and current is not old_t:
-            pass  # Another callback already started a new thread
-        elif old_t is not None and old_t.is_alive():
+        if old_t is not None and old_t.is_alive():
             logger.warning(
-                "Previous scoring thread still alive after 10s (key=%s) — "
+                "Previous scoring thread still alive (key=%s) — "
                 "skipping safety-net scoring to avoid concurrent DuckDB access",
                 corpus_key,
             )
@@ -653,7 +649,7 @@ def get_corpus_text(state: dict) -> str:
     the synthesiser can produce its report.
     """
     corpus_key = state.get("_corpus_key", "default")
-    if not _wait_for_pending_scoring(corpus_key, timeout=60):
+    if not _wait_for_pending_scoring(corpus_key):
         logger.warning("get_corpus_text: scoring thread still alive — returning cached state")
         return state.get("corpus_for_synthesis", "")
     key = state.get("_corpus_key")
@@ -680,7 +676,7 @@ def run_swarm_synthesis(state: dict) -> str:
     corpus = _corpus_stores[key]
     user_query = state.get("user_query", "")
 
-    # Wait for background scoring to finish before accessing DuckDB.
+    # Non-blocking check: is scoring still running?
     corpus_key = key  # reuse the key we already validated above
     if not _wait_for_pending_scoring(corpus_key):
         logger.warning(
@@ -760,9 +756,19 @@ def cleanup_corpus(state: dict) -> None:
     :func:`_init_pipeline_state` properly re-initialises on the next
     pipeline run within the same session.
     """
-    # Ensure background scoring is done before closing the DB.
+    # Best-effort wait for background scoring before closing the DB.
+    # This is the ONE place where a blocking join is acceptable —
+    # the pipeline is finishing and no more SSE events will be sent.
     corpus_key = state.get("_corpus_key", "default")
-    scoring_done = _wait_for_pending_scoring(corpus_key, timeout=60)
+    with _scoring_lock:
+        _cleanup_t = _scoring_threads.get(corpus_key)
+    if _cleanup_t is not None and _cleanup_t.is_alive():
+        logger.info("cleanup_corpus: waiting up to 30s for scoring thread (key=%s)", corpus_key)
+        _cleanup_t.join(timeout=30)
+    scoring_done = _cleanup_t is None or not _cleanup_t.is_alive()
+    with _scoring_lock:
+        if _scoring_threads.get(corpus_key) is _cleanup_t:
+            _scoring_threads.pop(corpus_key, None)
     key = state.get("_corpus_key")
     if key and key in _corpus_stores:
         corpus = _corpus_stores[key]
@@ -772,7 +778,7 @@ def cleanup_corpus(state: dict) -> None:
             # daemon thread finish naturally; the connection will be
             # garbage-collected once the thread exits.
             logger.warning(
-                "cleanup_corpus: scoring thread still alive after 60s — "
+                "cleanup_corpus: scoring thread still alive after 30s — "
                 "abandoning CorpusStore for key=%s (will GC after thread exits)",
                 key,
             )
