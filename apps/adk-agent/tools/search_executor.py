@@ -1091,14 +1091,19 @@ async def run_search_executor(
         )
 
         academic_queries = strategy_queries[:4]
+
+        async def _bounded_academic(coro: Any) -> str:
+            async with semaphore:
+                return await coro
+
         academic_coros: list[Any] = []
         for q in academic_queries:
-            academic_coros.append(_search_semantic_scholar(q))
-            academic_coros.append(_search_arxiv(q))
+            academic_coros.append(_bounded_academic(_search_semantic_scholar(q)))
+            academic_coros.append(_bounded_academic(_search_arxiv(q)))
 
         if _SCITE_REFRESH_TOKEN and _SCITE_CLIENT_ID:
             for q in academic_queries[:2]:
-                academic_coros.append(_search_scite(q))
+                academic_coros.append(_bounded_academic(_search_scite(q)))
 
         academic_results = await asyncio.gather(
             *academic_coros, return_exceptions=True,
