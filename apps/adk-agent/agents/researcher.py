@@ -115,6 +115,40 @@ kagi_enrich_news)
 - Example: kagi_search(query="cloudberry jam documentary Finland")
 - Example: kagi_summarize(url="https://example.com/long-article")
 
+**Semantic Scholar** (search_papers, get_paper, get_paper_citations, \
+get_paper_references, batch_get_papers, search_authors, get_author, \
+get_author_papers, get_recommendations)
+- Best for: academic papers, citation graphs, author profiles
+- 200M+ papers indexed — searches by keyword, DOI, arXiv ID, PMID
+- get_paper_citations / get_paper_references: follow citation chains
+- get_recommendations: find related papers based on a seed paper
+- Example: search_papers(query="omega-3 resolvin inflammation diabetes")
+
+**arXiv** (search_papers, get_paper, search_by_category)
+- Best for: cutting-edge preprints in physics, CS, math, biology
+- Free, no API key needed
+- search_by_category: browse by arXiv category (cs.AI, cs.LG, q-bio, etc.)
+- Example: search_papers(query="specialized pro-resolving mediators DHA")
+
+**Wikipedia** (search, read)
+- Best for: fact-checking, background context, structured knowledge
+- search: find Wikipedia articles by keyword
+- read: get full article content as clean markdown
+- Example: search(query="resolvin biochemistry")
+
+**Bright Data** (search_engine, scrape_as_markdown, scrape_as_html)
+- Best for: scraping sites that block regular scrapers (paywalls, \
+  CAPTCHAs, geo-restrictions, anti-bot)
+- search_engine: web search via Bright Data's unblocking proxy
+- scrape_as_markdown: extract page content as markdown through anti-block
+- Use when Firecrawl or Exa fail with 403/429 errors
+- Example: scrape_as_markdown(url="https://blocked-site.com/article")
+
+**DuckDB** (query, describe_table, list_tables, load_csv, load_parquet, etc.)
+- Best for: SQL queries on local data, loading CSV/Parquet files
+- 32+ tools including graph algorithms (PageRank, community detection)
+- Use when you need to analyse structured data or run SQL
+
 **tool-python** (E2B sandbox for code execution)
 - Best for: data parsing, calculations, analysis of gathered data
 
@@ -157,11 +191,15 @@ researcher_agent = Agent(
     model=build_model(),
     description=(
         "Research agent that reads the thinker's strategy and executes "
-        "searches using Brave, Firecrawl, Exa, Kagi, and E2B tools directly. "
+        "searches using Brave, Firecrawl, Exa, Kagi, Semantic Scholar, "
+        "arXiv, Wikipedia, Bright Data, DuckDB, and E2B tools directly. "
         "Emits parallel tool calls for concurrent execution."
     ),
     instruction=RESEARCHER_INSTRUCTION,
-    tools=get_tools(["brave-search", "firecrawl", "exa", "kagi", "tool-python"]) + RESEARCH_TOOLS + DEEP_RESEARCH_TOOLS,
+    tools=get_tools([
+        "brave-search", "firecrawl", "exa", "kagi", "tool-python",
+        "semantic-scholar", "arxiv", "wikipedia", "brightdata", "duckdb",
+    ]) + RESEARCH_TOOLS + DEEP_RESEARCH_TOOLS,
     before_model_callback=before_model_callback,
     after_model_callback=after_model_callback,
     before_tool_callback=before_tool_callback,

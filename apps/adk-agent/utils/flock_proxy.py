@@ -43,7 +43,7 @@ import logging
 import os
 import threading
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from aiohttp import web
 
@@ -52,6 +52,38 @@ logger = logging.getLogger(__name__)
 _FLOCK_PROXY_PORT = int(os.environ.get("FLOCK_PROXY_PORT", "18199"))
 _proxy_started = False
 _proxy_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Progress callback — lets corpus_sql.py observe Flock LLM calls in real time
+# ---------------------------------------------------------------------------
+
+_progress_callback: Optional[Callable[[int, str], None]] = None
+_progress_cb_lock = threading.Lock()
+_flock_call_counter: int = 0
+
+
+def register_flock_progress(cb: Callable[[int, str], None]) -> None:
+    """Register a callback invoked after every Flock LLM completion.
+
+    Args:
+        cb: Called with ``(call_number, model_name)`` after each call.
+    """
+    global _progress_callback, _flock_call_counter
+    with _progress_cb_lock:
+        _flock_call_counter = 0
+        _progress_callback = cb
+
+
+def unregister_flock_progress() -> None:
+    """Remove the progress callback."""
+    global _progress_callback
+    with _progress_cb_lock:
+        _progress_callback = None
+
+
+def get_flock_call_count() -> int:
+    """Return the number of Flock LLM calls since the last registration."""
+    return _flock_call_counter
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +227,17 @@ async def _proxy_handler(request: web.Request) -> web.Response:
                     msg["content"] = _wrap_content_as_json(
                         msg["content"], had_schema,
                     )
+
+            # Notify progress callback (thread-safe)
+            with _progress_cb_lock:
+                global _flock_call_counter
+                _flock_call_counter += 1
+                cb = _progress_callback
+            if cb:
+                try:
+                    cb(_flock_call_counter, inst.model)
+                except Exception:
+                    logger.debug("Flock progress callback error", exc_info=True)
 
             logger.debug("Proxy response OK (model=%s)", inst.model)
             return web.json_response(resp_dict)

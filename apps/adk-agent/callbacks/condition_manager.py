@@ -20,6 +20,7 @@ Flock turns it into queryable atoms with gradient-flag scoring.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import TYPE_CHECKING, Optional
 
@@ -40,6 +41,20 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _pending_search_results: list[tuple[str, str, str, int]] = []  # (corpus_key, text, source_type, iteration)
 _pending_search_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Background scoring threads — the maestro callback fires scoring in a
+# daemon thread so the asyncio event loop stays responsive (keepalives
+# can fire, SSE events are delivered).  The *next* search_executor
+# callback waits for this thread before touching DuckDB.
+#
+# Keyed by corpus_key so concurrent sessions don't block each other.
+# Each session has its own CorpusStore / DuckDB connection, so cross-
+# session synchronisation is unnecessary and harmful (it would block
+# unrelated event loops, defeating the purpose of this PR).
+# ---------------------------------------------------------------------------
+_scoring_threads: dict[str, threading.Thread] = {}
+_scoring_lock = threading.Lock()
 
 
 def queue_search_result(
@@ -84,7 +99,7 @@ def _drain_search_queue(state: dict) -> int:
     total_admitted = 0
     for _key, text, source_type, iteration in mine:
         try:
-            admitted = _ingest_text_into_corpus(state, text, source_type)
+            admitted = _ingest_only(state, text, source_type)
             total_admitted += admitted
         except Exception:
             logger.warning(
@@ -100,12 +115,16 @@ def _drain_search_queue(state: dict) -> int:
     return total_admitted
 
 
-def _ingest_text_into_corpus(
+def _ingest_only(
     state: dict,
     text: str,
     source_type: str,
 ) -> int:
-    """Shared helper: atomise *text* and ingest into the session corpus.
+    """Atomise *text* and ingest into the corpus — no scoring or battery.
+
+    This is the lightweight ingestion path.  Scoring, dedup, and the
+    full algorithm battery should be run **once** after all ingestion
+    for the iteration is complete (see :func:`_score_and_battery`).
 
     Returns the number of newly admitted conditions.
     """
@@ -121,12 +140,14 @@ def _ingest_text_into_corpus(
             iteration=iteration,
         )
 
+    user_query = state.get("user_query", "")
     ids = corpus.ingest_raw(
         raw_text=text,
         source_type=source_type,
         source_ref="",
         angle=f"iteration_{iteration}",
         iteration=iteration,
+        user_query=user_query,
     )
     admitted_count = len(ids)
     total_count = corpus.count()
@@ -139,8 +160,26 @@ def _ingest_text_into_corpus(
         if _c:
             _c.corpus_update(admitted_count, total_count, iteration)
 
-    # Score & dedup
+    return admitted_count
+
+
+def _score_and_battery(state: dict) -> dict:
+    """Run scoring, dedup, and the full algorithm battery once.
+
+    Call this **after** all ingestion for the current iteration is
+    complete.  Previously this ran inside ``_ingest_text_into_corpus``
+    which was called per-source, causing N redundant battery runs
+    (each with hundreds of LLM calls) and making the pipeline appear
+    to hang.
+
+    Returns the battery results dict.
+    """
+    corpus = _get_corpus(state)
+    iteration = state.get("_corpus_iteration", 0)
     user_query = state.get("user_query", "")
+    _c = get_active_collector()
+
+    # Score & dedup
     scored = corpus.score_new_conditions(user_query)
     if scored:
         logger.info("Scored %d conditions via Flock", scored)
@@ -175,7 +214,26 @@ def _ingest_text_into_corpus(
             [t["strategy"] for t in expansion_targets[:5]],
         )
 
-    return admitted_count
+    return battery_results
+
+
+def _ingest_text_into_corpus(
+    state: dict,
+    text: str,
+    source_type: str,
+) -> int:
+    """Atomise, ingest, score, and run battery — legacy all-in-one path.
+
+    Only used by :func:`synthesis_condition_callback` where there is a
+    single ingestion per call.  The researcher path uses the split
+    :func:`_ingest_only` + :func:`_score_and_battery` to avoid
+    redundant battery runs.
+
+    Returns the number of newly admitted conditions.
+    """
+    admitted = _ingest_only(state, text, source_type)
+    _score_and_battery(state)
+    return admitted
 
 
 def researcher_condition_callback(
@@ -185,6 +243,10 @@ def researcher_condition_callback(
 
     Reads ``state["research_findings"]``, ingests via Flock atomisation,
     and updates state with formatted corpus.
+
+    .. deprecated::
+        Kept for backward compatibility.  The new maestro architecture
+        uses :func:`search_executor_callback` + :func:`maestro_condition_callback`.
     """
     state = callback_context.state
 
@@ -202,11 +264,19 @@ def researcher_condition_callback(
         state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
         return None
 
-    _ingest_text_into_corpus(state, findings_text, "researcher")
+    # Phase 1: Ingest all text (lightweight, no scoring or battery).
+    # Previously _ingest_text_into_corpus ran score+dedup+battery per
+    # source, causing N redundant battery runs (each with hundreds of
+    # LLM calls) that made the pipeline appear to hang.
+    _ingest_only(state, findings_text, "researcher")
 
     # Drain any search results queued by parallel after_tool_callbacks.
     # This is the single-threaded point where DuckDB access is safe.
     _drain_search_queue(state)
+
+    # Phase 2: Score, dedup, and run the algorithm battery ONCE for
+    # all conditions ingested in this iteration.
+    _score_and_battery(state)
 
     # Update state with structured corpus for thinker
     state["research_findings"] = corpus.format_for_thinker()
@@ -234,6 +304,263 @@ def researcher_condition_callback(
     state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
 
     return None  # preserve original researcher output
+
+
+# ---------------------------------------------------------------------------
+# Search Executor callback (new maestro architecture)
+# ---------------------------------------------------------------------------
+
+def _wait_for_pending_scoring(corpus_key: str) -> bool:
+    """NON-BLOCKING check whether the background scoring thread has finished.
+
+    This function NEVER calls ``thread.join()`` or any other blocking
+    primitive.  Blocking here would freeze the asyncio event loop and
+    prevent SSE keepalive comments from being delivered — exactly the
+    bug this PR fixes.
+
+    Returns ``True`` if DuckDB is safe to access (thread finished or
+    was never running).  Returns ``False`` if the thread is **still
+    alive** — callers MUST NOT touch DuckDB in this case.
+    """
+    with _scoring_lock:
+        t = _scoring_threads.get(corpus_key)
+    if t is not None and t.is_alive():
+        logger.info(
+            "Scoring thread still alive (key=%s) — returning False",
+            corpus_key,
+        )
+        return False
+    with _scoring_lock:
+        # Only clear the reference if it still points to the same thread
+        # we checked AND that thread actually finished.  If
+        # maestro_condition_callback assigned a *new* thread between the
+        # two lock acquisitions, we must not clear it (TOCTOU guard).
+        if _scoring_threads.get(corpus_key) is t and (t is None or not t.is_alive()):
+            _scoring_threads.pop(corpus_key, None)
+    return True
+
+
+async def search_executor_callback(
+    callback_context: CallbackContext,
+) -> Optional[genai_types.Content]:
+    """Before-agent callback: run the automated search executor.
+
+    Reads expansion targets from the corpus table and the thinker's
+    research strategy, programmatically fires search APIs (no LLM),
+    and ingests results into the corpus.
+
+    This replaces the researcher's search responsibility.  Runs as a
+    before_agent_callback on the maestro so searches complete before
+    the maestro starts organising.
+
+    ASYNC: ADK awaits this callback (``inspect.isawaitable`` check in
+    ``base_agent.py``).  Using ``await`` instead of blocking
+    ``future.result()`` keeps the event loop responsive so SSE
+    keepalive comments can fire during long search operations.
+    """
+    import asyncio
+
+    state = callback_context.state
+    corpus = _get_corpus(state)
+    _c = get_active_collector()
+
+    # Non-blocking check: is the background scoring thread still alive?
+    corpus_key = state.get("_corpus_key", "default")
+    if not _wait_for_pending_scoring(corpus_key):
+        logger.warning(
+            "search_executor_callback: scoring thread still alive — "
+            "skipping entire search+maestro iteration to avoid concurrent DuckDB access",
+        )
+        # Return Content (not None) to SHORT-CIRCUIT the SequentialAgent.
+        # Returning None means "proceed" in ADK — the maestro sub-agent
+        # would still run and access DuckDB via execute_flock_sql().
+        return genai_types.Content(
+            parts=[genai_types.Part(text="[Scoring thread still active — skipping this iteration]")],
+        )
+
+    # Set tracing context
+    iteration = state.get("_corpus_iteration", 0)
+    if _c:
+        corpus.set_trace_context(
+            session_id=_c.session_id,
+            iteration=iteration,
+        )
+
+    # Drain any queued search results from previous tool callbacks
+    _drain_search_queue(state)
+
+    # Run the automated search executor
+    try:
+        import threading
+        from tools.search_executor import run_search_executor
+
+        cancel_event = threading.Event()
+
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            timed_out = False
+            try:
+                future = pool.submit(
+                    asyncio.run,
+                    run_search_executor(state, cancel=cancel_event),
+                )
+                # NON-BLOCKING: wrap the concurrent.futures.Future as
+                # an asyncio.Future and await it.  This keeps the event
+                # loop responsive so SSE keepalive comments fire during
+                # long search operations.  Previously future.result()
+                # blocked the event loop for up to 120s.
+                _se_timeout = int(os.environ.get("SEARCH_EXECUTOR_TIMEOUT", "300"))
+                wrapped = asyncio.wrap_future(future)
+                stats = await asyncio.wait_for(wrapped, timeout=_se_timeout)
+            except asyncio.TimeoutError:
+                timed_out = True
+                logger.warning("Search executor timed out after %ds", _se_timeout)
+                # Signal the worker to stop touching DuckDB.
+                cancel_event.set()
+                # Non-blocking wait for the worker to honour the cancel
+                # flag — same pattern as the main await above.
+                try:
+                    await asyncio.wait_for(asyncio.wrap_future(future), timeout=5)
+                except (asyncio.TimeoutError, Exception):
+                    pass
+                stats = {"timed_out": True}
+            finally:
+                if not timed_out:
+                    cancel_event.set()
+                pool.shutdown(wait=False, cancel_futures=True)
+        else:
+            stats = loop.run_until_complete(
+                run_search_executor(state, cancel=cancel_event),
+            )
+
+        logger.info("Search executor stats: %s", stats)
+
+        # Emit search executor stats to dashboard
+        if _c and isinstance(stats, dict):
+            _c.emit_event("search_executor", data=stats)
+
+    except Exception as exc:
+        logger.warning("Search executor failed (non-fatal): %s", exc, exc_info=True)
+
+    # Update state with current corpus for the maestro
+    state["research_findings"] = corpus.format_for_thinker()
+    state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Maestro callback (new maestro architecture)
+# ---------------------------------------------------------------------------
+
+def maestro_condition_callback(
+    callback_context: CallbackContext,
+) -> Optional[genai_types.Content]:
+    """After-agent callback for the maestro: refresh corpus state.
+
+    The maestro has already modified the corpus directly via
+    ``execute_flock_sql()``.  This callback:
+
+    1. Drains any remaining search results from tool callbacks
+    2. Kicks off safety-net scoring in a **background thread** so the
+       asyncio event loop stays responsive (SSE keepalives can fire)
+    3. Refreshes state with the current corpus for the thinker
+    4. Advances the iteration counter
+
+    The background scoring thread is joined at the start of the next
+    ``search_executor_callback`` to guarantee DuckDB is not accessed
+    concurrently.
+    """
+    state = callback_context.state
+    corpus = _get_corpus(state)
+    _c = get_active_collector()
+
+    # Drain any remaining queued search results
+    _drain_search_queue(state)
+
+    # Scoring safety net: ensure all conditions ingested during the
+    # search executor + maestro phase are scored and deduped.  The
+    # maestro may have created new rows via execute_flock_sql() that
+    # bypassed the normal ingestion scoring path.
+    #
+    # IMPORTANT: This runs in a daemon thread so the asyncio event
+    # loop is NOT blocked.  Previously it ran synchronously which
+    # froze the event loop for minutes, preventing SSE keepalive
+    # comments from being delivered and causing client disconnects.
+    user_query = state.get("user_query", "")
+
+    # Snapshot corpus state BEFORE starting the background thread.
+    # DuckDB connections are not thread-safe, so all reads must happen
+    # on the main thread before the scoring thread starts writing.
+    #
+    # Trade-off: the *thinker* (which runs before search_executor_callback
+    # in the next iteration) will see this pre-scoring snapshot.  Unscored
+    # conditions appear with composite_quality=0 ("WEAK FINDINGS" tier).
+    # This is acceptable because:
+    #  1. Safety-net scoring is a backup — the maestro should handle most
+    #     scoring itself via execute_flock_sql().
+    #  2. search_executor_callback waits for scoring and refreshes state
+    #     before the maestro runs, so the maestro always sees scored data.
+    #  3. Blocking the event loop here would defeat the purpose of this PR.
+    state["research_findings"] = corpus.format_for_thinker()
+    state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
+
+    # Emit corpus stats to dashboard (also before thread start)
+    if _c:
+        try:
+            total = corpus.count()
+            iteration = state.get("_corpus_iteration", 0)
+            # Pass 0 for admitted — the maestro organises existing
+            # conditions, it doesn't ingest new ones.
+            _c.corpus_update(0, total, iteration)
+            _c.emit_event("maestro_complete", data={
+                "total_conditions": total,
+                "iteration": iteration,
+            })
+        except Exception:
+            pass
+
+    def _background_scoring() -> None:
+        """Run scoring + dedup in a background thread."""
+        try:
+            scored = corpus.score_new_conditions(user_query)
+            if scored:
+                logger.info("Maestro safety-net: scored %d conditions", scored)
+            deduped = corpus.compute_duplications()
+            if deduped:
+                logger.info("Maestro safety-net: deduped %d pairs", deduped)
+        except Exception:
+            logger.warning("Maestro safety-net scoring failed", exc_info=True)
+
+    corpus_key = state.get("_corpus_key", "default")
+
+    # NON-BLOCKING check: is the previous scoring thread still alive?
+    # We NEVER call join() here — even a 10s join blocks the event loop
+    # and prevents SSE keepalive comments from being delivered.
+    with _scoring_lock:
+        old_t = _scoring_threads.get(corpus_key)
+        if old_t is not None and old_t.is_alive():
+            logger.warning(
+                "Previous scoring thread still alive (key=%s) — "
+                "skipping safety-net scoring to avoid concurrent DuckDB access",
+                corpus_key,
+            )
+        else:
+            t = threading.Thread(
+                target=_background_scoring,
+                daemon=True,
+                name=f"maestro-safety-scoring-{corpus_key}",
+            )
+            _scoring_threads[corpus_key] = t
+            t.start()
+
+    # Advance iteration at the loop boundary — the maestro is the last
+    # agent in each LoopAgent iteration.
+    state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
+
+    return None  # preserve maestro output
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +652,10 @@ def get_corpus_text(state: dict) -> str:
     Used to dump partial results when the pipeline stalls before
     the synthesiser can produce its report.
     """
+    corpus_key = state.get("_corpus_key", "default")
+    if not _wait_for_pending_scoring(corpus_key):
+        logger.warning("get_corpus_text: scoring thread still alive — returning cached state")
+        return state.get("corpus_for_synthesis", "")
     key = state.get("_corpus_key")
     if key and key in _corpus_stores:
         return _corpus_stores[key].format_for_synthesiser()
@@ -348,6 +679,15 @@ def run_swarm_synthesis(state: dict) -> str:
 
     corpus = _corpus_stores[key]
     user_query = state.get("user_query", "")
+
+    # Non-blocking check: is scoring still running?
+    corpus_key = key  # reuse the key we already validated above
+    if not _wait_for_pending_scoring(corpus_key):
+        logger.warning(
+            "run_swarm_synthesis: scoring thread still alive — "
+            "returning cached corpus_for_synthesis to avoid concurrent DuckDB access",
+        )
+        return state.get("corpus_for_synthesis", "")
 
     # Ensure trace context is set for swarm LLM calls
     _c = get_active_collector()
@@ -420,18 +760,43 @@ def cleanup_corpus(state: dict) -> None:
     :func:`_init_pipeline_state` properly re-initialises on the next
     pipeline run within the same session.
     """
+    # Best-effort wait for background scoring before closing the DB.
+    # This is the ONE place where a blocking join is acceptable —
+    # the pipeline is finishing and no more SSE events will be sent.
+    corpus_key = state.get("_corpus_key", "default")
+    with _scoring_lock:
+        _cleanup_t = _scoring_threads.get(corpus_key)
+    if _cleanup_t is not None and _cleanup_t.is_alive():
+        logger.info("cleanup_corpus: waiting up to 30s for scoring thread (key=%s)", corpus_key)
+        _cleanup_t.join(timeout=30)
+    scoring_done = _cleanup_t is None or not _cleanup_t.is_alive()
+    with _scoring_lock:
+        if _scoring_threads.get(corpus_key) is _cleanup_t:
+            _scoring_threads.pop(corpus_key, None)
     key = state.get("_corpus_key")
     if key and key in _corpus_stores:
         corpus = _corpus_stores[key]
-        try:
-            logger.info(
-                "Closing CorpusStore for key=%s  db=%s  (%d conditions)",
-                key, corpus.db_path, corpus.count(),
+        if not scoring_done:
+            # Scoring thread still alive — do NOT close the connection
+            # while it's mid-query.  Drop our reference and let the
+            # daemon thread finish naturally; the connection will be
+            # garbage-collected once the thread exits.
+            logger.warning(
+                "cleanup_corpus: scoring thread still alive after 30s — "
+                "abandoning CorpusStore for key=%s (will GC after thread exits)",
+                key,
             )
-        except Exception:
-            logger.warning("Could not log corpus stats before close", exc_info=True)
-        corpus.close()
-        del _corpus_stores[key]
+            del _corpus_stores[key]
+        else:
+            try:
+                logger.info(
+                    "Closing CorpusStore for key=%s  db=%s  (%d conditions)",
+                    key, corpus.db_path, corpus.count(),
+                )
+            except Exception:
+                logger.warning("Could not log corpus stats before close", exc_info=True)
+            corpus.close()
+            del _corpus_stores[key]
     # Clear corpus-related state keys so _init_pipeline_state
     # re-initialises cleanly on session reuse.
     # ADK State objects don't support .pop(); use del with guard.

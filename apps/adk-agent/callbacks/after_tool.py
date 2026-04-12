@@ -55,8 +55,29 @@ _SEARCH_TOOLS: dict[str, str] = {
     "web_search_advanced_exa": "exa_search",
     "crawling_exa": "exa_crawl",
     "kagi_search": "kagi_search",
+    "kagi_enrich_web": "kagi_enrich",
+    "kagi_enrich_news": "kagi_enrich",
     "firecrawl_scrape": "firecrawl_scrape",
     "firecrawl_crawl": "firecrawl_crawl",
+    "firecrawl_search": "firecrawl_search",
+    # Academic & reference
+    "search_papers": "semantic_scholar",
+    "get_paper": "semantic_scholar",
+    "get_paper_citations": "semantic_scholar",
+    "get_paper_references": "semantic_scholar",
+    "search_by_category": "arxiv",
+    # Wikipedia — NOTE: bare "search"/"read" names removed because they
+    # collide with tools from other MCP servers.  Wikipedia results are
+    # ingested via the search executor's automated path instead.
+    "wikipedia_search": "wikipedia_search",
+    "wikipedia_read": "wikipedia_read",
+    # Bright Data
+    "search_engine": "brightdata_search",
+    "scrape_as_markdown": "brightdata_scrape",
+    # Deep research tools
+    "perplexity_deep_research": "perplexity_deep",
+    "grok_deep_research": "grok_deep",
+    "tavily_deep_research": "tavily_deep",
 }
 
 

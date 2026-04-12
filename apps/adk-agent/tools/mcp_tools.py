@@ -50,6 +50,8 @@ FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY", "")
 EXA_API_KEY = os.environ.get("EXA_API_KEY", "")
 KAGI_API_KEY = os.environ.get("KAGI_API_KEY", "")
 TRANSCRIPTAPI_KEY = os.environ.get("TRANSCRIPTAPI_KEY", "")
+SEMANTIC_SCHOLAR_API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
+BRIGHT_DATA_API_KEY = os.environ.get("BRIGHT_DATA_API_KEY", "")
 
 
 def _full_env(**overrides: str) -> dict:
@@ -157,6 +159,86 @@ _TOOL_CONFIGS = {
             env=_full_env(),
         ),
         timeout=30.0,
+    ),
+    # ── DuckDB MCP server ──────────────────────────────────────────────────
+    # npm: @seed-ship/duckdb-mcp-native  (MIT, theseedship/duckdb_mcp_node)
+    # 32+ tools: SQL queries, schema inspection, CSV/Parquet loading,
+    #   federation via mcp:// URIs, graph algorithms (PageRank, community
+    #   detection), process mining, DuckPGQ property graphs.
+    # Auto-discovered tools: query, describe_table, list_tables, load_csv,
+    #   load_parquet, create_table, insert_data, pagerank, community_detection,
+    #   eigenvector_centrality, weighted_shortest_path, etc.
+    "duckdb": lambda: StdioConnectionParams(
+        server_params=StdioServerParameters(
+            command="npx",
+            args=["-y", "@seed-ship/duckdb-mcp-native"],
+            env=_full_env(
+                MCP_SECURITY_MODE="development",
+                DUCKDB_MEMORY="2GB",
+                DUCKDB_THREADS="4",
+            ),
+        ),
+        timeout=60.0,
+    ),
+    # ── Semantic Scholar MCP server ────────────────────────────────────────
+    # npm: @xbghc/semanticscholar-mcp  (MIT, xbghc/semanticscholar-mcp)
+    # 200M+ academic papers — paper search, citation graphs, author profiles.
+    # Auto-discovered tools: search_papers, get_paper, get_paper_citations,
+    #   get_paper_references, batch_get_papers, search_authors, get_author,
+    #   get_author_papers, get_recommendations
+    # API key optional (higher rate limits with key).
+    "semantic-scholar": lambda: StdioConnectionParams(
+        server_params=StdioServerParameters(
+            command="npx",
+            args=["-y", "@xbghc/semanticscholar-mcp"],
+            env=_full_env(
+                SEMANTIC_SCHOLAR_API_KEY=SEMANTIC_SCHOLAR_API_KEY,
+            ),
+        ),
+        timeout=60.0,
+    ),
+    # ── arXiv MCP server ───────────────────────────────────────────────────
+    # npm: arxiv-mcp-server  (madi/arxiv-mcp-server)
+    # Free, no API key needed.  Searches arXiv preprints.
+    # Auto-discovered tools: search_papers, get_paper, search_by_category
+    "arxiv": lambda: StdioConnectionParams(
+        server_params=StdioServerParameters(
+            command="npx",
+            args=["-y", "arxiv-mcp-server"],
+            env=_full_env(),
+        ),
+        timeout=60.0,
+    ),
+    # ── Wikipedia MCP server ───────────────────────────────────────────────
+    # npm: wikipedia-mcp  (MIT, timjuenemann/wikipedia-mcp)
+    # Free, no API key needed.  1.2K weekly downloads.
+    # Auto-discovered tools: search (Wikipedia search), read (full article
+    #   content as markdown)
+    "wikipedia": lambda: StdioConnectionParams(
+        server_params=StdioServerParameters(
+            command="npx",
+            args=["-y", "wikipedia-mcp"],
+            env=_full_env(),
+        ),
+        timeout=30.0,
+    ),
+    # ── Bright Data Web MCP server ─────────────────────────────────────────
+    # npm: @brightdata/mcp  (MIT, brightdata/brightdata-mcp)  2.3K+ stars
+    # Anti-block web scraping — bypasses CAPTCHAs, geo-restrictions, rate
+    # limits.  5,000 free requests/month.
+    # Auto-discovered tools: search_engine, scrape_as_markdown,
+    #   scrape_as_html, session_stats, web_data_amazon_product, etc.
+    # GROUPS env var controls which tool groups to load (default: all).
+    "brightdata": lambda: StdioConnectionParams(
+        server_params=StdioServerParameters(
+            command="npx",
+            args=["-y", "@brightdata/mcp"],
+            env=_full_env(
+                API_TOKEN=BRIGHT_DATA_API_KEY,
+                GROUPS="search,scraping",
+            ),
+        ),
+        timeout=60.0,
     ),
     # ── Legacy MiroFlow MCP servers (Python subprocess) ───────────────────
     "tool-google-search": lambda: StdioServerParameters(
