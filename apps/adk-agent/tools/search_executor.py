@@ -880,6 +880,7 @@ async def run_search_executor(
     corpus = _get_corpus(state)
     iteration = state.get("_corpus_iteration", 0)
     strategy = state.get("research_strategy", "")
+    user_query = state.get("user_query", "")
 
     if strategy and "EVIDENCE_SUFFICIENT" in strategy:
         logger.info("Search executor: thinker says EVIDENCE_SUFFICIENT, skipping")
@@ -1014,6 +1015,7 @@ async def run_search_executor(
                 source_ref="search_executor",
                 angle=f"iteration_{iteration}",
                 iteration=iteration,
+                user_query=user_query,
             )
             stats["total_ingested"] += len(ids)
             if target_id is not None and ids:
@@ -1079,6 +1081,7 @@ async def run_search_executor(
                         source_ref=ext_url,
                         angle=f"iteration_{iteration}",
                         iteration=iteration,
+                        user_query=user_query,
                     )
                     stats["total_ingested"] += len(ids)
                 except Exception:
@@ -1135,6 +1138,7 @@ async def run_search_executor(
                     source_ref="search_executor",
                     angle=f"iteration_{iteration}_academic",
                     iteration=iteration,
+                    user_query=user_query,
                 )
                 stats["total_ingested"] += len(ids)
             except Exception:
@@ -1202,6 +1206,7 @@ async def run_search_executor(
                         source_ref=follow_url,
                         angle=f"iteration_{iteration}_citations",
                         iteration=iteration,
+                        user_query=user_query,
                     )
                     stats["total_ingested"] += len(ids)
                 except Exception:
