@@ -204,6 +204,12 @@ class AGUIRunCollectorMiddleware(BaseHTTPMiddleware):
         # consumed, otherwise the collector will be empty.
         original_iterator = response.body_iterator
 
+        # SSE keepalive interval — external proxies (nginx, Cloudflare,
+        # frp) typically drop idle connections after 60-120s.  Sending
+        # an SSE comment every 15s keeps them alive during long Flock
+        # scoring operations that produce no AG-UI events.
+        _KEEPALIVE_SEC = 15
+
         async def _finalizing_iterator():
             """Yield all chunks from the original body, then finalize.
 
@@ -211,10 +217,35 @@ class AGUIRunCollectorMiddleware(BaseHTTPMiddleware):
             ``GeneratorExit`` (client disconnect).  ``GeneratorExit``
             inherits from ``BaseException``, so a bare ``except Exception``
             would miss it — the ``finally`` block is the safety net.
+
+            Injects SSE keepalive comments (``: keepalive``) when no
+            real event arrives within ``_KEEPALIVE_SEC`` seconds, so
+            external reverse proxies don't kill the connection during
+            long-running Flock scoring.
             """
             try:
-                async for chunk in original_iterator:
-                    yield chunk
+                aiter = original_iterator.__aiter__()
+                pending_next: asyncio.Task | None = None
+                while True:
+                    if pending_next is None:
+                        pending_next = asyncio.ensure_future(aiter.__anext__())
+                    timer = asyncio.ensure_future(asyncio.sleep(_KEEPALIVE_SEC))
+                    done, _ = await asyncio.wait(
+                        [pending_next, timer],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if pending_next in done:
+                        timer.cancel()
+                        try:
+                            chunk = pending_next.result()
+                        except StopAsyncIteration:
+                            break
+                        pending_next = None
+                        yield chunk
+                    else:
+                        # No real event within keepalive window — send
+                        # an SSE comment that clients silently ignore.
+                        yield ": keepalive\n\n"
             except Exception:
                 collector.phase_end("ag_ui_request", "error")
                 collector.finalize(result_text="")
