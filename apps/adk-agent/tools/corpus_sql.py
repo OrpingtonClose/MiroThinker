@@ -25,12 +25,25 @@ not any shared database.  Each pipeline run gets its own file.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
 from google.adk.tools import FunctionTool, ToolContext
 
+from utils.flock_proxy import (
+    get_flock_call_count,
+    register_flock_progress,
+    unregister_flock_progress,
+)
+
 logger = logging.getLogger(__name__)
+
+# Flock LLM function names used to detect long-running queries
+_FLOCK_LLM_FUNCTIONS = (
+    "llm_complete", "llm_filter", "llm_sentiment", "llm_embed",
+    "llm_complete_json", "llm_extract",
+)
 
 # Maximum rows to return in a single query result (prevents context blow-up)
 _MAX_RESULT_ROWS = 200
@@ -103,9 +116,38 @@ async def execute_flock_sql(query: str, tool_context: ToolContext) -> str:
     if conn is None:
         return "[ERROR] No active corpus connection. The pipeline must be running."
 
+    # Detect Flock LLM queries — they can take minutes and must not block
+    # the asyncio event loop (which would freeze SSE streaming).
+    query_lower = query.lower()
+    is_flock_query = any(fn in query_lower for fn in _FLOCK_LLM_FUNCTIONS)
+
     start = time.monotonic()
     try:
-        result = conn.execute(query)
+        if is_flock_query:
+            # Run in thread pool so the event loop stays responsive.
+            # Register a progress callback so we can log each Flock LLM call.
+            def _on_flock_call(call_num: int, model: str) -> None:
+                elapsed = time.monotonic() - start
+                logger.info(
+                    "Flock progress: LLM call #%d (%s) at %.1fs",
+                    call_num, model, elapsed,
+                )
+
+            register_flock_progress(_on_flock_call)
+            try:
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(None, conn.execute, query)
+            finally:
+                total_calls = get_flock_call_count()
+                unregister_flock_progress()
+                if total_calls:
+                    logger.info(
+                        "Flock query completed: %d LLM calls in %.1fs",
+                        total_calls, time.monotonic() - start,
+                    )
+        else:
+            result = conn.execute(query)
+
         elapsed_ms = (time.monotonic() - start) * 1000
 
         # Check if this is a SELECT (has results) or DML (returns count)
