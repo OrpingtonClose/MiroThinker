@@ -595,6 +595,7 @@ def get_corpus_text(state: dict) -> str:
     Used to dump partial results when the pipeline stalls before
     the synthesiser can produce its report.
     """
+    _wait_for_pending_scoring(timeout=60)
     key = state.get("_corpus_key")
     if key and key in _corpus_stores:
         return _corpus_stores[key].format_for_synthesiser()
@@ -618,6 +619,9 @@ def run_swarm_synthesis(state: dict) -> str:
 
     corpus = _corpus_stores[key]
     user_query = state.get("user_query", "")
+
+    # Wait for background scoring to finish before accessing DuckDB.
+    _wait_for_pending_scoring()
 
     # Ensure trace context is set for swarm LLM calls
     _c = get_active_collector()
