@@ -415,11 +415,11 @@ async def search_executor_callback(
                 logger.warning("Search executor timed out after 120s")
                 # Signal the worker to stop touching DuckDB.
                 cancel_event.set()
-                # Brief blocking wait for the worker to honour the cancel
-                # flag.  5s is short enough to not starve keepalives.
+                # Non-blocking wait for the worker to honour the cancel
+                # flag — same pattern as the main await above.
                 try:
-                    future.result(timeout=5)
-                except (concurrent.futures.TimeoutError, Exception):
+                    await asyncio.wait_for(asyncio.wrap_future(future), timeout=5)
+                except (asyncio.TimeoutError, Exception):
                     pass
                 stats = {"timed_out": True}
             finally:
