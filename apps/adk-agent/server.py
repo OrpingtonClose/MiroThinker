@@ -419,4 +419,125 @@ add_adk_fastapi_endpoint(app, adk_agent, path="/")
 # ── Dashboard endpoints ───────────────────────────────────────────
 mount_dashboard_routes(app)
 
+
+# ── P0: Corpus stats endpoint for mid-run diagnostics ─────────────
+@app.get("/corpus/stats")
+async def get_corpus_stats() -> dict:
+    """Return real-time corpus statistics for mid-run diagnostics.
+
+    Queries the active CorpusStore(s) and returns per-corpus stats
+    including total rows, breakdown by iteration, source type,
+    quality tiers, expansion targets, and narrative chains.
+    """
+    from callbacks.condition_manager import _corpus_stores
+
+    if not _corpus_stores:
+        return {"active_corpora": 0, "corpora": []}
+
+    all_stats: list[dict] = []
+    for key, corpus in _corpus_stores.items():
+        try:
+            total = corpus.count()
+
+            # Breakdown by iteration
+            by_iteration = {}
+            try:
+                rows = corpus.conn.execute(
+                    "SELECT iteration, COUNT(*) FROM conditions "
+                    "WHERE row_type = 'finding' AND consider_for_use = TRUE "
+                    "GROUP BY iteration ORDER BY iteration"
+                ).fetchall()
+                by_iteration = {int(r[0]): int(r[1]) for r in rows}
+            except Exception:
+                pass
+
+            # Breakdown by source_type
+            by_source = {}
+            try:
+                rows = corpus.conn.execute(
+                    "SELECT source_type, COUNT(*) FROM conditions "
+                    "WHERE row_type = 'finding' AND consider_for_use = TRUE "
+                    "GROUP BY source_type ORDER BY COUNT(*) DESC"
+                ).fetchall()
+                by_source = {str(r[0]): int(r[1]) for r in rows}
+            except Exception:
+                pass
+
+            # Quality tiers
+            quality_tiers = {"strong": 0, "moderate": 0, "weak": 0}
+            try:
+                rows = corpus.conn.execute(
+                    "SELECT composite_quality FROM conditions "
+                    "WHERE row_type = 'finding' AND consider_for_use = TRUE"
+                ).fetchall()
+                for (q,) in rows:
+                    qv = float(q or 0)
+                    if qv >= 0.6:
+                        quality_tiers["strong"] += 1
+                    elif qv >= 0.3:
+                        quality_tiers["moderate"] += 1
+                    else:
+                        quality_tiers["weak"] += 1
+            except Exception:
+                pass
+
+            # Expansion targets
+            expansion_pending = 0
+            expansion_fulfilled = 0
+            try:
+                rows = corpus.conn.execute(
+                    "SELECT expansion_fulfilled, COUNT(*) FROM conditions "
+                    "WHERE expansion_tool != 'none' "
+                    "GROUP BY expansion_fulfilled"
+                ).fetchall()
+                for fulfilled, cnt in rows:
+                    if fulfilled:
+                        expansion_fulfilled = int(cnt)
+                    else:
+                        expansion_pending = int(cnt)
+            except Exception:
+                pass
+
+            # Narrative chains
+            chain_count = 0
+            try:
+                chain_count = corpus.conn.execute(
+                    "SELECT COUNT(*) FROM conditions "
+                    "WHERE row_type = 'narrative_chain'"
+                ).fetchone()[0]
+            except Exception:
+                pass
+
+            # Contradictions
+            contradiction_count = 0
+            try:
+                contradiction_count = corpus.conn.execute(
+                    "SELECT COUNT(*) FROM conditions "
+                    "WHERE contradiction_flag = TRUE "
+                    "AND consider_for_use = TRUE"
+                ).fetchone()[0]
+            except Exception:
+                pass
+
+            all_stats.append({
+                "corpus_key": key,
+                "db_path": str(corpus.db_path),
+                "total_findings": total,
+                "by_iteration": by_iteration,
+                "by_source_type": by_source,
+                "quality_tiers": quality_tiers,
+                "expansion_pending": expansion_pending,
+                "expansion_fulfilled": expansion_fulfilled,
+                "narrative_chains": chain_count,
+                "contradictions": contradiction_count,
+            })
+        except Exception as exc:
+            all_stats.append({
+                "corpus_key": key,
+                "error": str(exc),
+            })
+
+    return {"active_corpora": len(all_stats), "corpora": all_stats}
+
+
 logger.info("MiroThinker AG-UI server ready at http://0.0.0.0:8000")

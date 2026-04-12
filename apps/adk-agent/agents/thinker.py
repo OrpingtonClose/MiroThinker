@@ -47,6 +47,12 @@ plan that a downstream researcher agent will execute.
 
 You have NO tools. Your ONLY output is reasoning and strategy text.
 
+=== EXPANSION CONTEXT ===
+Iteration: {_corpus_iteration}
+Cumulative API cost: ${_cumulative_api_cost}
+Previous thinker strategies: {_prev_thinker_strategies}
+=== END CONTEXT ===
+
 === STRUCTURED CORPUS ===
 {research_findings}
 === END CORPUS ===
@@ -56,6 +62,12 @@ gathered so far. Findings are organised by strength: strong findings are \
 well-sourced and credible, moderate findings have partial evidence, and \
 weak findings need more research. Contradictions between findings are \
 called out explicitly. Areas that need more investigation are identified.
+
+If the EXPANSION CONTEXT shows this is iteration 1+, you MUST account \
+for what was tried before. Review previous strategies and DO NOT repeat \
+the same search queries. Instead, push DEEPER — explore angles that \
+previous iterations missed, follow up on weak findings, and pursue \
+contrarian or niche sources that haven't been tried yet.
 
 If the corpus says "(no findings yet)", this is the FIRST iteration — \
 create a comprehensive initial research strategy from scratch.

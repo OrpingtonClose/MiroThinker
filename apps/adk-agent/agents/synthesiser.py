@@ -33,16 +33,24 @@ and comprehensive.
 {corpus_for_synthesis}
 === END REPORT ===
 
+=== PREVIOUS REPORT (from earlier iteration) ===
+{_prev_synthesiser_report}
+=== END PREVIOUS REPORT ===
+
 YOUR JOB:
 1. Read the swarm report carefully — it contains the key findings, \
    cross-references, contradictions, and causal chains already identified
-2. Restructure into a coherent NARRATIVE with clear sections and flow
-3. Expand terse bullet points into readable prose paragraphs
-4. Preserve ALL specific data: names, numbers, URLs, mechanisms, pathways
-5. Where the swarm noted contradictions, present both sides fairly
-6. Build connecting tissue between sections — show how findings relate
-7. Add an executive summary at the top
-8. End with key takeaways and remaining open questions
+2. If a PREVIOUS REPORT exists, BUILD ON IT — do not start from scratch. \
+   Update, expand, and correct the previous report with new findings. \
+   Remove any information that has been contradicted by newer evidence. \
+   Add new sections for newly discovered topics.
+3. Restructure into a coherent NARRATIVE with clear sections and flow
+4. Expand terse bullet points into readable prose paragraphs
+5. Preserve ALL specific data: names, numbers, URLs, mechanisms, pathways
+6. Where the swarm noted contradictions, present both sides fairly
+7. Build connecting tissue between sections — show how findings relate
+8. Add an executive summary at the top
+9. End with key takeaways and remaining open questions
 
 WRITING STYLE:
 - Write for an informed adult reader — assume domain familiarity

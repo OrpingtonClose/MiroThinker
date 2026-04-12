@@ -615,24 +615,98 @@ def _available_search_fns() -> list[Any]:
 
 _FAN_OUT_WIDTH = int(os.environ.get("FAN_OUT_WIDTH", "2"))
 
+# ---------------------------------------------------------------------------
+# P3: Adaptive API selection — track success/failure per API and weight
+# selection toward APIs that return useful results.
+# ---------------------------------------------------------------------------
+_api_stats: dict[str, dict[str, int]] = {}  # fn_name → {success, failure, total_chars}
+
+
+def _record_api_result(fn_name: str, success: bool, chars: int = 0) -> None:
+    """Record a search API call result for adaptive selection."""
+    if fn_name not in _api_stats:
+        _api_stats[fn_name] = {"success": 0, "failure": 0, "total_chars": 0}
+    if success:
+        _api_stats[fn_name]["success"] += 1
+        _api_stats[fn_name]["total_chars"] += chars
+    else:
+        _api_stats[fn_name]["failure"] += 1
+
+
+def _api_quality_score(fn_name: str) -> float:
+    """Compute a quality score (0-1) for an API based on its track record.
+
+    APIs with no history get a neutral score of 0.5.
+    Score combines success rate (70% weight) and average content richness (30%).
+    """
+    stats = _api_stats.get(fn_name)
+    if not stats:
+        return 0.5  # neutral for unknown APIs
+
+    total = stats["success"] + stats["failure"]
+    if total == 0:
+        return 0.5
+
+    success_rate = stats["success"] / total
+    # Average chars per successful call (normalised to 0-1 range)
+    avg_chars = (
+        stats["total_chars"] / max(stats["success"], 1)
+    )
+    richness = min(avg_chars / 5000.0, 1.0)  # 5000+ chars = max score
+
+    return 0.7 * success_rate + 0.3 * richness
+
+
+def get_api_stats() -> dict[str, Any]:
+    """Return current API quality stats (for /corpus/stats endpoint)."""
+    result = {}
+    for fn_name, stats in _api_stats.items():
+        total = stats["success"] + stats["failure"]
+        result[fn_name] = {
+            **stats,
+            "quality_score": round(_api_quality_score(fn_name), 3),
+            "success_rate": round(stats["success"] / max(total, 1), 3),
+        }
+    return result
+
 
 def _pick_fan_out_apis(query_index: int) -> list[Any]:
-    """Pick APIs for a query using a rotating window.
+    """Pick APIs for a query using quality-weighted selection.
 
     Width is controlled by ``FAN_OUT_WIDTH`` (default 2) to keep
-    costs under ~$2/run.  Each query gets a different pair so overall
-    coverage is maximised across queries.
+    costs under ~$2/run.  APIs are sorted by quality score and
+    selected with a rotating window that biases toward higher-quality
+    APIs while still ensuring coverage across all APIs.
     """
     available = _available_search_fns()
     width = min(_FAN_OUT_WIDTH, len(available))
     if len(available) <= width:
         return available
 
-    start = (query_index * width) % len(available)
+    # Sort by quality score (highest first), with rotation offset
+    scored = sorted(
+        available,
+        key=lambda fn: _api_quality_score(fn.__name__),
+        reverse=True,
+    )
+
+    # Use a rotating window that starts from query_index but biases
+    # toward the top-quality APIs:
+    # - First slot always goes to a top-quality API (rotating among top half)
+    # - Remaining slots rotate through the rest for diversity
+    top_half = scored[:max(len(scored) // 2, 1)]
+
     picked: list[Any] = []
-    for i in range(width):
-        picked.append(available[(start + i) % len(available)])
-    return picked
+    # First pick: rotate among top-quality APIs
+    picked.append(top_half[query_index % len(top_half)])
+
+    # Remaining picks: rotate among the rest (including top for coverage)
+    rest = [fn for fn in scored if fn not in picked]
+    for i in range(width - 1):
+        if rest:
+            picked.append(rest[(query_index + i) % len(rest)])
+
+    return picked[:width]
 
 
 async def _execute_fan_out_search(
@@ -641,6 +715,7 @@ async def _execute_fan_out_search(
     """Execute a single query against multiple APIs simultaneously.
 
     Returns a list of result strings (one per successful API).
+    Records success/failure per API for adaptive selection.
     """
     apis = _pick_fan_out_apis(query_index)
     if not apis:
@@ -648,10 +723,17 @@ async def _execute_fan_out_search(
 
     tasks = [api(query) for api in apis]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    return [
-        r for r in results
-        if isinstance(r, str) and r and r.strip()
-    ]
+
+    # Track results per API for adaptive selection
+    good: list[str] = []
+    for api_fn, r in zip(apis, results):
+        if isinstance(r, str) and r and r.strip():
+            _record_api_result(api_fn.__name__, success=True, chars=len(r))
+            good.append(r)
+        else:
+            _record_api_result(api_fn.__name__, success=False)
+
+    return good
 
 
 # ---------------------------------------------------------------------------
@@ -837,6 +919,57 @@ def extract_search_queries(strategy_text: str) -> list[str]:
     return queries[:10]
 
 
+def _get_existing_corpus_urls(corpus: Any) -> set[str]:
+    """Query the corpus for all source URLs already ingested.
+
+    Returns a set of normalised URLs (lowercase, stripped of trailing slash)
+    that the search executor can check against to avoid re-scraping pages
+    that are already in the corpus from previous pipeline runs.
+    """
+    try:
+        rows = corpus.conn.execute(
+            "SELECT DISTINCT source_url FROM conditions "
+            "WHERE source_url IS NOT NULL AND source_url != ''"
+        ).fetchall()
+        urls: set[str] = set()
+        for (url,) in rows:
+            normalised = url.strip().lower().rstrip("/")
+            if normalised:
+                urls.add(normalised)
+        return urls
+    except Exception:
+        logger.debug("Could not query existing corpus URLs", exc_info=True)
+        return set()
+
+
+def _get_executed_query_fingerprints(state: dict) -> set[str]:
+    """Return fingerprints of queries already executed in previous iterations.
+
+    Tracks queries across iterations via session state so the search
+    executor skips queries that were already run.  This prevents the
+    search executor from repeating the same queries when the thinker
+    generates similar strategies across expansion iterations.
+    """
+    executed: set[str] = set()
+    raw = state.get("_executed_query_fingerprints", "")
+    if raw:
+        for line in raw.strip().split("\n"):
+            fp = line.strip().lower()
+            if fp:
+                executed.add(fp)
+    return executed
+
+
+def _record_executed_queries(state: dict, queries: list[str]) -> None:
+    """Append newly executed query fingerprints to session state."""
+    existing = state.get("_executed_query_fingerprints", "")
+    new_fps = "\n".join(q.strip().lower() for q in queries if q.strip())
+    if existing:
+        state["_executed_query_fingerprints"] = existing + "\n" + new_fps
+    else:
+        state["_executed_query_fingerprints"] = new_fps
+
+
 def _detect_academic_need(strategy_text: str) -> bool:
     """Detect if the thinker's strategy flags academic research needs."""
     if not strategy_text:
@@ -895,7 +1028,23 @@ async def run_search_executor(
         "citation_follows": 0,
         "total_results": 0,
         "total_ingested": 0,
+        "queries_deduped": 0,
+        "urls_deduped": 0,
     }
+
+    # ── P1: Cross-run dedup — collect URLs and query fingerprints ──
+    existing_urls = _get_existing_corpus_urls(corpus)
+    if existing_urls:
+        logger.info(
+            "Cross-run dedup: %d URLs already in corpus from previous runs",
+            len(existing_urls),
+        )
+    executed_fps = _get_executed_query_fingerprints(state)
+    if executed_fps:
+        logger.info(
+            "Cross-run dedup: %d query fingerprints from previous iterations",
+            len(executed_fps),
+        )
 
     semaphore = asyncio.Semaphore(_MAX_CONCURRENT)
 
@@ -911,6 +1060,11 @@ async def run_search_executor(
         tool = target.get("strategy", "brave_web_search")
         hint = target.get("hint", "")
         if hint:
+            # Skip expansion hints that match previously executed queries
+            if hint.strip().lower() in executed_fps:
+                stats["queries_deduped"] += 1
+                logger.debug("Skipping duplicate expansion query: %s", hint[:80])
+                continue
             search_tasks.append(
                 (tool, hint, f"expansion_{tool}", target["id"]),
             )
@@ -919,9 +1073,27 @@ async def run_search_executor(
     # A2. Strategy queries -- fan-out to multiple APIs
     strategy_queries = extract_search_queries(strategy)
     fan_out_tasks: list[tuple[str, int]] = []
+    new_queries: list[str] = []
     for i, query in enumerate(strategy_queries[:6]):
+        # Skip queries already executed in previous iterations
+        if query.strip().lower() in executed_fps:
+            stats["queries_deduped"] += 1
+            logger.debug("Skipping duplicate strategy query: %s", query[:80])
+            continue
         fan_out_tasks.append((query, i))
+        new_queries.append(query)
         stats["strategy_searches"] += 1
+
+    # Record newly executed queries for future dedup
+    all_executed = [t[1] for t in search_tasks] + new_queries
+    if all_executed:
+        _record_executed_queries(state, all_executed)
+
+    if stats["queries_deduped"]:
+        logger.info(
+            "Cross-run query dedup: skipped %d duplicate queries",
+            stats["queries_deduped"],
+        )
 
     if not search_tasks and not fan_out_tasks:
         logger.info("Search executor: no searches to execute")
@@ -1039,6 +1211,20 @@ async def run_search_executor(
     if not (cancel and cancel.is_set()):
         combined_text = "\n".join(all_result_text)
         all_urls = _extract_urls_from_text(combined_text)
+        # ── Cross-run URL dedup: skip URLs already in corpus ──
+        if existing_urls:
+            pre_dedup = len(all_urls)
+            all_urls = [
+                u for u in all_urls
+                if u.strip().lower().rstrip("/") not in existing_urls
+            ]
+            deduped = pre_dedup - len(all_urls)
+            if deduped:
+                stats["urls_deduped"] += deduped
+                logger.info(
+                    "Phase B URL dedup: skipped %d URLs already in corpus",
+                    deduped,
+                )
         diverse_urls = _select_diverse_urls(
             all_urls, _MAX_CONTENT_EXTRACTIONS,
         )
@@ -1163,7 +1349,9 @@ async def run_search_executor(
         citation_urls = _extract_urls_from_text(citation_text)
         already_extracted = set(diverse_urls)
         new_urls = [
-            u for u in citation_urls if u not in already_extracted
+            u for u in citation_urls
+            if u not in already_extracted
+            and u.strip().lower().rstrip("/") not in existing_urls
         ]
         follow_urls = _select_diverse_urls(
             new_urls, _MAX_CITATION_FOLLOWS,
