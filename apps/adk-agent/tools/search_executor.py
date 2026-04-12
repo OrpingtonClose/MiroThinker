@@ -58,16 +58,17 @@ _SCITE_REFRESH_TOKEN = os.environ.get("SCITE_REFRESH_TOKEN", "")
 _SEMANTIC_SCHOLAR_API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
 
 # Maximum concurrent searches to prevent API rate limiting
-_MAX_CONCURRENT = int(os.environ.get("SEARCH_EXECUTOR_CONCURRENCY", "6"))
+_MAX_CONCURRENT = int(os.environ.get("SEARCH_EXECUTOR_CONCURRENCY", "4"))
 
-# Content extraction budget per iteration
+# Content extraction budget per iteration — Jina Reader / Apify are
+# expensive (~$0.01-0.05 each).  Keep low to stay under ~$2/run.
 _MAX_CONTENT_EXTRACTIONS = int(
-    os.environ.get("MAX_CONTENT_EXTRACTIONS", "12"),
+    os.environ.get("MAX_CONTENT_EXTRACTIONS", "3"),
 )
 
-# Citation following budget per iteration
+# Citation following budget per iteration — uses Jina/Apify too.
 _MAX_CITATION_FOLLOWS = int(
-    os.environ.get("MAX_CITATION_FOLLOWS", "8"),
+    os.environ.get("MAX_CITATION_FOLLOWS", "2"),
 )
 
 
@@ -609,18 +610,24 @@ def _available_search_fns() -> list[Any]:
     return fns
 
 
-def _pick_fan_out_apis(query_index: int) -> list[Any]:
-    """Pick 3 APIs for a query using a rotating window.
+_FAN_OUT_WIDTH = int(os.environ.get("FAN_OUT_WIDTH", "2"))
 
-    Each query gets a different triple so overall coverage is maximised.
+
+def _pick_fan_out_apis(query_index: int) -> list[Any]:
+    """Pick APIs for a query using a rotating window.
+
+    Width is controlled by ``FAN_OUT_WIDTH`` (default 2) to keep
+    costs under ~$2/run.  Each query gets a different pair so overall
+    coverage is maximised across queries.
     """
     available = _available_search_fns()
-    if len(available) <= 3:
+    width = min(_FAN_OUT_WIDTH, len(available))
+    if len(available) <= width:
         return available
 
-    start = (query_index * 3) % len(available)
+    start = (query_index * width) % len(available)
     picked: list[Any] = []
-    for i in range(3):
+    for i in range(width):
         picked.append(available[(start + i) % len(available)])
     return picked
 
@@ -896,7 +903,7 @@ async def run_search_executor(
 
     # A1. Expansion targets from the corpus
     expansion_targets = corpus.get_expansion_targets()
-    for target in expansion_targets[:10]:
+    for target in expansion_targets[:6]:
         tool = target.get("strategy", "brave_web_search")
         hint = target.get("hint", "")
         if hint:
@@ -908,7 +915,7 @@ async def run_search_executor(
     # A2. Strategy queries -- fan-out to multiple APIs
     strategy_queries = extract_search_queries(strategy)
     fan_out_tasks: list[tuple[str, int]] = []
-    for i, query in enumerate(strategy_queries[:10]):
+    for i, query in enumerate(strategy_queries[:6]):
         fan_out_tasks.append((query, i))
         stats["strategy_searches"] += 1
 
@@ -1090,7 +1097,7 @@ async def run_search_executor(
             "Phase C: academic search triggered by thinker strategy",
         )
 
-        academic_queries = strategy_queries[:4]
+        academic_queries = strategy_queries[:3]
 
         async def _bounded_academic(coro: Any) -> str:
             async with semaphore:
