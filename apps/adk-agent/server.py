@@ -275,6 +275,14 @@ class AGUIRunCollectorMiddleware(BaseHTTPMiddleware):
                     kpi.get("completion_tokens_est", 0),
                 )
             finally:
+                # Cancel the pending __anext__ task if it's still running
+                # (e.g. on GeneratorExit from client disconnect during a
+                # keepalive yield).  Without this, the orphaned task holds
+                # a reference to the upstream iterator until the AG-UI
+                # pipeline produces another event.
+                if pending_next is not None and not pending_next.done():
+                    pending_next.cancel()
+
                 # Safety net for GeneratorExit (client disconnect) and
                 # any other BaseException that bypasses except/else.
                 if not collector._finalized:
