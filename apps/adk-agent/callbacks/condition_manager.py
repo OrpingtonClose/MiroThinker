@@ -523,7 +523,14 @@ def maestro_condition_callback(
             pass
 
     def _background_scoring() -> None:
-        """Run scoring + dedup in a background thread."""
+        """Run scoring, dedup, and algorithm battery in a background thread.
+
+        Previously this only ran ``score_new_conditions`` and
+        ``compute_duplications``, which meant ``compute_composite_quality``
+        never executed — leaving all composite scores at the default -1.00.
+        Now runs the full algorithm battery so composite quality, quality
+        gates, clustering, narrative chains, etc. are all computed.
+        """
         try:
             scored = corpus.score_new_conditions(user_query)
             if scored:
@@ -531,6 +538,22 @@ def maestro_condition_callback(
             deduped = corpus.compute_duplications()
             if deduped:
                 logger.info("Maestro safety-net: deduped %d pairs", deduped)
+            # Run the full algorithm battery — this computes composite
+            # quality, applies quality/specificity/relevance gates,
+            # detects contradictions, clusters, and builds narrative chains.
+            iteration = state.get("_corpus_iteration", 0)
+            battery = corpus.run_algorithm_battery(
+                user_query=user_query,
+                iteration=iteration,
+            )
+            logger.info(
+                "Maestro safety-net battery: %d ready, %d expansion, "
+                "%d excluded (%.0fms)",
+                battery.get("ready", 0),
+                battery.get("expansion_targets", 0),
+                battery.get("excluded", 0),
+                battery.get("battery_duration_ms", 0),
+            )
         except Exception:
             logger.warning("Maestro safety-net scoring failed", exc_info=True)
 
@@ -759,6 +782,12 @@ def cleanup_corpus(state: dict) -> None:
     Also removes corpus-related keys from *state* so that
     :func:`_init_pipeline_state` properly re-initialises on the next
     pipeline run within the same session.
+
+    **Corpus continuity**: the DB path is saved to
+    ``state["_prev_corpus_db_path"]`` so that subsequent pipeline runs
+    within the same AG-UI thread can reopen the same corpus.  This
+    enables expansion tests and multi-turn research sessions where
+    each iteration builds on the previous one's findings.
     """
     # Best-effort wait for background scoring before closing the DB.
     # This is the ONE place where a blocking join is acceptable —
@@ -776,6 +805,19 @@ def cleanup_corpus(state: dict) -> None:
     key = state.get("_corpus_key")
     if key and key in _corpus_stores:
         corpus = _corpus_stores[key]
+        # ── Corpus continuity: preserve the DB path for the next run ──
+        # The AG-UI SessionManager persists state across HTTP requests
+        # for the same threadId.  By saving the DB path here, the next
+        # pipeline run in the same conversation can reopen the same
+        # corpus instead of starting from scratch.
+        try:
+            state["_prev_corpus_db_path"] = corpus.db_path
+            logger.info(
+                "cleanup_corpus: saved corpus path for continuity: %s",
+                corpus.db_path,
+            )
+        except Exception:
+            pass
         if not scoring_done:
             # Scoring thread still alive — do NOT close the connection
             # while it's mid-query.  Drop our reference and let the
@@ -799,6 +841,8 @@ def cleanup_corpus(state: dict) -> None:
             del _corpus_stores[key]
     # Clear corpus-related state keys so _init_pipeline_state
     # re-initialises cleanly on session reuse.
+    # NOTE: _prev_corpus_db_path is intentionally NOT cleared — it is
+    # the continuity bridge between pipeline runs in the same session.
     # ADK State objects don't support .pop(); use del with guard.
     for k in ("_corpus_key", "_corpus_db_path", "_corpus_iteration",
               "_expansion_targets",

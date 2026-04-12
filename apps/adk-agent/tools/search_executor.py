@@ -837,6 +837,50 @@ def extract_search_queries(strategy_text: str) -> list[str]:
     return queries[:10]
 
 
+def _get_existing_corpus_urls(corpus: Any) -> set[str]:
+    """Query the corpus for all source URLs already ingested.
+
+    Returns a set of normalised URLs (lowercase, stripped of trailing slash)
+    that the search executor can check against to avoid re-scraping pages
+    that are already in the corpus from previous pipeline runs.
+    """
+    try:
+        rows = corpus.conn.execute(
+            "SELECT DISTINCT source_url FROM conditions "
+            "WHERE source_url IS NOT NULL AND source_url != ''"
+        ).fetchall()
+        urls: set[str] = set()
+        for (url,) in rows:
+            normalised = url.strip().lower().rstrip("/")
+            if normalised:
+                urls.add(normalised)
+        return urls
+    except Exception:
+        logger.debug("Could not query existing corpus URLs", exc_info=True)
+        return set()
+
+
+def _get_existing_query_fingerprints(corpus: Any) -> set[str]:
+    """Query the corpus for fingerprints of previously searched queries.
+
+    Looks at source_ref and angle columns for search_executor entries to
+    build a set of normalised query fingerprints.  Used to skip queries
+    that have already been executed in a previous pipeline run.
+    """
+    try:
+        # Look at expansion_hint for expansion targets that were already
+        # fulfilled — these queries have already been executed.
+        hint_rows = corpus.conn.execute(
+            "SELECT DISTINCT expansion_hint FROM conditions "
+            "WHERE expansion_hint IS NOT NULL AND expansion_hint != '' "
+            "AND expansion_fulfilled = TRUE"
+        ).fetchall()
+        return {r[0].strip().lower() for r in hint_rows if r[0]}
+    except Exception:
+        logger.debug("Could not query existing query fingerprints", exc_info=True)
+        return set()
+
+
 def _detect_academic_need(strategy_text: str) -> bool:
     """Detect if the thinker's strategy flags academic research needs."""
     if not strategy_text:
@@ -895,7 +939,16 @@ async def run_search_executor(
         "citation_follows": 0,
         "total_results": 0,
         "total_ingested": 0,
+        "urls_deduped": 0,
     }
+
+    # ── Cross-run dedup: collect URLs already in corpus ──
+    existing_urls = _get_existing_corpus_urls(corpus)
+    if existing_urls:
+        logger.info(
+            "Cross-run dedup: %d URLs already in corpus from previous runs",
+            len(existing_urls),
+        )
 
     semaphore = asyncio.Semaphore(_MAX_CONCURRENT)
 
@@ -1039,6 +1092,20 @@ async def run_search_executor(
     if not (cancel and cancel.is_set()):
         combined_text = "\n".join(all_result_text)
         all_urls = _extract_urls_from_text(combined_text)
+        # ── Cross-run URL dedup: skip URLs already in corpus ──
+        if existing_urls:
+            pre_dedup = len(all_urls)
+            all_urls = [
+                u for u in all_urls
+                if u.strip().lower().rstrip("/") not in existing_urls
+            ]
+            deduped = pre_dedup - len(all_urls)
+            if deduped:
+                stats["urls_deduped"] += deduped
+                logger.info(
+                    "Phase B URL dedup: skipped %d URLs already in corpus",
+                    deduped,
+                )
         diverse_urls = _select_diverse_urls(
             all_urls, _MAX_CONTENT_EXTRACTIONS,
         )
@@ -1163,7 +1230,9 @@ async def run_search_executor(
         citation_urls = _extract_urls_from_text(citation_text)
         already_extracted = set(diverse_urls)
         new_urls = [
-            u for u in citation_urls if u not in already_extracted
+            u for u in citation_urls
+            if u not in already_extracted
+            and u.strip().lower().rstrip("/") not in existing_urls
         ]
         follow_urls = _select_diverse_urls(
             new_urls, _MAX_CITATION_FOLLOWS,
