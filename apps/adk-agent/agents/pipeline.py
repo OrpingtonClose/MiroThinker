@@ -99,10 +99,24 @@ def _init_pipeline_state(
     pipeline runs we inject the keys that thinker/researcher/synthesiser
     read via ``{research_findings}`` / ``{corpus_for_synthesis}`` template
     variables.  Also registers the CorpusStore singleton for DuckDB.
+
+    **Corpus continuity**: if ``state["_prev_corpus_db_path"]`` is set
+    (saved by :func:`cleanup_corpus` at the end of the previous run),
+    the new CorpusStore reopens the *same* DuckDB file.  This means the
+    thinker sees all findings from prior iterations and the search
+    executor sees existing expansion targets — enabling true multi-turn
+    expansion where each pipeline run compounds on the previous one.
     """
     state = callback_context.state
     if "_corpus_key" not in state:
-        for k, v in build_corpus_state().items():
+        # ── Corpus continuity: reopen the previous run's corpus ──
+        prev_db = state.get("_prev_corpus_db_path", "")
+        if prev_db:
+            logger.info(
+                "Corpus continuity: reopening previous corpus at %s",
+                prev_db,
+            )
+        for k, v in build_corpus_state(db_path=prev_db).items():
             state[k] = v
         init_corpus(state)
         logger.info("Pipeline state initialised: corpus_key=%s", state["_corpus_key"])
