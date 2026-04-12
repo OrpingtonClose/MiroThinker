@@ -365,9 +365,14 @@ def search_executor_callback(
     if not _wait_for_pending_scoring(corpus_key):
         logger.warning(
             "search_executor_callback: scoring thread still alive — "
-            "skipping search executor to avoid concurrent DuckDB access",
+            "skipping entire search+maestro iteration to avoid concurrent DuckDB access",
         )
-        return None
+        # Return Content (not None) to SHORT-CIRCUIT the SequentialAgent.
+        # Returning None means "proceed" in ADK — the maestro sub-agent
+        # would still run and access DuckDB via execute_flock_sql().
+        return genai_types.Content(
+            parts=[genai_types.Part(text="[Scoring thread still active — skipping this iteration]")],
+        )
 
     # Set tracing context
     iteration = state.get("_corpus_iteration", 0)
@@ -520,15 +525,23 @@ def maestro_condition_callback(
             logger.warning("Maestro safety-net scoring failed", exc_info=True)
 
     corpus_key = state.get("_corpus_key", "default")
+
+    # Read thread reference under lock, then join OUTSIDE the lock.
+    # Holding _scoring_lock during join() would block all concurrent
+    # sessions for up to 10s — exactly the event-loop freeze this PR
+    # aims to prevent.
     with _scoring_lock:
-        # Wait for any leftover thread from a previous iteration
         old_t = _scoring_threads.get(corpus_key)
-        if old_t is not None and old_t.is_alive():
-            old_t.join(timeout=10)
-        # Only start a new thread if the old one actually finished.
-        # Starting a second thread while the first is still running
-        # would cause concurrent DuckDB access on the same connection.
-        if old_t is not None and old_t.is_alive():
+
+    if old_t is not None and old_t.is_alive():
+        old_t.join(timeout=10)
+
+    with _scoring_lock:
+        # Re-check: another callback may have already replaced the thread.
+        current = _scoring_threads.get(corpus_key)
+        if current is not None and current is not old_t:
+            pass  # Another callback already started a new thread
+        elif old_t is not None and old_t.is_alive():
             logger.warning(
                 "Previous scoring thread still alive after 10s (key=%s) — "
                 "skipping safety-net scoring to avoid concurrent DuckDB access",
