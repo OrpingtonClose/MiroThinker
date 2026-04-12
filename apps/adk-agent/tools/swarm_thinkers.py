@@ -261,14 +261,19 @@ def arbitrate_competing_thoughts(
     corpus,
     angle: str,
     iteration: int,
-) -> int | None:
+) -> list[int]:
     """Arbitrate between competing specialist thoughts for an angle.
 
     When multiple thoughts exist for the same angle, this function
-    evaluates their evidence quality and produces a verdict thought
-    that synthesises the best reasoning.
+    evaluates their evidence quality and produces:
+    1. An arbitration verdict (thought row) — internal reasoning
+    2. One or more insight rows (``row_type='insight'``) — evidence-grounded
+       conclusions safe for the synthesiser to consume
 
-    Returns the verdict thought ID, or None if arbitration was not needed.
+    Epistemic boundary: the arbitrator MUST cite finding-row IDs as
+    evidence.  Conclusions not grounded in finding rows are rejected.
+
+    Returns list of new row IDs (verdict + insights), or empty list.
     """
     thoughts = corpus.get_thoughts_by_angle(angle)
     # Only arbitrate when there are multiple competing thoughts
@@ -277,7 +282,7 @@ def arbitrate_competing_thoughts(
         if t["strategy"] == "specialist_analysis"
     ]
     if len(specialist_thoughts) < 2:
-        return None
+        return []
 
     # Already have a verdict for this iteration?
     existing_verdicts = [
@@ -286,7 +291,23 @@ def arbitrate_competing_thoughts(
         and t["iteration"] == iteration
     ]
     if existing_verdicts:
-        return None
+        return []
+
+    # Gather finding-row evidence available for this angle
+    findings = corpus.conn.execute(
+        """SELECT id, fact, confidence, trust_score, source_url
+           FROM conditions
+           WHERE row_type = 'finding' AND consider_for_use = TRUE
+           ORDER BY composite_quality DESC
+           LIMIT 50""",
+    ).fetchall()
+    finding_summaries = []
+    for f in findings[:30]:
+        src = f" (source: {f[4]})" if f[4] else ""
+        finding_summaries.append(
+            f"  [finding #{f[0]}, conf={f[2]:.2f}, trust={f[3]:.2f}]: "
+            f"{f[1][:300]}{src}"
+        )
 
     # Build arbitration prompt
     thought_summaries = []
@@ -297,51 +318,99 @@ def arbitrate_competing_thoughts(
         )
 
     prompt = f"""\
-You are a research arbitrator. Multiple specialist analysts have produced \
-independent analyses for the same research angle. Your job is to evaluate \
-their competing conclusions and produce a verdict.
+You are a research arbitrator enforcing EPISTEMIC DISCIPLINE. Multiple \
+specialist analysts have produced independent analyses for the same \
+research angle. Your job is to evaluate their conclusions STRICTLY \
+against the available evidence (finding rows).
 
 ANGLE: {angle}
 
 SPECIALIST ANALYSES:
 {chr(10).join(thought_summaries)}
 
-INSTRUCTIONS:
-1. Identify where specialists AGREE — these are high-confidence conclusions
-2. Identify where specialists DISAGREE — evaluate which side has stronger evidence
-3. For each disagreement, explain WHY one conclusion is stronger
-4. Produce a VERDICT that integrates the best reasoning from all specialists
-5. Note any remaining uncertainty that needs further evidence
+AVAILABLE EVIDENCE (finding rows — the ONLY valid evidence base):
+{chr(10).join(finding_summaries) if finding_summaries else '(no findings available)'}
 
-OUTPUT: A concise verdict (300-1000 chars) with clear conclusions and \
-confidence levels. Cite specific thought IDs where relevant."""
+STRICT RULES:
+1. Every conclusion MUST cite specific finding IDs (e.g. "supported by \
+findings #12, #45") as evidence
+2. Claims not grounded in finding rows must be flagged as UNSUPPORTED \
+HYPOTHESIS — do not accept rhetoric or coherence as evidence
+3. When specialists disagree, determine which side has MORE finding-row \
+support, not which argument SOUNDS more convincing
+4. Assess the quality of the cited findings (confidence, trust scores)
 
+OUTPUT FORMAT:
+VERDICT: [Integrated conclusion citing finding IDs]
+CONFIDENCE: [HIGH/MEDIUM/LOW based on finding support]
+GROUNDED_CONCLUSIONS:
+- CONCLUSION 1: [statement] EVIDENCE: [finding #X, #Y]
+- CONCLUSION 2: [statement] EVIDENCE: [finding #X, #Z]
+UNSUPPORTED: [list any specialist claims lacking finding-row evidence]
+GAPS: [what additional findings would resolve remaining uncertainty]"""
+
+    created_ids: list[int] = []
     try:
         response = corpus._http_complete(
             prompt, caller=f"arbitrate_{angle[:30]}",
-            max_tokens=1024,
+            max_tokens=1536,
         )
-        if response and len(response.strip()) >= _MIN_THOUGHT_CHARS:
-            # Use the most recent specialist thought as parent
-            parent_id = specialist_thoughts[-1]["id"]
-            tid = corpus.admit_thought(
-                reasoning=response,
-                parent_thought_id=parent_id,
-                angle=angle,
-                strategy="arbitration_verdict",
-                iteration=iteration,
+        if not response or len(response.strip()) < _MIN_THOUGHT_CHARS:
+            return []
+
+        # Persist the full verdict as a thought row (internal reasoning)
+        parent_id = specialist_thoughts[-1]["id"]
+        verdict_id = corpus.admit_thought(
+            reasoning=response,
+            parent_thought_id=parent_id,
+            angle=angle,
+            strategy="arbitration_verdict",
+            iteration=iteration,
+        )
+        created_ids.append(verdict_id)
+        logger.info(
+            "Arbitration verdict for '%s': thought #%d (%d chars)",
+            angle, verdict_id, len(response),
+        )
+
+        # Extract grounded conclusions and materialize as insight rows
+        conclusions = re.findall(
+            r"CONCLUSION\s+\d+:\s*(.+?)EVIDENCE:\s*(.+?)(?=CONCLUSION|\n(?:UNSUPPORTED|GAPS)|$)",
+            response,
+            re.DOTALL | re.IGNORECASE,
+        )
+        for conclusion_text, evidence_refs in conclusions:
+            conclusion_text = conclusion_text.strip().rstrip("-•")
+            evidence_refs = evidence_refs.strip()
+            # Only materialize if it actually cites finding IDs
+            cited_ids = re.findall(r"#(\d+)", evidence_refs)
+            if not cited_ids:
+                continue
+            insight_text = (
+                f"{conclusion_text.strip()} "
+                f"[evidence: findings {evidence_refs.strip()}]"
             )
-            logger.info(
-                "Arbitration verdict for '%s': thought #%d (%d chars)",
-                angle, tid, len(response),
-            )
-            return tid
+            if len(insight_text) >= 50:
+                insight_id = corpus.admit_insight(
+                    conclusion=insight_text,
+                    source_thought_id=verdict_id,
+                    angle=angle,
+                    grounding_ids=[int(i) for i in cited_ids],
+                    iteration=iteration,
+                )
+                created_ids.append(insight_id)
+                logger.info(
+                    "Materialized insight #%d from verdict #%d "
+                    "(grounded in %d findings)",
+                    insight_id, verdict_id, len(cited_ids),
+                )
+
     except Exception:
         logger.warning(
             "Arbitration failed for angle '%s' (non-fatal)",
             angle, exc_info=True,
         )
-    return None
+    return created_ids
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -468,12 +537,47 @@ CLAIM 2: [focused sub-claim with supporting evidence from the original]
 
 @dataclass
 class AngleState:
-    """Track the state of a single research angle in the swarm."""
+    """Track the state of a single research angle in the swarm.
+
+    Convergence is determined by multiple signals, not just length:
+    - **Novelty decay**: Semantic overlap between consecutive thoughts
+    - **Stability**: Whether conclusions are consistent across iterations
+    - **Diminishing output**: Progressively shorter/thinner responses
+    - **Self-report**: Specialist explicitly signals exhaustion
+    """
     name: str
     thought_count: int = 0
     last_thought_chars: int = 0
+    prev_thought_summary: str = ""
     iterations_active: int = 0
+    novelty_scores: list[float] = field(default_factory=list)
     converged: bool = False
+    convergence_reason: str = ""
+
+
+def _estimate_novelty(current: str, previous: str) -> float:
+    """Estimate novelty of *current* thought relative to *previous*.
+
+    Uses a cheap heuristic: Jaccard similarity on word trigrams.
+    Returns 0.0 (identical) to 1.0 (completely novel).
+    """
+    if not previous or not current:
+        return 1.0
+
+    def _trigrams(text: str) -> set[str]:
+        words = text.lower().split()
+        if len(words) < 3:
+            return set(words)
+        return {" ".join(words[i:i + 3]) for i in range(len(words) - 2)}
+
+    t_cur = _trigrams(current[:2000])
+    t_prev = _trigrams(previous[:2000])
+    if not t_cur or not t_prev:
+        return 1.0
+    intersection = len(t_cur & t_prev)
+    union = len(t_cur | t_prev)
+    jaccard = intersection / union if union > 0 else 0.0
+    return 1.0 - jaccard
 
 
 @dataclass
@@ -481,12 +585,19 @@ class SwarmRouter:
     """Manage swarm topology — which angles are active, converged, or new.
 
     The router tracks angle state across iterations and makes decisions
-    about which angles need specialist attention.  It detects convergence
-    (when an angle stops producing new insight) and prevents wasted LLM
-    calls on exhausted angles.
+    about which angles need specialist attention.  Convergence detection
+    uses multiple signals:
+    1. Novelty decay (trigram overlap between consecutive thoughts)
+    2. Output stability (consistent conclusions across iterations)
+    3. Diminishing returns (progressively shorter responses)
+    4. Minimum iteration threshold before convergence is possible
     """
     angles: dict[str, AngleState] = field(default_factory=dict)
     max_specialists: int = _MAX_SPECIALISTS
+    # Novelty threshold: below this, the angle is producing repetitive content
+    novelty_threshold: float = 0.3
+    # How many consecutive low-novelty iterations trigger convergence
+    stale_iterations_threshold: int = 2
 
     def update_from_corpus(self, corpus) -> None:
         """Refresh angle state from the corpus thought rows."""
@@ -500,23 +611,60 @@ class SwarmRouter:
                 self.angles[angle_name] = AngleState(name=angle_name)
             state = self.angles[angle_name]
             new_count = len(specialist_thoughts)
-            if new_count > state.thought_count:
+
+            if new_count > state.thought_count and specialist_thoughts:
                 state.iterations_active += 1
-                # Check for convergence: if latest thought is very short
-                # compared to prior, the angle may be exhausted
-                if specialist_thoughts:
-                    state.last_thought_chars = len(
-                        specialist_thoughts[0]["fact"]
+                latest = specialist_thoughts[0]  # newest first
+                latest_text = latest["fact"]
+                state.last_thought_chars = len(latest_text)
+
+                # Signal 1: Novelty decay (trigram overlap)
+                novelty = _estimate_novelty(latest_text, state.prev_thought_summary)
+                state.novelty_scores.append(novelty)
+                state.prev_thought_summary = latest_text[:2000]
+
+                # Signal 2: Check for self-reported exhaustion
+                exhaustion_markers = [
+                    "no additional", "already covered", "nothing new",
+                    "previously established", "as noted before",
+                    "reiterating", "no further evidence",
+                ]
+                self_reported_exhaustion = any(
+                    marker in latest_text.lower() for marker in exhaustion_markers
+                )
+
+                # Signal 3: Diminishing output length
+                short_output = state.last_thought_chars < _MIN_THOUGHT_CHARS
+
+                # Convergence decision: multi-signal
+                if state.iterations_active >= 3:
+                    # Count recent low-novelty iterations
+                    recent_novelties = state.novelty_scores[-3:]
+                    stale_count = sum(
+                        1 for n in recent_novelties
+                        if n < self.novelty_threshold
                     )
-                    if (
-                        state.iterations_active >= 3
-                        and state.last_thought_chars < _MIN_THOUGHT_CHARS
-                    ):
+
+                    if stale_count >= self.stale_iterations_threshold:
                         state.converged = True
-                        logger.info(
-                            "Angle '%s' converged after %d iterations",
-                            angle_name, state.iterations_active,
+                        state.convergence_reason = (
+                            f"novelty decay ({stale_count}/{len(recent_novelties)} "
+                            f"iterations below {self.novelty_threshold} threshold)"
                         )
+                    elif self_reported_exhaustion and novelty < 0.4:
+                        state.converged = True
+                        state.convergence_reason = "self-reported exhaustion + low novelty"
+                    elif short_output and stale_count >= 1:
+                        state.converged = True
+                        state.convergence_reason = "diminishing output + stale content"
+
+                    if state.converged:
+                        logger.info(
+                            "Angle '%s' converged after %d iterations: %s",
+                            angle_name, state.iterations_active,
+                            state.convergence_reason,
+                        )
+
             state.thought_count = new_count
 
     def select_angles(self, requested_angles: list[str]) -> list[str]:
@@ -610,14 +758,13 @@ def run_swarm_cycle(state: dict, corpus) -> list[int]:
     except Exception:
         logger.warning("Specialist spawning failed (non-fatal)", exc_info=True)
 
-    # Phase 2: Arbitrate competing thoughts per angle
+    # Phase 2: Arbitrate competing thoughts per angle → verdicts + insights
     for angle in active_angles:
         try:
-            verdict_id = arbitrate_competing_thoughts(
+            arb_ids = arbitrate_competing_thoughts(
                 corpus, angle, iteration,
             )
-            if verdict_id is not None:
-                all_thought_ids.append(verdict_id)
+            all_thought_ids.extend(arb_ids)
         except Exception:
             logger.warning(
                 "Arbitration for '%s' failed (non-fatal)",

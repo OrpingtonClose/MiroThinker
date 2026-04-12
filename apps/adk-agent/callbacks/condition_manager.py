@@ -623,24 +623,44 @@ def maestro_condition_callback(
         except Exception:
             logger.warning("Periodic synthesis failed (non-fatal)", exc_info=True)
 
-    # ── Thought swarm cycle ───────────────────────────────────────────
+    # ── Thought swarm cycle (async offload) ─────────────────────────────
     # Spawn parallel specialist thinkers for angles identified by the
     # main thinker, then arbitrate competing conclusions and split broad
-    # thoughts into focused sub-claims.  All non-fatal — DuckDB failures
-    # or LLM errors never block the pipeline.
+    # thoughts into focused sub-claims.  Runs in a background thread so
+    # the callback returns fast (addresses ADK guidance re: heavy callback
+    # work).  Results are written to DuckDB and visible to the thinker on
+    # the NEXT iteration (eventual consistency, not blocking).
     try:
         from tools.swarm_thinkers import run_swarm_cycle
         corpus = _get_corpus(state)
-        swarm_ids = run_swarm_cycle(state, corpus)
-        if swarm_ids:
-            logger.info(
-                "Swarm cycle produced %d new thoughts at iteration %d",
-                len(swarm_ids), iteration,
-            )
-            # Refresh corpus views so the thinker sees specialist thoughts
-            state["research_findings"] = corpus.format_for_thinker()
+
+        # Capture state values the swarm cycle needs (avoid holding a
+        # reference to the full mutable state dict across threads).
+        swarm_state_snapshot = {
+            "_corpus_iteration": iteration,
+            "user_query": state.get("user_query", ""),
+            "research_strategy": state.get("research_strategy", ""),
+        }
+
+        def _bg_swarm() -> None:
+            """Background swarm cycle — writes directly to DuckDB."""
+            try:
+                swarm_ids = run_swarm_cycle(swarm_state_snapshot, corpus)
+                if swarm_ids:
+                    logger.info(
+                        "Background swarm produced %d new thoughts at iter %d",
+                        len(swarm_ids), iteration,
+                    )
+            except Exception:
+                logger.warning("Background swarm cycle failed (non-fatal)", exc_info=True)
+
+        swarm_thread = threading.Thread(
+            target=_bg_swarm, daemon=True, name=f"swarm-iter-{iteration}",
+        )
+        swarm_thread.start()
+        logger.debug("Swarm cycle dispatched to background thread (iter=%d)", iteration)
     except Exception:
-        logger.warning("Swarm cycle failed (non-fatal)", exc_info=True)
+        logger.warning("Swarm dispatch failed (non-fatal)", exc_info=True)
 
     state["_corpus_iteration"] = iteration + 1
 

@@ -164,11 +164,14 @@ RULES:
    Write ``'Anna''s Library'`` NOT ``'Anna's Library'``.  Unescaped quotes \
    cause parser crashes.
 
-SACRED RULE: Rows with row_type='thought' are IMMUTABLE. You may NEVER \
-UPDATE, DELETE, or set consider_for_use=FALSE on thought rows. To influence \
-the direction of reasoning, INSERT new rows with curated evidence — these \
-are "data-bearing agents" whose output the thinker integrates as peer \
-contributions.
+SACRED RULE: Rows with row_type='thought' or row_type='insight' are \
+IMMUTABLE. You may NEVER UPDATE, DELETE, or set consider_for_use=FALSE \
+on thought or insight rows. To influence the direction of reasoning, \
+INSERT new rows with curated evidence — these are "data-bearing agents" \
+whose output the thinker integrates as peer contributions. \
+Insight rows (row_type='insight') are evidence-grounded conclusions \
+materialized from arbitration — they bridge internal reasoning and the \
+synthesiser's evidence base.
 
 OUTPUT: After completing your operations, output a brief summary of \
 what you did and the corpus state.  This becomes the input for the \

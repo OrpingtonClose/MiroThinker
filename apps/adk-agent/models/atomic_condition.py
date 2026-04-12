@@ -43,7 +43,7 @@ class AtomicCondition:
     )
 
     # Single-table architecture fields
-    row_type: str = "finding"  # 'finding' | 'similarity' | 'contradiction' | 'raw' | 'synthesis' | 'thought'
+    row_type: str = "finding"  # 'finding' | 'similarity' | 'contradiction' | 'raw' | 'synthesis' | 'thought' | 'insight'
     related_id: int | None = None  # second parent for relationship rows
     consider_for_use: bool = True  # universal exclusion flag
 
