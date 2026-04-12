@@ -727,7 +727,9 @@ def _extract_urls_from_text(text: str) -> list[str]:
             continue
         try:
             domain = urlparse(url).netloc.lower().removeprefix("www.")
-            if any(skip in domain for skip in _SKIP_DOMAINS):
+            if domain in _SKIP_DOMAINS or any(
+                domain.endswith("." + skip) for skip in _SKIP_DOMAINS
+            ):
                 continue
         except Exception:
             continue
