@@ -26,7 +26,7 @@ import os
 import re
 import time
 import urllib.request
-from collections import Counter
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -1128,6 +1128,147 @@ class CorpusStore:
             )
         return count
 
+    def apply_relevance_gate(self) -> int:
+        """Exclude atoms with very low relevance scores.
+
+        Defense-in-depth against noise that survived the prompt-level
+        relevance filter.  Atoms with relevance_score < 0.25 are
+        marked ``consider_for_use=FALSE``.  Pure SQL — no LLM calls.
+
+        Returns number excluded.
+        """
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE relevance_score < 0.25 "
+            "AND relevance_score >= 0.0 "
+            "AND scored_at != '' "
+            "AND consider_for_use = TRUE "
+            "AND row_type = 'finding'"
+        ).fetchone()[0]
+        if count == 0:
+            return 0
+        self.conn.execute(
+            """UPDATE conditions
+               SET consider_for_use = FALSE,
+                   obsolete_reason = 'relevance_gate: score='
+                       || ROUND(relevance_score, 2)
+               WHERE relevance_score < 0.25
+                 AND relevance_score >= 0.0
+                 AND scored_at != ''
+                 AND consider_for_use = TRUE
+                 AND row_type = 'finding'
+            """
+        )
+        if count:
+            logger.info(
+                "Relevance gate: excluded %d low-relevance atoms", count,
+            )
+        return count
+
+    def build_narrative_chains(self) -> int:
+        """Walk causal/temporal/support edges to build narrative chains.
+
+        Queries relationship rows (row_type in NARRATIVE_REL_TYPES) to
+        find connected sequences of atoms.  For each chain of length
+        >= 2, creates a ``row_type='narrative_chain'`` row whose
+        ``fact`` field lists the chain members in order.
+
+        Pure SQL + Python graph walk — no LLM calls.
+
+        Returns number of chains built.
+        """
+        # Fetch all narrative edges
+        edge_types = tuple(self._NARRATIVE_REL_TYPES)
+        placeholders = ", ".join("?" for _ in edge_types)
+        edges = self.conn.execute(
+            f"SELECT parent_id, related_id, row_type "
+            f"FROM conditions "
+            f"WHERE row_type IN ({placeholders}) "
+            f"AND parent_id IS NOT NULL "
+            f"AND related_id IS NOT NULL",
+            list(edge_types),
+        ).fetchall()
+
+        if not edges:
+            return 0
+
+        # Build adjacency list
+        graph: dict[int, list[tuple[int, str]]] = defaultdict(list)
+        all_targets: set[int] = set()
+        for src, tgt, rel in edges:
+            graph[src].append((tgt, rel))
+            all_targets.add(tgt)
+
+        # Find chain roots (nodes with outgoing edges but not targeted
+        # by any edge — these are natural starting points).
+        roots = set(graph.keys()) - all_targets
+        if not roots:
+            # All nodes are part of cycles; pick all sources
+            roots = set(graph.keys())
+
+        # Walk from each root to build chains (DFS, no revisits)
+        chains: list[list[int]] = []
+        visited_global: set[int] = set()
+
+        for root in roots:
+            if root in visited_global:
+                continue
+            stack: list[tuple[int, list[int]]] = [(root, [root])]
+            while stack:
+                node, path = stack.pop()
+                extended = False
+                for tgt, _rel in graph.get(node, []):
+                    if tgt not in path:  # avoid cycles within chain
+                        stack.append((tgt, path + [tgt]))
+                        extended = True
+                if not extended and len(path) >= 2:
+                    chains.append(path)
+                    visited_global.update(path)
+
+        # Deduplicate chains that are subsets of longer chains
+        chains.sort(key=len, reverse=True)
+        covered: set[int] = set()
+        final_chains: list[list[int]] = []
+        for chain in chains:
+            if not covered.issuperset(chain):
+                final_chains.append(chain)
+                covered.update(chain)
+
+        # Store each chain as a narrative_chain row
+        chain_count = 0
+        for chain in final_chains:
+            # Verify all members still exist and are active
+            placeholders_c = ", ".join("?" for _ in chain)
+            active = self.conn.execute(
+                f"SELECT COUNT(*) FROM conditions "
+                f"WHERE id IN ({placeholders_c}) "
+                f"AND consider_for_use = TRUE "
+                f"AND row_type = 'finding'",
+                chain,
+            ).fetchone()[0]
+            if active < 2:
+                continue
+
+            chain_id = self._next_id
+            self._next_id += 1
+            chain_fact = "chain:" + ",".join(str(x) for x in chain)
+            self.conn.execute(
+                "INSERT INTO conditions "
+                "(id, fact, row_type, parent_id, related_id, "
+                "consider_for_use, relationship_score) "
+                "VALUES (?, ?, 'narrative_chain', ?, ?, FALSE, ?)",
+                [chain_id, chain_fact,
+                 chain[0], chain[-1], float(len(chain))],
+            )
+            chain_count += 1
+
+        if chain_count:
+            logger.info(
+                "Narrative chains: built %d chains from %d edges",
+                chain_count, len(edges),
+            )
+        return chain_count
+
     def compute_cross_ref_boost(self) -> int:
         """Boost conditions that are confirmed by multiple angles.
 
@@ -1486,9 +1627,10 @@ class CorpusStore:
         """Merge near-duplicate conditions via Flock LLM.
 
         Queries relationship rows (row_type='similarity') for
-        duplicate pairs (score > 0.85).  When merging, sets
-        consider_for_use=FALSE on the loser instead of
-        processing_status='merged'.
+        duplicate pairs (score > 0.85).  Creates a NEW child row
+        with the merged text and dual-parent lineage
+        (parent_id=atom_a, related_id=atom_b).  Both originals are
+        marked ``consider_for_use=FALSE`` — no mutation, full lineage.
 
         Returns number of merges performed.
         """
@@ -1512,6 +1654,16 @@ class CorpusStore:
 
         merge_count = 0
         for id_a, fact_a, url_a, q_a, id_b, fact_b, url_b, q_b in dupes:
+            # Skip if either parent was already consumed by an earlier
+            # merge in this batch (both must still be active).
+            still_active = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions "
+                "WHERE id IN (?, ?) AND consider_for_use = TRUE",
+                [id_a, id_b],
+            ).fetchone()[0]
+            if still_active < 2:
+                continue
+
             try:
                 merged_fact = self._http_complete(
                     "Merge these two near-duplicate findings into "
@@ -1525,29 +1677,34 @@ class CorpusStore:
                 if not merged_fact or not merged_fact.strip():
                     continue
 
-                # Keep the higher-scored condition, merge away the lower
-                if (q_b or 0.0) > (q_a or 0.0):
-                    survivor_id, merged_id = id_b, id_a
-                    best_url = url_b or url_a
-                else:
-                    survivor_id, merged_id = id_a, id_b
-                    best_url = url_a or url_b
+                best_url = url_a or url_b
 
+                # Create a NEW child row with dual-parent lineage
+                child_id = self._next_id
+                self._next_id += 1
+                now = datetime.now(timezone.utc).isoformat()
                 self.conn.execute(
-                    "UPDATE conditions SET fact = ?, "
-                    "source_url = CASE "
-                    "  WHEN source_url = '' THEN ? "
-                    "  ELSE source_url END "
-                    "WHERE id = ?",
-                    [merged_fact.strip(), best_url, survivor_id],
+                    "INSERT INTO conditions "
+                    "(id, fact, source_url, row_type, parent_id, "
+                    "related_id, consider_for_use, created_at, "
+                    "source_type, source_ref, angle, iteration) "
+                    "VALUES (?, ?, ?, 'finding', ?, ?, TRUE, ?, "
+                    "'merge', 'compress_redundant', "
+                    "(SELECT angle FROM conditions WHERE id = ?), "
+                    "(SELECT MAX(iteration) FROM conditions "
+                    " WHERE id IN (?, ?)))",
+                    [child_id, merged_fact.strip(), best_url,
+                     id_a, id_b, now, id_a, id_a, id_b],
                 )
+
+                # Mark BOTH originals as consumed — no mutation
                 self.conn.execute(
                     "UPDATE conditions "
                     "SET consider_for_use = FALSE, "
                     "    obsolete_reason = 'merged into ' || ?, "
                     "    duplication_score = 1.0 "
-                    "WHERE id = ?",
-                    [str(survivor_id), merged_id],
+                    "WHERE id IN (?, ?)",
+                    [str(child_id), id_a, id_b],
                 )
                 merge_count += 1
             except Exception:
@@ -1558,8 +1715,9 @@ class CorpusStore:
 
         if merge_count:
             logger.info(
-                "Redundancy compression: merged %d pairs",
-                merge_count,
+                "Redundancy compression: merged %d pairs into "
+                "%d new children",
+                merge_count, merge_count,
             )
         return merge_count
 
@@ -1858,11 +2016,13 @@ class CorpusStore:
         4. Composite quality (SQL)
         5. Quality gate (SQL)
         6. Specificity gate (SQL)
-        7. Information density (Flock LLM)
-        8. Contradiction detection (Flock LLM)
-        9. Clustering (SQL)
-        10. Redundancy compression (Flock LLM)
-        11. Mark ready (SQL)
+        7. Relevance gate (SQL)
+        8. Information density (Flock LLM)
+        9. Contradiction detection (Flock LLM)
+        10. Clustering (SQL)
+        11. Redundancy compression (Flock LLM)
+        12. Narrative chain building (SQL + graph walk)
+        13. Mark ready (SQL)
         """
         self._trace_iteration = iteration
         battery_start = time.monotonic()
@@ -1889,6 +2049,9 @@ class CorpusStore:
         )
         results["specificity_gate"] = self._trace_algorithm(
             "specificity_gate", self.apply_specificity_gate,
+        )
+        results["relevance_gate"] = self._trace_algorithm(
+            "relevance_gate", self.apply_relevance_gate,
         )
 
         # Clear stale expansion flags — prevent permanent limbo
@@ -1919,6 +2082,9 @@ class CorpusStore:
         )
         results["redundancy_merges"] = self._trace_algorithm(
             "redundancy_merges", self.compress_redundant,
+        )
+        results["narrative_chains"] = self._trace_algorithm(
+            "narrative_chains", self.build_narrative_chains,
         )
         results["marked_ready"] = self._trace_algorithm(
             "mark_ready", self.mark_ready,
@@ -2142,59 +2308,153 @@ class CorpusStore:
 
         return "\n".join(parts)
 
-    def format_for_thinker(self) -> str:
-        """Format the corpus as verbal prose for the thinker.
+    def _get_chunk_text(self, chunk_id: int) -> str:
+        """Fetch the original chunk text for a given chunk row id."""
+        row = self.conn.execute(
+            "SELECT fact FROM conditions WHERE id = ? AND row_type = 'chunk'",
+            [chunk_id],
+        ).fetchone()
+        return row[0] if row else ""
 
-        Organises findings into tiered sections by quality.
-        No raw score numbers — pure verbal prose that an LLM can
-        reason about naturally.
+    def _get_narrative_chains_for_atoms(
+        self, atom_ids: set[int],
+    ) -> list[list[int]]:
+        """Return narrative chains that involve any of the given atom ids.
+
+        Each chain is a list of atom ids in narrative order.
+        """
+        chain_rows = self.conn.execute(
+            "SELECT fact FROM conditions "
+            "WHERE row_type = 'narrative_chain'"
+        ).fetchall()
+        chains: list[list[int]] = []
+        for (fact,) in chain_rows:
+            if not fact.startswith("chain:"):
+                continue
+            members = [int(x) for x in fact[6:].split(",") if x.strip()]
+            if atom_ids.intersection(members):
+                chains.append(members)
+        return chains
+
+    def _get_relationship_edges(
+        self, atom_ids: set[int],
+    ) -> list[tuple[int, int, str]]:
+        """Return relationship edges (src, tgt, rel_type) among atoms."""
+        if not atom_ids:
+            return []
+        edge_types = tuple(self._NARRATIVE_REL_TYPES)
+        placeholders = ", ".join("?" for _ in edge_types)
+        rows = self.conn.execute(
+            f"SELECT parent_id, related_id, row_type "
+            f"FROM conditions "
+            f"WHERE row_type IN ({placeholders}) "
+            f"AND parent_id IS NOT NULL "
+            f"AND related_id IS NOT NULL",
+            list(edge_types),
+        ).fetchall()
+        return [
+            (src, tgt, rel)
+            for src, tgt, rel in rows
+            if src in atom_ids or tgt in atom_ids
+        ]
+
+    def format_for_thinker(self) -> str:
+        """Format the corpus as 3-layer narrative for the thinker.
+
+        Layer 1: Source chunks with original nuance preserved
+        Layer 2: Extracted atoms with quality annotations
+        Layer 3: Relationship edges and narrative chains
+
+        The thinker receives the full context needed to reason
+        about implications — that is the thinker's job.
         """
         conditions = self.get_for_thinker()
         if not conditions:
             return "(no findings yet)"
 
-        # Tier findings by composite quality
-        strong = [c for c in conditions
-                  if (c.get("composite_quality") or 0) >= 0.6]
-        moderate = [c for c in conditions
-                    if 0.3 <= (c.get("composite_quality") or 0) < 0.6]
-        weak = [c for c in conditions
-                if (c.get("composite_quality") or 0) < 0.3]
+        atom_ids = {c["id"] for c in conditions}
+        cond_by_id = {c["id"]: c for c in conditions}
+
+        # Group atoms by their parent chunk
+        by_chunk: dict[int, list[dict]] = defaultdict(list)
+        orphans: list[dict] = []
+        for c in conditions:
+            pid = c.get("parent_id")
+            if pid and pid > 0:
+                by_chunk[pid].append(c)
+            else:
+                orphans.append(c)
 
         lines: list[str] = [
-            f"RESEARCH BRIEFING: {len(conditions)} findings gathered "
-            "so far\n",
+            f"RESEARCH BRIEFING: {len(conditions)} findings from "
+            f"{len(by_chunk)} source passages\n",
         ]
 
-        # Strong findings
-        if strong:
-            lines.append(
-                "STRONG FINDINGS (well-sourced, high confidence):"
-            )
-            for c in strong:
+        # ------ Layer 1 + 2: Chunks with their atoms ------
+        lines.append("=" * 60)
+        lines.append("LAYER 1 & 2: SOURCE PASSAGES AND EXTRACTED FINDINGS")
+        lines.append("=" * 60)
+        lines.append("")
+
+        for chunk_id in sorted(by_chunk.keys()):
+            atoms = by_chunk[chunk_id]
+            chunk_text = self._get_chunk_text(chunk_id)
+
+            lines.append(f"--- Source Passage (chunk {chunk_id}) ---")
+            if chunk_text:
+                lines.append(chunk_text[:2000])
+            lines.append("")
+            lines.append("Extracted findings:")
+
+            for c in atoms:
                 lines.append(self._describe_finding(c))
                 lines.append("")
 
-        # Moderate findings
-        if moderate:
-            lines.append(
-                "MODERATE FINDINGS (partial evidence, worth "
-                "building on):"
-            )
-            for c in moderate:
+        # Orphan atoms (no chunk parent — legacy or merge children)
+        if orphans:
+            lines.append("--- Standalone Findings (no source passage) ---")
+            for c in orphans:
                 lines.append(self._describe_finding(c))
                 lines.append("")
 
-        # Weak findings
-        if weak:
-            lines.append(
-                "WEAK FINDINGS (need more evidence or enrichment):"
-            )
-            for c in weak:
-                lines.append(self._describe_finding(c))
+        # ------ Layer 3: Relationships and narrative chains ------
+        edges = self._get_relationship_edges(atom_ids)
+        chains = self._get_narrative_chains_for_atoms(atom_ids)
+
+        if edges or chains:
+            lines.append("=" * 60)
+            lines.append("LAYER 3: RELATIONSHIPS AND NARRATIVE THREADS")
+            lines.append("=" * 60)
+            lines.append("")
+
+        if edges:
+            lines.append("RELATIONSHIPS BETWEEN FINDINGS:")
+            for src, tgt, rel in edges:
+                src_preview = cond_by_id[src]["fact"][:80] if src in cond_by_id else f"[{src}]"
+                tgt_preview = cond_by_id[tgt]["fact"][:80] if tgt in cond_by_id else f"[{tgt}]"
+                lines.append(
+                    f"  [{src}] --{rel}--> [{tgt}]"
+                )
+                lines.append(f"    {src_preview}")
+                lines.append(f"    → {tgt_preview}")
                 lines.append("")
 
-        # Contradictions section
+        if chains:
+            lines.append("NARRATIVE THREADS (connected finding sequences):")
+            for i, chain in enumerate(chains, 1):
+                chain_facts = []
+                for mid in chain:
+                    if mid in cond_by_id:
+                        chain_facts.append(
+                            f"  {len(chain_facts) + 1}. [{mid}] "
+                            f"{cond_by_id[mid]['fact'][:120]}"
+                        )
+                if chain_facts:
+                    lines.append(f"Thread {i}:")
+                    lines.extend(chain_facts)
+                    lines.append("")
+
+        # ------ Contradictions ------
         contradictions = [
             c for c in conditions if c.get("contradiction_flag")
         ]
@@ -2207,100 +2467,113 @@ class CorpusStore:
                 if pair in seen or partner < 0:
                     continue
                 seen.add(pair)
-                partner_c = next(
-                    (x for x in conditions if x["id"] == partner),
-                    None,
-                )
+                partner_c = cond_by_id.get(partner)
                 if partner_c:
                     lines.append(
-                        f"Findings [{c['id']}] and [{partner}] "
-                        f"disagree. [{c['id']}] claims: "
-                        f"{c['fact'][:200]}. "
-                        f"[{partner}] claims: "
-                        f"{partner_c['fact'][:200]}. "
-                        "This needs resolution."
+                        f"  [{c['id']}] vs [{partner}]: "
+                        f"{c['fact'][:200]} CONTRADICTS "
+                        f"{partner_c['fact'][:200]}"
                     )
             lines.append("")
 
-        # Under-explored areas
-        cluster_data: dict[int, list[dict]] = {}
-        for c in conditions:
-            cid = c.get("cluster_id", -1)
-            if cid >= 0:
-                cluster_data.setdefault(cid, []).append(c)
-        under_explored = [
-            (cid, members)
-            for cid, members in cluster_data.items()
-            if len(members) <= 2
-            or sum(
-                (m.get("composite_quality") or 0)
-                for m in members
-            ) / len(members) < 0.4
-        ]
-        if under_explored:
-            lines.append("UNDER-EXPLORED AREAS:")
-            for _, members in under_explored[:5]:
-                angle = members[0].get("angle", "unknown")
-                mean_q = sum(
-                    (m.get("composite_quality") or 0)
-                    for m in members
-                ) / len(members)
-                qual = (
-                    "moderate" if mean_q >= 0.3
-                    else "low"
-                )
-                lines.append(
-                    f"The topic of {angle} has only "
-                    f"{len(members)} findings, all with {qual} "
-                    "confidence. More research needed here."
-                )
-            lines.append("")
-
-        # Corpus health summary
+        # ------ Corpus health ------
+        strong = sum(
+            1 for c in conditions
+            if (c.get("composite_quality") or 0) >= 0.6
+        )
+        moderate = sum(
+            1 for c in conditions
+            if 0.3 <= (c.get("composite_quality") or 0) < 0.6
+        )
+        weak = sum(
+            1 for c in conditions
+            if (c.get("composite_quality") or 0) < 0.3
+        )
         awaiting = sum(
             1 for c in conditions
             if c.get("expansion_tool", "none") != "none"
             and not c.get("expansion_fulfilled")
         )
         lines.append(
-            f"CORPUS HEALTH: {len(conditions)} findings total. "
-            f"{len(strong)} strong, {len(moderate)} moderate, "
-            f"{len(weak)} weak. {len(contradictions)} contradictions "
-            f"detected. {awaiting} findings awaiting enrichment."
+            f"CORPUS HEALTH: {len(conditions)} findings. "
+            f"{strong} strong, {moderate} moderate, {weak} weak. "
+            f"{len(edges)} relationships mapped. "
+            f"{len(chains)} narrative threads. "
+            f"{len(contradictions)} contradictions. "
+            f"{awaiting} awaiting enrichment."
         )
 
         return "\n".join(lines)
 
     def format_for_synthesiser(self) -> str:
-        """Format the corpus as verbal prose for the synthesiser.
+        """Format the corpus for the synthesiser — chunk-based layout.
 
-        Same verbal approach as thinker, but with synthesis-oriented
-        framing and source URLs prominently displayed.
+        Groups findings by source chunk so the synthesiser can
+        weave coherent paragraphs from related material.  Includes
+        narrative chains as suggested structural threads.
         """
         conditions = self.get_for_synthesiser()
         if not conditions:
             return "(no findings)"
 
-        # Group by angle for synthesis
-        by_angle: dict[str, list[dict]] = {}
+        atom_ids = {c["id"] for c in conditions}
+        cond_by_id = {c["id"]: c for c in conditions}
+
+        # Group atoms by parent chunk
+        by_chunk: dict[int, list[dict]] = defaultdict(list)
+        orphans: list[dict] = []
         for c in conditions:
-            angle = c["angle"] or "general"
-            by_angle.setdefault(angle, []).append(c)
+            pid = c.get("parent_id")
+            if pid and pid > 0:
+                by_chunk[pid].append(c)
+            else:
+                orphans.append(c)
 
         lines: list[str] = [
-            f"SYNTHESIS BRIEFING: {len(conditions)} findings "
-            f"across {len(by_angle)} research angles\n",
+            f"SYNTHESIS BRIEFING: {len(conditions)} findings from "
+            f"{len(by_chunk)} source passages\n",
         ]
 
-        for angle, conds in sorted(by_angle.items()):
-            lines.append(
-                f"## {angle.upper()} ({len(conds)} findings)"
-            )
-            for c in conds:
-                lines.append(self._describe_finding(c))
-                lines.append("")
+        # Chunk-based sections
+        for chunk_id in sorted(by_chunk.keys()):
+            atoms = by_chunk[chunk_id]
+            chunk_text = self._get_chunk_text(chunk_id)
 
-        # Corpus health for synthesis context
+            lines.append(f"--- Source Passage (chunk {chunk_id}) ---")
+            if chunk_text:
+                lines.append(chunk_text[:2000])
+            lines.append("")
+            lines.append("Key findings for synthesis:")
+            for c in atoms:
+                url_part = f" [{c['source_url']}]" if c.get("source_url") else ""
+                lines.append(f"  • [{c['id']}] {c['fact']}{url_part}")
+            lines.append("")
+
+        if orphans:
+            lines.append("--- Additional Findings ---")
+            for c in orphans:
+                url_part = f" [{c['source_url']}]" if c.get("source_url") else ""
+                lines.append(f"  • [{c['id']}] {c['fact']}{url_part}")
+            lines.append("")
+
+        # Narrative chains as suggested structure
+        chains = self._get_narrative_chains_for_atoms(atom_ids)
+        if chains:
+            lines.append("SUGGESTED NARRATIVE THREADS:")
+            for i, chain in enumerate(chains, 1):
+                chain_items = []
+                for mid in chain:
+                    if mid in cond_by_id:
+                        chain_items.append(
+                            f"  {len(chain_items) + 1}. "
+                            f"{cond_by_id[mid]['fact'][:150]}"
+                        )
+                if chain_items:
+                    lines.append(f"Thread {i}:")
+                    lines.extend(chain_items)
+                    lines.append("")
+
+        # Summary
         strong = sum(
             1 for c in conditions
             if (c.get("composite_quality") or 0) >= 0.6
@@ -2310,9 +2583,10 @@ class CorpusStore:
             if c.get("contradiction_flag")
         )
         lines.append(
-            f"SYNTHESIS NOTES: {len(conditions)} findings total. "
+            f"SYNTHESIS NOTES: {len(conditions)} findings. "
             f"{strong} strongly supported. "
-            f"{contradictions} contradictions to resolve."
+            f"{len(chains)} narrative threads to weave. "
+            f"{contradictions} contradictions to address."
         )
 
         return "\n".join(lines)
@@ -2325,6 +2599,17 @@ class CorpusStore:
     _BARE_URL_RE = re.compile(r"(https?://[^\s)\]\"'>]+)")
     _CONF_RE = re.compile(r"\(confidence=([0-9.]+)\)")
 
+    # Regex for RELATES lines in enhanced atomisation output
+    _RELATES_RE = re.compile(
+        r'RELATES:\s*(\d+)\s*->\s*(\d+)\s*:\s*(\w[\w_]*)'
+    )
+
+    # Valid narrative relationship types for lineage edges
+    _NARRATIVE_REL_TYPES = frozenset({
+        'causes', 'caused_by', 'supports', 'contradicts', 'extends',
+        'temporal_sequence', 'part_of', 'example_of', 'mechanism_of',
+    })
+
     def ingest_raw(
         self,
         raw_text: str,
@@ -2332,49 +2617,130 @@ class CorpusStore:
         source_ref: str = "",
         angle: str = "",
         iteration: int = 0,
+        user_query: str = "",
     ) -> list[int]:
-        """Ingest raw text via Flock atomisation.
+        """Ingest raw text via chunk-aware Flock atomisation.
 
-        Returns list of admitted condition IDs. Flock decomposes the
-        text into atomic facts, extracts source URLs, and estimates
-        initial confidence -- all via a single LLM call.
+        Preserves full lineage: raw → chunks → atoms → relationship edges.
+        Every row in the corpus is a node in a DAG with traceable parents.
+
+        Returns list of admitted atom condition IDs.
         """
         if not raw_text or not raw_text.strip():
             return []
 
-        # Store raw text as a 'raw' row in the unified conditions table
+        now = datetime.now(timezone.utc).isoformat()
+
+        # ---- Layer 0: Store FULL raw text (no truncation) ----
         raw_id = self._next_id
         self._next_id += 1
-        now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
             "INSERT INTO conditions "
             "(id, fact, source_type, source_ref, row_type, "
-            "consider_for_use, created_at) "
-            "VALUES (?, ?, ?, ?, 'raw', FALSE, ?)",
-            [raw_id, raw_text[:2000], source_type, source_ref, now],
+            "consider_for_use, created_at, iteration) "
+            "VALUES (?, ?, ?, ?, 'raw', FALSE, ?, ?)",
+            [raw_id, raw_text, source_type, source_ref, now, iteration],
         )
 
+        # ---- Layer 1: Split into paragraph-level chunks ----
+        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', raw_text) if p.strip()]
+        if not paragraphs:
+            paragraphs = [raw_text.strip()]
+
+        chunk_ids: list[int] = []
+        for seq, para in enumerate(paragraphs):
+            if not para:
+                continue
+            chunk_id = self._next_id
+            self._next_id += 1
+            self.conn.execute(
+                "INSERT INTO conditions "
+                "(id, fact, source_type, source_ref, row_type, "
+                "parent_id, consider_for_use, created_at, iteration, "
+                "expansion_depth, angle) "
+                "VALUES (?, ?, ?, ?, 'chunk', ?, FALSE, ?, ?, ?, ?)",
+                [chunk_id, para, source_type, source_ref,
+                 raw_id, now, iteration, seq,
+                 angle or f"iteration_{iteration}"],
+            )
+            chunk_ids.append(chunk_id)
+
+        # ---- Layer 2: Atomise each chunk with enhanced prompt ----
+        all_ids: list[int] = []
+        for chunk_idx, chunk_id in enumerate(chunk_ids):
+            chunk_text = paragraphs[chunk_idx]
+            chunk_atom_ids = self._atomise_chunk(
+                chunk_text, chunk_id, source_type, source_ref,
+                angle, iteration, user_query,
+            )
+            all_ids.extend(chunk_atom_ids)
+
+        # Mark the raw row as atomised
+        self.conn.execute(
+            "UPDATE conditions SET "
+            "obsolete_reason = 'atomised into ' || ? || ' findings' "
+            "WHERE id = ? AND row_type = 'raw'",
+            [str(len(all_ids)), raw_id],
+        )
+
+        logger.info(
+            "Flock atomisation: %d atoms from %d chunks, %d chars "
+            "(source=%s)",
+            len(all_ids), len(chunk_ids), len(raw_text), source_type,
+        )
+        return all_ids
+
+    def _atomise_chunk(
+        self,
+        chunk_text: str,
+        chunk_id: int,
+        source_type: str,
+        source_ref: str,
+        angle: str,
+        iteration: int,
+        user_query: str,
+    ) -> list[int]:
+        """Atomise a single chunk into findings + relationship edges.
+
+        Uses an enhanced prompt that extracts facts relevant to the
+        research query AND identifies causal/temporal/logical
+        relationships between them.  All in a single LLM call.
+
+        Every atom gets ``parent_id = chunk_id`` for lineage.
+        Relationship edges stored as rows linking atom pairs.
+        """
+        query_clause = (
+            f"Research query: {user_query}\n\n" if user_query else ""
+        )
         try:
             atomised = self._http_complete(
-                "You are a research finding decomposer. Extract every "
-                "atomic fact from the text below. An atomic fact is a "
-                "single, self-contained claim that can be verified "
-                "independently. "
-                "Rules: "
-                "- One fact per line "
+                "You are a research analyst. Extract findings and their "
+                "relationships from the text below.\n\n"
+                + query_clause
+                + "Rules:\n"
+                "- Extract ONLY facts relevant to the research query "
+                "(skip off-topic, promotional, or meta-commentary material)\n"
+                "- One fact per FACT: line\n"
                 "- Preserve ALL specific data: names, numbers, dates, "
-                "prices, URLs "
+                "prices, URLs\n"
                 "- If a URL is associated with a fact, append it as "
-                "[URL] at the end of the line "
+                "[URL] at the end of the line\n"
                 "- If the text expresses confidence/uncertainty, append "
-                "(confidence=X.X) where X.X is 0.0-1.0 "
-                "- Do NOT summarise or generalise "
-                "- Do NOT add commentary, disclaimers, or meta-text "
-                "- Do NOT skip any fact, no matter how minor "
-                "- Short facts (names, prices, dates) are valid "
+                "(confidence=X.X) where X.X is 0.0-1.0\n"
+                "- After all facts, list relationships between them "
+                "using RELATES: lines\n"
+                "- RELATES connects facts by their line number (1-based)\n"
                 "- If the text is a single atomic fact already, return "
-                "it as-is "
-                "Text to decompose: " + raw_text,
+                "one FACT: line and no RELATES:\n\n"
+                "Relationship types: causes, caused_by, supports, "
+                "contradicts, extends, temporal_sequence, part_of, "
+                "example_of, mechanism_of\n\n"
+                "Output format (follow exactly):\n"
+                "FACT: [statement] [URL] (confidence=X.X)\n"
+                "FACT: [statement]\n"
+                "RELATES: 1 -> 2 : causes\n"
+                "RELATES: 2 -> 3 : supports\n\n"
+                "Text to analyse:\n" + chunk_text,
                 caller="ingest_atomise",
             )
         except Exception:
@@ -2383,37 +2749,55 @@ class CorpusStore:
                 "text as single condition",
                 exc_info=True,
             )
-            atomised = raw_text
+            atomised = chunk_text
 
-        # Fallback: if Flock returned empty (e.g. unavailable or blank
-        # response), use the raw text so findings are never silently lost.
         if not atomised or not atomised.strip():
-            atomised = raw_text
+            atomised = chunk_text
 
-        ids: list[int] = []
+        # ---- Parse FACT lines ----
+        atom_ids: list[int] = []
+        relates_lines: list[str] = []
+
         for line in atomised.split("\n"):
-            line = re.sub(r'^\s*(?:\d+[.)\]]\s*|[-*\u2022]\s+)', '', line.strip())
-            line = line.strip()
-            if not line:
+            stripped = line.strip()
+            if not stripped:
                 continue
 
-            # P0-2: reject junk atoms (LLM meta-commentary)
-            if self._is_junk_atom(line):
-                logger.debug("Rejected junk atom: %.80s", line)
+            # Collect RELATES lines for later processing
+            if stripped.upper().startswith("RELATES:"):
+                relates_lines.append(stripped)
                 continue
 
-            url_match = self._URL_RE.search(line)
+            # Strip FACT: prefix if present
+            if stripped.upper().startswith("FACT:"):
+                stripped = stripped[5:].strip()
+
+            # Strip bullet/number prefixes
+            stripped = re.sub(
+                r'^\s*(?:\d+[.)\]]\s*|[-*\u2022]\s+)', '', stripped,
+            ).strip()
+            if not stripped:
+                continue
+
+            # Reject junk atoms
+            if self._is_junk_atom(stripped):
+                logger.debug("Rejected junk atom: %.80s", stripped)
+                continue
+
+            # Extract URL
+            url_match = self._URL_RE.search(stripped)
             if url_match:
                 source_url = url_match.group(1)
-                line = self._URL_RE.sub("", line).strip()
+                stripped = self._URL_RE.sub("", stripped).strip()
             else:
-                bare_match = self._BARE_URL_RE.search(line)
+                bare_match = self._BARE_URL_RE.search(stripped)
                 if bare_match:
                     source_url = bare_match.group(1).rstrip(".,;:")
                 else:
                     source_url = ""
 
-            conf_match = self._CONF_RE.search(line)
+            # Extract confidence
+            conf_match = self._CONF_RE.search(stripped)
             try:
                 confidence = (
                     max(0.0, min(1.0, float(conf_match.group(1))))
@@ -2422,11 +2806,27 @@ class CorpusStore:
             except (ValueError, TypeError):
                 confidence = 0.5
             if conf_match:
-                line = self._CONF_RE.sub("", line).strip()
+                stripped = self._CONF_RE.sub("", stripped).strip()
 
-            if not line:
+            if not stripped:
                 continue
 
+            # Dedup: skip exact-match facts already in the corpus.
+            # Exclude row_type='raw' and 'chunk' so we don't match rows
+            # just inserted earlier in this method.
+            existing = self.conn.execute(
+                "SELECT id FROM conditions WHERE fact = ? "
+                "AND row_type NOT IN ('raw', 'chunk') LIMIT 1",
+                [line],
+            ).fetchone()
+            if existing:
+                logger.debug(
+                    "Dedup: skipping duplicate fact (existing id=%d): %.80s",
+                    existing[0], line,
+                )
+                continue
+
+            # Insert atom with parent_id → chunk for lineage
             cid = self._next_id
             self._next_id += 1
             ts = datetime.now(timezone.utc).isoformat()
@@ -2434,31 +2834,45 @@ class CorpusStore:
                 """INSERT INTO conditions
                    (id, fact, source_url, source_type, source_ref,
                     confidence, angle, expansion_depth,
-                    created_at, iteration)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)""",
+                    parent_id, created_at, iteration)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
                 [
-                    cid, line, source_url, source_type,
+                    cid, stripped, source_url, source_type,
                     source_ref, confidence,
                     angle or f"iteration_{iteration}",
+                    chunk_id,
                     ts, iteration,
                 ],
             )
-            ids.append(cid)
+            atom_ids.append(cid)
 
-        # Mark the raw row as atomised
-        self.conn.execute(
-            "UPDATE conditions SET consider_for_use = FALSE, "
-            "obsolete_reason = 'atomised into findings' "
-            "WHERE id = ? AND row_type = 'raw'",
-            [raw_id],
-        )
+        # ---- Parse RELATES lines into relationship edges ----
+        for rel_line in relates_lines:
+            m = self._RELATES_RE.search(rel_line)
+            if not m:
+                continue
+            src_idx = int(m.group(1)) - 1  # 0-based
+            tgt_idx = int(m.group(2)) - 1
+            rel_type = m.group(3).lower()
 
-        logger.info(
-            "Flock atomisation: %d conditions from %d chars "
-            "(source=%s)",
-            len(ids), len(raw_text), source_type,
-        )
-        return ids
+            if rel_type not in self._NARRATIVE_REL_TYPES:
+                continue
+            if not (0 <= src_idx < len(atom_ids)
+                    and 0 <= tgt_idx < len(atom_ids)):
+                continue
+
+            rel_id = self._next_id
+            self._next_id += 1
+            self.conn.execute(
+                "INSERT INTO conditions "
+                "(id, fact, row_type, parent_id, related_id, "
+                "relationship_score, consider_for_use, iteration) "
+                "VALUES (?, ?, ?, ?, ?, 1.0, FALSE, ?)",
+                [rel_id, rel_type, rel_type,
+                 atom_ids[src_idx], atom_ids[tgt_idx], iteration],
+            )
+
+        return atom_ids
 
     # ------------------------------------------------------------------
     # Gossip-based synthesis
@@ -2478,34 +2892,27 @@ class CorpusStore:
     def _synthesise_single(
         self, conditions: list[dict], user_query: str,
     ) -> str:
-        """Single-pass Flock synthesis for small corpora."""
-        corpus_text = "\n".join(
-            f"- [#{c['id']}, "
-            f"{c['verification_status'] or 'unverified'}, "
-            f"conf={c['confidence']:.2f}, "
-            f"trust={c['trust_score']:.2f}] "
-            f"{c['fact']}"
-            + (
-                f" [Source: {c['source_url']}]"
-                if c["source_url"] else ""
-            )
-            for c in conditions
-        )
+        """Single-pass synthesis using narrative-structured input."""
+        corpus_text = self.format_for_synthesiser()
         return self._http_complete(
-            "You are a research synthesiser. Read ALL findings "
-            "below and produce a comprehensive, well-structured "
-            "report. "
+            "You are a research synthesiser. You receive findings "
+            "organised by SOURCE PASSAGE — each passage preserves "
+            "the original tone, hedging, and nuance of the author. "
+            "Produce a comprehensive, well-structured report. "
             "Rules: "
+            "- Weave findings into flowing narrative paragraphs, "
+            "not bullet-point lists "
+            "- Follow the SUGGESTED NARRATIVE THREADS to structure "
+            "your report — they show causal and temporal chains "
             "- Include ALL facts, names, numbers, URLs "
-            "- Weight claims by confidence and trust scores "
-            "- Cross-reference sources "
+            "- Preserve the author's nuance and hedging where it "
+            "matters (e.g., 'may', 'preliminary evidence suggests') "
+            "- Cross-reference findings from different source "
+            "passages "
             "- Structure with clear headings "
             "- Cite source URLs inline "
             "- Do NOT add disclaimers or moralising "
-            "- fabrication_risk > 0.7: mention only if "
-            "corroborated "
-            "- duplication_score > 0.8: merge with "
-            "higher-confidence duplicate"
+            "- Address contradictions by presenting both sides"
             "\nUser query: " + user_query
             + "\n\n" + corpus_text,
             caller="synthesise_single",
@@ -2516,91 +2923,134 @@ class CorpusStore:
     ) -> str:
         """Gossip-style synthesis for large corpora.
 
-        Phase 1: Flock synthesises each angle independently.
-        Phase 2: Each angle summary refined with peer awareness.
-        Phase 3: Flock merges all into final report (queen).
+        Phase 1: Synthesise each chunk-group independently, using
+                 the source passage text for narrative context.
+        Phase 2: Each group summary refined with peer awareness.
+        Phase 3: Queen merges all into final report, guided by
+                 narrative chains.
         """
-        by_angle: dict[str, list[dict]] = {}
+        # Group by parent chunk for narrative coherence
+        by_chunk: dict[int, list[dict]] = defaultdict(list)
+        orphans: list[dict] = []
         for c in conditions:
-            angle = c["angle"] or "general"
-            by_angle.setdefault(angle, []).append(c)
+            pid = c.get("parent_id")
+            if pid and pid > 0:
+                by_chunk[pid].append(c)
+            else:
+                orphans.append(c)
 
-        # Phase 1: per-angle synthesis (workers)
-        angle_summaries: dict[str, str] = {}
-        for angle, conds in by_angle.items():
+        # Phase 1: per-chunk synthesis (workers)
+        chunk_summaries: dict[str, str] = {}
+
+        for chunk_id, atoms in by_chunk.items():
+            chunk_text = self._get_chunk_text(chunk_id)
             facts_text = "\n".join(
-                f"- [#{c['id']}, "
-                f"conf={c['confidence']:.2f}, "
-                f"trust={c['trust_score']:.2f}] {c['fact']}"
-                + (
-                    f" [{c['source_url']}]"
-                    if c["source_url"] else ""
-                )
-                for c in conds
+                f"- [{c['id']}] {c['fact']}"
+                + (f" [{c['source_url']}]" if c["source_url"] else "")
+                for c in atoms
             )
+            group_label = f"chunk_{chunk_id}"
             summary = self._http_complete(
-                "You are a synthesis worker in a peer-to-peer "
-                "research swarm. Synthesise these findings into "
-                "a focused section report. Include ALL facts, "
-                "names, numbers, URLs. Note contradictions. "
-                "This section will be merged with other sections "
-                "-- focus on what is unique and important in "
-                "YOUR findings. Do NOT add disclaimers. Stay "
-                "under 6000 characters."
-                "\nResearch angle: " + angle
-                + "\nUser query: " + user_query
-                + "\n\n" + facts_text,
+                "You are a synthesis worker. You receive a "
+                "SOURCE PASSAGE (the original text with its "
+                "tone, hedging, and nuance) plus EXTRACTED "
+                "FINDINGS from that passage. Write a focused "
+                "narrative section that preserves the author's "
+                "voice and nuance. Include ALL facts, names, "
+                "numbers, URLs. This section will be merged "
+                "with other sections. Stay under 6000 chars."
+                "\nSource passage:\n" + (chunk_text[:3000] or "(no source)")
+                + "\n\nExtracted findings:\n" + facts_text
+                + "\nUser query: " + user_query,
                 caller="gossip_phase1_worker",
             )
-            angle_summaries[angle] = summary
+            chunk_summaries[group_label] = summary
+
+        # Orphan atoms as a single group
+        if orphans:
+            orphan_text = "\n".join(
+                f"- [{c['id']}] {c['fact']}"
+                + (f" [{c['source_url']}]" if c["source_url"] else "")
+                for c in orphans
+            )
+            chunk_summaries["standalone"] = self._http_complete(
+                "You are a synthesis worker. Synthesise these "
+                "standalone findings into a focused narrative "
+                "section. Include ALL facts, names, numbers, "
+                "URLs. Stay under 6000 chars."
+                "\nFindings:\n" + orphan_text
+                + "\nUser query: " + user_query,
+                caller="gossip_phase1_worker",
+            )
 
         logger.info(
-            "Gossip Phase 1: %d angle summaries produced",
-            len(angle_summaries),
+            "Gossip Phase 1: %d chunk summaries produced",
+            len(chunk_summaries),
         )
 
         # Phase 2: gossip refinement
-        phase1_summaries = dict(angle_summaries)
-        for angle in list(angle_summaries.keys()):
+        phase1_summaries = dict(chunk_summaries)
+        for group in list(chunk_summaries.keys()):
             peer_text = "\n\n".join(
-                f"### {a}\n{s}"
-                for a, s in phase1_summaries.items()
-                if a != angle
+                f"### {g}\n{s}"
+                for g, s in phase1_summaries.items()
+                if g != group
             )
             refined = self._http_complete(
                 "You produced a section summary. Now you see "
                 "summaries from peer workers who processed "
-                "other research angles. Cross-reference your "
+                "other source passages. Cross-reference your "
                 "findings with peers. Note agreements and "
                 "contradictions. Incorporate complementary "
                 "findings. Remove redundancy. Preserve ALL "
-                "unique findings from your section. Stay under "
-                "6000 characters."
-                "\nYour angle: " + angle
+                "unique findings and the original author's "
+                "nuance. Stay under 6000 characters."
+                "\nYour section: " + group
                 + "\nUser query: " + user_query
                 + "\n\nYour current summary:\n"
-                + angle_summaries[angle]
+                + chunk_summaries[group]
                 + "\n\nPeer summaries:\n" + peer_text,
                 caller="gossip_phase2_refine",
             )
-            angle_summaries[angle] = refined
+            chunk_summaries[group] = refined
 
         logger.info("Gossip Phase 2: refinement complete")
 
-        # Phase 3: queen merges all angle summaries
+        # Phase 3: queen merges, guided by narrative chains
+        atom_ids = {c["id"] for c in conditions}
+        chains = self._get_narrative_chains_for_atoms(atom_ids)
+        cond_by_id = {c["id"]: c for c in conditions}
+        chain_guidance = ""
+        if chains:
+            chain_lines = ["NARRATIVE THREADS (use these to structure your report):"]
+            for i, chain in enumerate(chains, 1):
+                items = []
+                for mid in chain:
+                    if mid in cond_by_id:
+                        items.append(
+                            f"  {len(items) + 1}. {cond_by_id[mid]['fact'][:150]}"
+                        )
+                if items:
+                    chain_lines.append(f"Thread {i}:")
+                    chain_lines.extend(items)
+            chain_guidance = "\n".join(chain_lines) + "\n\n"
+
         all_summaries = "\n\n".join(
-            f"## {angle}\n{summary}"
-            for angle, summary in sorted(
-                angle_summaries.items()
-            )
+            f"## {group}\n{summary}"
+            for group, summary in sorted(chunk_summaries.items())
         )
         final = self._http_complete(
             "You are the queen synthesiser. Merge these section "
             "reports from specialist workers into a single "
             "comprehensive research report. "
             "Rules: "
+            "- Weave sections into flowing narrative, not "
+            "bullet-point lists "
+            "- Follow the NARRATIVE THREADS to structure your "
+            "report — they show causal and temporal chains "
             "- Include ALL findings from all sections "
-            "- Resolve contradictions by noting both sides "
+            "- Preserve the original authors' tone and nuance "
+            "- Resolve contradictions by presenting both sides "
             "- Structure with clear headings and sub-headings "
             "- Cite source URLs inline "
             "- Do NOT add disclaimers or moralising "
@@ -2609,7 +3059,7 @@ class CorpusStore:
             "- The report should be self-contained and readable "
             "by someone with no prior context"
             "\nUser query: " + user_query
-            + "\n\n" + all_summaries,
+            + "\n\n" + chain_guidance + all_summaries,
             caller="gossip_phase3_queen",
         )
 
