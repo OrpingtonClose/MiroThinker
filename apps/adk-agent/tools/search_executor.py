@@ -673,7 +673,7 @@ _TOOL_DISPATCH: dict[str, Any] = {
     "perplexity_deep_research": _search_perplexity,
     "mojeek_search": _search_mojeek,
     "jina_search": _search_jina,
-    "jina_reader": _search_jina,
+    "jina_reader": _jina_reader,
     "marginalia_search": _search_marginalia,
     "semantic_scholar": _search_semantic_scholar,
     "arxiv_search": _search_arxiv,
