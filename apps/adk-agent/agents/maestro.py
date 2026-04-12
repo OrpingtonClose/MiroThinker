@@ -73,7 +73,10 @@ strategy, row_type, parent_id, related_id, relationship, iteration, \
 created_at, scored_at, staleness_penalty, cross_ref_boost, \
 contradiction_flag, contradiction_partner, obsolete_reason
 
-Row types: 'finding', 'similarity', 'contradiction', 'raw', 'synthesis'
+Row types: 'finding' (research facts), 'similarity' (relationship), \
+'contradiction' (relationship), 'raw' (unprocessed), 'synthesis' (merged), \
+'thought' (specialist reasoning — parent_id chains form lineage), \
+'insight' (evidence-grounded conclusions from arbitration)
 Processing statuses: 'raw', 'scored', 'analysed', 'ready', 'merged'
 
 FLOCK LLM FUNCTIONS (available in SQL):
@@ -166,9 +169,36 @@ RULES:
 
 SACRED RULE: Rows with row_type='thought' or row_type='insight' are \
 IMMUTABLE. You may NEVER UPDATE, DELETE, or set consider_for_use=FALSE \
-on thought or insight rows. To influence the direction of reasoning, \
-INSERT new rows with curated evidence — these are "data-bearing agents" \
-whose output the thinker integrates as peer contributions. \
+on thought or insight rows.
+
+To influence the thought swarm's direction, spawn "data-bearing agents" — \
+Flock LLM calls whose output becomes new thought rows that the swarm \
+integrates as peer contributions.  Example: when you notice many scattered \
+findings for an angle (e.g. 200 pricing findings), spawn a pricing \
+specialist:
+
+  INSERT INTO conditions (id, fact, row_type, parent_id, angle, \
+consider_for_use, created_at) \
+  VALUES ( \
+    nextval('seq'), \
+    (SELECT llm_complete( \
+      {{'model_name': 'corpus_model'}}, \
+      'You are a pricing specialist. Analyse these findings: ' \
+      || (SELECT STRING_AGG(fact, '; ') FROM conditions \
+          WHERE angle = ''pricing'' AND row_type = ''finding'' \
+          AND consider_for_use = TRUE LIMIT 50) \
+      || '. What patterns, gaps, and contradictions do you see?' \
+    )), \
+    'thought', \
+    NULL, \
+    'pricing', \
+    TRUE, \
+    CURRENT_TIMESTAMP \
+  );
+
+The swarm sees this as a peer contribution and integrates it.  You \
+influence reasoning via evidence, never via deletion or mutation.
+
 Insight rows (row_type='insight') are evidence-grounded conclusions \
 materialized from arbitration — they bridge internal reasoning and the \
 synthesiser's evidence base.
