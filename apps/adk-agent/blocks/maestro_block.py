@@ -35,10 +35,10 @@ class MaestroBlock(PipelineBlock):
 
     input_specs = [
         ParamSpec(
-            key="research_findings",
+            key="corpus_summary_for_maestro",
             expected_type=str,
             required=False,
-            description="Current corpus briefing",
+            description="Compact structural summary for maestro orientation",
         ),
         ParamSpec(
             key="research_strategy",
@@ -120,6 +120,7 @@ class MaestroBlock(PipelineBlock):
         state_updates = {
             "research_findings": thinker_briefing,
             "corpus_for_synthesis": corpus.format_for_synthesiser(),
+            "corpus_summary_for_maestro": corpus.format_summary_for_maestro(),
             "_expansion_targets": expansion_text,
         }
 

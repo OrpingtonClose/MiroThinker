@@ -64,6 +64,11 @@ class CorpusRefreshAspect(Aspect):
                     ctx.corpus.format_for_synthesiser()
                 )
 
+            if "corpus_summary_for_maestro" not in result.state_updates:
+                result.state_updates["corpus_summary_for_maestro"] = (
+                    ctx.corpus.format_summary_for_maestro()
+                )
+
             # Inject expansion targets (only if block didn't set them)
             if "_expansion_targets" not in result.state_updates:
                 expansion_targets = ctx.corpus.get_expansion_targets()
