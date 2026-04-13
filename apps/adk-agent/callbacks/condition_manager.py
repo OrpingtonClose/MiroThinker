@@ -460,6 +460,33 @@ async def search_executor_callback(
 
     except Exception as exc:
         logger.warning("Search executor failed (non-fatal): %s", exc, exc_info=True)
+        stats = {"error": str(exc)}
+
+    # ── Pipeline health gate: search executor ──────────────────────
+    # Report structured health data and evaluate the phase contract.
+    try:
+        from models.pipeline_health import (
+            PipelineHealth, RoutingDecision, check_search_executor,
+        )
+        health = PipelineHealth.from_state(state)
+        iteration = state.get("_corpus_iteration", 0)
+        phase = health.begin_phase(f"search_executor_iter{iteration}")
+        if isinstance(stats, dict):
+            phase.metrics = dict(stats)
+        check_search_executor(phase, state)
+        decision = health.evaluate_gate(phase)
+        health.save(state)
+        logger.info("Search executor health: %s (decision=%s)", phase.status.value, decision.value)
+
+        if decision == RoutingDecision.ABORT:
+            logger.error(
+                "HEALTH GATE ABORT after search_executor — %s",
+                health.summary(),
+            )
+            # Don't actually abort yet — let the maestro try to salvage.
+            # But the health state is FAILED, so downstream gates can act.
+    except Exception:
+        logger.warning("Pipeline health check failed (non-fatal)", exc_info=True)
 
     # Update state with current corpus for the maestro.
     # For the thinker briefing, use swarm-digested synthesis when the
@@ -672,6 +699,42 @@ def maestro_condition_callback(
         logger.debug("Swarm cycle dispatched to background thread (iter=%d)", iteration)
     except Exception:
         logger.warning("Swarm dispatch failed (non-fatal)", exc_info=True)
+
+    # ── Pipeline health gate: maestro ───────────────────────────────
+    # Snapshot corpus scoring state for the health check.
+    # IMPORTANT: This runs BEFORE the background scoring thread starts,
+    # on the main thread where DuckDB access is safe.
+    try:
+        from models.pipeline_health import (
+            PipelineHealth, check_maestro,
+        )
+        health = PipelineHealth.from_state(state)
+        phase = health.begin_phase(f"maestro_iter{iteration}")
+
+        # Measure scoring state — safe to query DuckDB here (main thread,
+        # background scoring hasn't started yet).
+        try:
+            unscored = corpus.conn.execute(
+                "SELECT COUNT(*) FROM conditions "
+                "WHERE row_type = 'finding' AND score_version = 0"
+            ).fetchone()[0]
+            total_f = corpus.conn.execute(
+                "SELECT COUNT(*) FROM conditions "
+                "WHERE row_type = 'finding'"
+            ).fetchone()[0]
+            phase.metrics["unscored_findings"] = unscored
+            phase.metrics["total_findings"] = total_f
+        except Exception:
+            pass
+
+        phase.metrics["total_conditions"] = corpus.count()
+        phase.metrics["maestro_produced_output"] = True
+        check_maestro(phase, state)
+        decision = health.evaluate_gate(phase)
+        health.save(state)
+        logger.info("Maestro health: %s (decision=%s)", phase.status.value, decision.value)
+    except Exception:
+        logger.warning("Pipeline health check (maestro) failed (non-fatal)", exc_info=True)
 
     state["_corpus_iteration"] = iteration + 1
 
@@ -989,46 +1052,6 @@ def cleanup_corpus(state: dict) -> None:
     if key and key in _corpus_stores:
         corpus = _corpus_stores[key]
 
-        # ── Mandatory scoring gate (architectural guardrail) ──
-        # If the pipeline stalled before maestro ran, findings sit at
-        # composite_quality=-1.0 (unscored).  Force scoring now so the
-        # corpus is never left in a dumpster-fire state.
-        try:
-            unscored = corpus.conn.execute(
-                "SELECT COUNT(*) FROM conditions "
-                "WHERE row_type = 'finding' AND score_version = 0"
-            ).fetchone()[0]
-            total_findings = corpus.conn.execute(
-                "SELECT COUNT(*) FROM conditions WHERE row_type = 'finding'"
-            ).fetchone()[0]
-            if unscored > 0 and total_findings > 0:
-                unscored_pct = unscored / total_findings * 100
-                logger.error(
-                    "MANDATORY SCORING GATE: %d/%d findings (%.0f%%) are "
-                    "unscored (score_version=0) — forcing scoring now",
-                    unscored, total_findings, unscored_pct,
-                )
-                user_query = state.get("user_query", "")
-                scored = corpus.score_new_conditions(user_query)
-                if scored:
-                    logger.info(
-                        "Mandatory scoring gate: scored %d conditions", scored,
-                    )
-                deduped = corpus.compute_duplications()
-                if deduped:
-                    logger.info(
-                        "Mandatory scoring gate: deduped %d pairs", deduped,
-                    )
-                try:
-                    corpus.compute_composite_quality()
-                except Exception:
-                    pass
-                logger.info("Mandatory scoring gate complete")
-        except Exception:
-            logger.warning(
-                "Mandatory scoring gate failed (non-fatal)", exc_info=True,
-            )
-
         # ── Corpus continuity: preserve the DB path for the next run ──
         # Save to BOTH state AND module-level variables.  The AG-UI
         # adapter may overwrite session state between requests, so the
@@ -1085,8 +1108,59 @@ def cleanup_corpus(state: dict) -> None:
                 "abandoning CorpusStore for key=%s (will GC after thread exits)",
                 key,
             )
+            logger.warning(
+                "Mandatory scoring gate SKIPPED — scoring thread still "
+                "alive, cannot safely access DuckDB concurrently",
+            )
             del _corpus_stores[key]
         else:
+            # ── Mandatory scoring gate (architectural guardrail) ──
+            # If the pipeline stalled before maestro ran, findings sit at
+            # composite_quality=-1.0 (unscored).  Force scoring now so
+            # the corpus is never left in a dumpster-fire state.
+            # IMPORTANT: This MUST only run when scoring_done=True to
+            # avoid concurrent DuckDB access (not thread-safe).
+            try:
+                unscored = corpus.conn.execute(
+                    "SELECT COUNT(*) FROM conditions "
+                    "WHERE row_type = 'finding' AND score_version = 0"
+                ).fetchone()[0]
+                total_findings = corpus.conn.execute(
+                    "SELECT COUNT(*) FROM conditions "
+                    "WHERE row_type = 'finding'"
+                ).fetchone()[0]
+                if unscored > 0 and total_findings > 0:
+                    unscored_pct = unscored / total_findings * 100
+                    logger.error(
+                        "MANDATORY SCORING GATE: %d/%d findings "
+                        "(%.0f%%) are unscored (score_version=0) "
+                        "— forcing scoring now",
+                        unscored, total_findings, unscored_pct,
+                    )
+                    user_query = state.get("user_query", "")
+                    scored = corpus.score_new_conditions(user_query)
+                    if scored:
+                        logger.info(
+                            "Mandatory scoring gate: scored %d "
+                            "conditions", scored,
+                        )
+                    deduped = corpus.compute_duplications()
+                    if deduped:
+                        logger.info(
+                            "Mandatory scoring gate: deduped %d "
+                            "pairs", deduped,
+                        )
+                    try:
+                        corpus.compute_composite_quality()
+                    except Exception:
+                        pass
+                    logger.info("Mandatory scoring gate complete")
+            except Exception:
+                logger.warning(
+                    "Mandatory scoring gate failed (non-fatal)",
+                    exc_info=True,
+                )
+
             try:
                 logger.info(
                     "Closing CorpusStore for key=%s  db=%s  (%d conditions)",

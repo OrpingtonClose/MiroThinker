@@ -1411,12 +1411,16 @@ async def run_search_executor(
         logger.info("Search executor: no searches to execute")
         return stats
 
-    # Track rejected noise queries in stats
+    # Track rejected noise queries in stats (use _query_relevance_score
+    # directly to avoid double-logging — _validate_query_relevance already
+    # ran inside extract_search_queries above).
     if user_query:
-        _, rejected = _validate_query_relevance(
-            extract_search_queries(strategy), user_query,
+        raw_all = extract_search_queries(strategy)
+        rejected_count = sum(
+            1 for q in raw_all
+            if _query_relevance_score(q, user_query) <= 0.0
         )
-        stats["queries_rejected_noise"] = len(rejected)
+        stats["queries_rejected_noise"] = rejected_count
 
     # Track tripped circuit breakers
     stats["circuit_breakers_tripped"] = sum(

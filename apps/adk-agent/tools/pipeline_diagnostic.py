@@ -38,7 +38,6 @@ import argparse
 import json
 import logging
 import os
-import re
 import sys
 import textwrap
 import time
@@ -1005,30 +1004,54 @@ def run_diagnostic(
     db_path: str = "",
     question: str = "",
     skip_llm: bool = False,
+    pipeline_health: dict[str, Any] | None = None,
 ) -> DiagnosticReport:
     """Run the full diagnostic pipeline.
 
-    1. Parse log file (deterministic)
-    2. Analyse corpus (deterministic SQL)
-    3. Run health checks (deterministic)
-    4. Compute verdict (deterministic)
-    5. LLM analysis (optional — only if issues found)
+    1. Read PipelineHealth from session state (if available)
+    2. Parse log file (deterministic)
+    3. Analyse corpus (deterministic SQL)
+    4. Run health checks (deterministic)
+    5. Compute verdict (deterministic)
+    6. LLM analysis (optional — only if issues found)
+
+    If ``pipeline_health`` is provided (from ``state["_pipeline_health"]``),
+    the diagnostic uses the pipeline's own structured health data instead
+    of detective-working through logs.  This is the systemic path — the
+    pipeline PRODUCES its own health data, the diagnostic just reads it.
 
     Returns a structured DiagnosticReport.
     """
     start = time.monotonic()
 
-    # Step 1 & 2: Parse inputs
+    # Step 1: If PipelineHealth is available, convert it to check results
+    health_checks: list[CheckResult] = []
+    if pipeline_health and isinstance(pipeline_health, dict):
+        health_checks = _checks_from_pipeline_health(pipeline_health)
+
+    # Step 2 & 3: Parse inputs (still useful for standalone / deeper analysis)
     log_summary = parse_log_file(log_path)
     corpus_summary = analyse_corpus(db_path)
 
-    # Step 3: Deterministic health checks
-    checks = run_deterministic_checks(log_summary, corpus_summary)
+    # Step 4: Deterministic health checks (from log+corpus parsing)
+    parsed_checks = run_deterministic_checks(log_summary, corpus_summary)
 
-    # Step 4: Compute verdict
+    # Step 5: Merge — PipelineHealth checks take precedence (they're
+    # real-time structured data), parsed checks fill gaps
+    checks = _merge_checks(health_checks, parsed_checks)
+
+    # Step 6: Compute verdict
     verdict = compute_verdict(checks)
 
-    # Step 5: LLM analysis (only if issues found and not skipped)
+    # Also honour the PipelineHealth verdict if it's worse
+    if pipeline_health and isinstance(pipeline_health, dict):
+        ph_verdict = pipeline_health.get("verdict", "HEALTHY")
+        if ph_verdict == "FAILED" and verdict != Verdict.FAILED:
+            verdict = Verdict.FAILED
+        elif ph_verdict == "DEGRADED" and verdict == Verdict.HEALTHY:
+            verdict = Verdict.DEGRADED
+
+    # Step 7: LLM analysis (only if issues found and not skipped)
     llm_analysis = ""
     if not skip_llm and verdict != Verdict.HEALTHY:
         llm_analysis = generate_llm_analysis(
@@ -1045,6 +1068,78 @@ def run_diagnostic(
         llm_analysis=llm_analysis,
         elapsed_s=elapsed,
     )
+
+
+def _checks_from_pipeline_health(
+    health: dict[str, Any],
+) -> list[CheckResult]:
+    """Convert PipelineHealth session-state data into CheckResult list.
+
+    This is the key integration: the pipeline PRODUCES structured health
+    data at each phase boundary, and the diagnostic tool just reads it.
+    No log parsing needed for these checks.
+    """
+    results: list[CheckResult] = []
+
+    # Convert each phase's checks into diagnostic CheckResults
+    for phase in health.get("phases", []):
+        phase_name = phase.get("name", "unknown")
+        for check in phase.get("checks", []):
+            sev_str = check.get("severity", "OK")
+            try:
+                sev = Severity(sev_str)
+            except ValueError:
+                sev = Severity.OK
+            results.append(CheckResult(
+                name=f"health:{phase_name}:{check.get('name', 'unnamed')}",
+                severity=sev,
+                message=check.get("message", ""),
+                evidence=[
+                    f"{k}={v}" for k, v in check.get("evidence", {}).items()
+                ],
+            ))
+
+    # Also add top-level errors/warnings from PipelineHealth
+    for error in health.get("errors", []):
+        results.append(CheckResult(
+            name="pipeline_health_error",
+            severity=Severity.CRITICAL,
+            message=error,
+        ))
+
+    return results
+
+
+def _merge_checks(
+    health_checks: list[CheckResult],
+    parsed_checks: list[CheckResult],
+) -> list[CheckResult]:
+    """Merge PipelineHealth checks with log/corpus-parsed checks.
+
+    PipelineHealth checks take precedence because they're real-time
+    structured data from the pipeline itself.  Parsed checks fill
+    gaps for areas PipelineHealth doesn't cover (e.g. serendipity,
+    academic search patterns from logs).
+    """
+    if not health_checks:
+        return parsed_checks
+
+    # Names covered by PipelineHealth (strip the "health:" prefix for matching)
+    covered_topics: set[str] = set()
+    for c in health_checks:
+        # Extract the topic from "health:phase:topic"
+        parts = c.name.split(":")
+        if len(parts) >= 3:
+            covered_topics.add(parts[2])
+
+    # Keep parsed checks that aren't already covered
+    merged = list(health_checks)
+    for c in parsed_checks:
+        # Don't duplicate checks that PipelineHealth already covers
+        if c.name not in covered_topics:
+            merged.append(c)
+
+    return merged
 
 
 # ---------------------------------------------------------------------------

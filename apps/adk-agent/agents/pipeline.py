@@ -169,6 +169,17 @@ def _init_pipeline_state(
         except Exception:
             pass
 
+        # ── Pipeline health model ──
+        # Create a fresh PipelineHealth tracker for this run.
+        # Every phase reports structured health data here; the health
+        # gate at each boundary validates phase contracts.
+        try:
+            from models.pipeline_health import PipelineHealth
+            health = PipelineHealth()
+            health.save(state)
+        except Exception:
+            logger.warning("Failed to initialise PipelineHealth", exc_info=True)
+
         # ── P0: Skip scout on corpus re-open ──
         # The scout decomposes the query and probes with cheap searches.
         # On continuation runs the thinker already has the full corpus,
@@ -212,6 +223,23 @@ def _init_pipeline_state(
                     cancel_event.set()
                     logger.warning("Phase 0 scout failed (non-fatal): %s", exc)
 
+                # ── Pipeline health gate: scout ──
+                try:
+                    from models.pipeline_health import PipelineHealth, check_scout
+                    health = PipelineHealth.from_state(state)
+                    phase = health.begin_phase("scout")
+                    phase.metrics["sub_queries"] = len(
+                        state.get("_scout_sub_queries", [])
+                    )
+                    phase.metrics["initial_findings"] = len(
+                        state.get("_scout_findings", [])
+                    )
+                    check_scout(phase, state)
+                    health.evaluate_gate(phase)
+                    health.save(state)
+                except Exception:
+                    pass  # health tracking is best-effort
+
     return None
 
 
@@ -254,8 +282,39 @@ def _cleanup_pipeline_state(
     Mirrors :func:`_init_pipeline_state` — closes the DuckDB connection
     and removes the store from the module-level ``_corpus_stores`` dict
     so memory and connections are not leaked across runs.
+
+    Also records the final pipeline health verdict.
     """
-    cleanup_corpus(callback_context.state)
+    state = callback_context.state
+
+    # ── Pipeline health gate: synthesiser (final) ──
+    # The synthesiser just ran — check if it produced a useful report.
+    try:
+        from models.pipeline_health import PipelineHealth, check_synthesiser
+        health = PipelineHealth.from_state(state)
+        phase = health.begin_phase("synthesiser")
+        # The synthesiser writes to corpus_for_synthesis / the final output
+        synth_output = state.get("corpus_for_synthesis", "")
+        phase.metrics["report_length"] = len(synth_output) if synth_output else 0
+        # Count corpus findings for the health check
+        try:
+            from callbacks.condition_manager import _corpus_stores
+            corpus_key = state.get("_corpus_key")
+            if corpus_key and corpus_key in _corpus_stores:
+                corpus = _corpus_stores[corpus_key]
+                phase.metrics["corpus_findings"] = corpus.conn.execute(
+                    "SELECT COUNT(*) FROM conditions WHERE row_type = 'finding'"
+                ).fetchone()[0]
+        except Exception:
+            phase.metrics["corpus_findings"] = 0
+        check_synthesiser(phase, state)
+        health.evaluate_gate(phase)
+        health.save(state)
+        logger.info("Final pipeline health: %s", health.summary())
+    except Exception:
+        logger.warning("Pipeline health (final) failed (non-fatal)", exc_info=True)
+
+    cleanup_corpus(state)
     return None
 
 
