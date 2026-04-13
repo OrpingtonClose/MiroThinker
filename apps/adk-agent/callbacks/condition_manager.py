@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Thread-safe queue for search results collected by after_tool_callback.
-# Parallel tool callbacks append here; researcher_condition_callback drains
+# Parallel tool callbacks append here; search_executor_callback drains
 # on the main thread where DuckDB access is safe.
 # ---------------------------------------------------------------------------
 _pending_search_results: list[tuple[str, str, str, int]] = []  # (corpus_key, text, source_type, iteration)
@@ -79,7 +79,7 @@ def queue_search_result(
 
     Called from ``after_tool_callback`` which may fire from parallel
     tool threads.  The actual ``ingest_raw()`` happens in
-    ``researcher_condition_callback`` on the main thread.
+    ``search_executor_callback`` on the main thread.
     """
     with _pending_search_lock:
         _pending_search_results.append((corpus_key, text, source_type, iteration))
@@ -182,7 +182,7 @@ def _score_and_battery(state: dict) -> dict:
     """Run scoring, dedup, and the full algorithm battery once.
 
     Call this **after** all ingestion for the current iteration is
-    complete.  Previously this ran inside ``_ingest_text_into_corpus``
+    complete.  Previously scoring ran inside the ingestion function
     which was called per-source, causing N redundant battery runs
     (each with hundreds of LLM calls) and making the pipeline appear
     to hang.
@@ -232,99 +232,8 @@ def _score_and_battery(state: dict) -> dict:
     return battery_results
 
 
-def _ingest_text_into_corpus(
-    state: dict,
-    text: str,
-    source_type: str,
-) -> int:
-    """Atomise, ingest, score, and run battery — legacy all-in-one path.
-
-    Only used by :func:`synthesis_condition_callback` where there is a
-    single ingestion per call.  The researcher path uses the split
-    :func:`_ingest_only` + :func:`_score_and_battery` to avoid
-    redundant battery runs.
-
-    Returns the number of newly admitted conditions.
-    """
-    admitted = _ingest_only(state, text, source_type)
-    _score_and_battery(state)
-    return admitted
-
-
-def researcher_condition_callback(
-    callback_context: CallbackContext,
-) -> Optional[genai_types.Content]:
-    """After-agent callback: decompose researcher findings into atoms.
-
-    Reads ``state["research_findings"]``, ingests via Flock atomisation,
-    and updates state with formatted corpus.
-
-    .. deprecated::
-        Kept for backward compatibility.  The new maestro architecture
-        uses :func:`search_executor_callback` + :func:`maestro_condition_callback`.
-    """
-    state = callback_context.state
-
-    findings_text = state.get("research_findings", "")
-    corpus = _get_corpus(state)
-    _SENTINELS = {"(no findings yet)", "(no findings)"}
-    if not findings_text or findings_text.strip() in _SENTINELS:
-        # No new findings, but still restore corpus format so the thinker
-        # doesn't lose context from previous iterations.
-        iteration = state.get("_corpus_iteration", 0)
-        state["research_findings"] = corpus.format_for_thinker(current_iteration=iteration)
-        state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
-        # Still advance iteration so stale-expansion cleanup and the
-        # thinker see a fresh round number even when the researcher
-        # produced no new findings.
-        state["_corpus_iteration"] = iteration + 1
-        return None
-
-    # Phase 1: Ingest all text (lightweight, no scoring or battery).
-    # Previously _ingest_text_into_corpus ran score+dedup+battery per
-    # source, causing N redundant battery runs (each with hundreds of
-    # LLM calls) that made the pipeline appear to hang.
-    _ingest_only(state, findings_text, "researcher")
-
-    # Drain any search results queued by parallel after_tool_callbacks.
-    # This is the single-threaded point where DuckDB access is safe.
-    _drain_search_queue(state)
-
-    # Phase 2: Score, dedup, and run the algorithm battery ONCE for
-    # all conditions ingested in this iteration.
-    _score_and_battery(state)
-
-    # Update state with structured corpus for thinker
-    iteration = state.get("_corpus_iteration", 0)
-    state["research_findings"] = corpus.format_for_thinker(current_iteration=iteration)
-
-    # Also store synthesiser-formatted version for the final stage
-    state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
-
-    # Inject expansion targets so the researcher acts on them
-    expansion_targets = corpus.get_expansion_targets()
-    if expansion_targets:
-        lines = ["=== ENRICHMENT TASKS (from corpus analysis) ==="]
-        for t in expansion_targets[:10]:
-            lines.append(
-                f"- Finding [{t['id']}] needs enrichment via "
-                f"{t['strategy']}: {t['hint']}"
-            )
-        lines.append("=== END ENRICHMENT TASKS ===")
-        state["_expansion_targets"] = "\n".join(lines)
-    else:
-        state["_expansion_targets"] = ""
-
-    # Advance iteration at the loop boundary — the researcher is now
-    # the last agent in each LoopAgent iteration, so incrementing here
-    # ensures all agents in the same round share the same iteration tag.
-    state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
-
-    return None  # preserve original researcher output
-
-
 # ---------------------------------------------------------------------------
-# Search Executor callback (new maestro architecture)
+# Search Executor callback
 # ---------------------------------------------------------------------------
 
 def _wait_for_pending_scoring(corpus_key: str) -> bool:
@@ -959,47 +868,6 @@ def run_swarm_synthesis(state: dict) -> str:
         len(result),
     )
     return result
-
-
-def synthesis_condition_callback(
-    callback_context: CallbackContext,
-) -> Optional[genai_types.Content]:
-    """After-agent callback for the in-loop synthesiser.
-
-    Reads the synthesiser's output (``state["loop_synthesis"]``),
-    ingests it back into the CorpusStore via Flock atomisation so
-    the synthesised insights are treated equally to raw findings.
-
-    This implements the *fermentation* step: brute expansion
-    (researcher) → intelligent structuring (synthesiser) → corpus
-    re-ingestion → fuels the next round of expansion.
-    """
-    state = callback_context.state
-    synthesis_text = state.get("loop_synthesis", "")
-    if not synthesis_text or not synthesis_text.strip():
-        # Still advance the iteration counter even if synthesis is empty,
-        # so the next thinker round sees a fresh iteration number.
-        state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
-        return None
-
-    _ingest_text_into_corpus(state, synthesis_text, "synthesiser")
-
-    # Refresh corpus views so the thinker sees the enriched corpus
-    corpus = _get_corpus(state)
-    iteration = state.get("_corpus_iteration", 0)
-    state["research_findings"] = corpus.format_for_thinker(current_iteration=iteration)
-    state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
-
-    # Save post-synthesis corpus snapshot for iteration diffs
-    corpus._save_corpus_snapshot("post_synthesis")
-
-    # Advance iteration at the loop boundary — the synthesiser is the
-    # last agent in each LoopAgent iteration, so incrementing here
-    # ensures researcher + synthesiser from the same round share the
-    # same iteration tag.
-    state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
-
-    return None  # preserve original synthesiser output
 
 
 def cleanup_corpus(state: dict) -> None:
