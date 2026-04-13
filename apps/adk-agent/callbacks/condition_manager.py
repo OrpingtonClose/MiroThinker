@@ -513,7 +513,7 @@ def maestro_condition_callback(
     # to perform and why) would otherwise be overwritten when we refresh
     # state["research_findings"] below.  Store it as an immutable thought
     # row so the full reasoning chain is preserved in the Flock table.
-    maestro_output = state.get("research_strategy", "")
+    maestro_output = state.get("research_findings", "")
     if maestro_output and maestro_output.strip():
         iteration = state.get("_corpus_iteration", 0)
         try:
