@@ -160,6 +160,15 @@ def _init_pipeline_state(
         except Exception:
             pass
 
+        # ── Architectural guardrail: reset circuit breakers ──
+        # Each pipeline run starts with a clean slate — APIs that were
+        # tripped in a previous run get a fresh chance.
+        try:
+            from tools.search_executor import reset_circuit_breakers
+            reset_circuit_breakers()
+        except Exception:
+            pass
+
         # ── P0: Skip scout on corpus re-open ──
         # The scout decomposes the query and probes with cheap searches.
         # On continuation runs the thinker already has the full corpus,

@@ -966,6 +966,11 @@ def cleanup_corpus(state: dict) -> None:
     Also removes corpus-related keys from *state* so that
     :func:`_init_pipeline_state` properly re-initialises on the next
     pipeline run within the same session.
+
+    **Architectural guardrail: mandatory scoring gate.**  If the pipeline
+    stalled or exited before the maestro could score, this function
+    forces scoring so the corpus is never left with all findings at
+    -1.0 (the "dumpster fire" state the diagnostic tool couldn't catch).
     """
     # Best-effort wait for background scoring before closing the DB.
     # This is the ONE place where a blocking join is acceptable —
@@ -983,6 +988,47 @@ def cleanup_corpus(state: dict) -> None:
     key = state.get("_corpus_key")
     if key and key in _corpus_stores:
         corpus = _corpus_stores[key]
+
+        # ── Mandatory scoring gate (architectural guardrail) ──
+        # If the pipeline stalled before maestro ran, findings sit at
+        # composite_quality=-1.0 (unscored).  Force scoring now so the
+        # corpus is never left in a dumpster-fire state.
+        try:
+            unscored = corpus.conn.execute(
+                "SELECT COUNT(*) FROM conditions "
+                "WHERE row_type = 'finding' AND score_version = 0"
+            ).fetchone()[0]
+            total_findings = corpus.conn.execute(
+                "SELECT COUNT(*) FROM conditions WHERE row_type = 'finding'"
+            ).fetchone()[0]
+            if unscored > 0 and total_findings > 0:
+                unscored_pct = unscored / total_findings * 100
+                logger.error(
+                    "MANDATORY SCORING GATE: %d/%d findings (%.0f%%) are "
+                    "unscored (score_version=0) — forcing scoring now",
+                    unscored, total_findings, unscored_pct,
+                )
+                user_query = state.get("user_query", "")
+                scored = corpus.score_new_conditions(user_query)
+                if scored:
+                    logger.info(
+                        "Mandatory scoring gate: scored %d conditions", scored,
+                    )
+                deduped = corpus.compute_duplications()
+                if deduped:
+                    logger.info(
+                        "Mandatory scoring gate: deduped %d pairs", deduped,
+                    )
+                try:
+                    corpus.compute_composite_quality()
+                except Exception:
+                    pass
+                logger.info("Mandatory scoring gate complete")
+        except Exception:
+            logger.warning(
+                "Mandatory scoring gate failed (non-fatal)", exc_info=True,
+            )
+
         # ── Corpus continuity: preserve the DB path for the next run ──
         # Save to BOTH state AND module-level variables.  The AG-UI
         # adapter may overwrite session state between requests, so the
