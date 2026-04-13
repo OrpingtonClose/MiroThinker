@@ -508,6 +508,31 @@ def maestro_condition_callback(
     # Drain any remaining queued search results
     _drain_search_queue(state)
 
+    # ── THOUGHT LINEAGE: Preserve maestro's reasoning ─────────────────
+    # The maestro's text output (its reasoning about what SQL operations
+    # to perform and why) would otherwise be overwritten when we refresh
+    # state["research_findings"] below.  Store it as an immutable thought
+    # row so the full reasoning chain is preserved in the Flock table.
+    maestro_output = state.get("research_strategy", "")
+    if maestro_output and maestro_output.strip():
+        iteration = state.get("_corpus_iteration", 0)
+        try:
+            corpus.admit_thought(
+                reasoning=maestro_output,
+                angle="maestro_reasoning",
+                strategy=f"maestro_iteration_{iteration}",
+                iteration=iteration,
+            )
+            logger.info(
+                "Maestro reasoning preserved: %d chars at iteration %d",
+                len(maestro_output), iteration,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to preserve maestro reasoning (non-fatal)",
+                exc_info=True,
+            )
+
     # Scoring safety net: ensure all conditions ingested during the
     # search executor + maestro phase are scored and deduped.  The
     # maestro may have created new rows via execute_flock_sql() that

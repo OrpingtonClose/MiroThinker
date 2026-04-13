@@ -143,8 +143,8 @@ async def _search_exa(query: str, num_results: int = 5) -> str:
             for r in results[:num_results]:
                 title = r.get("title", "")
                 url = r.get("url", "")
-                text = r.get("text", "")[:500]
-                highlights = " ".join(r.get("highlights", []))[:300]
+                text = r.get("text", "")
+                highlights = " ".join(r.get("highlights", []))
                 content = highlights or text
                 lines.append(f"- {title} [{url}]: {content}")
             return "\n".join(lines)
@@ -175,11 +175,11 @@ async def _search_kagi(query: str) -> str:
                 return ""
             lines = [f"Kagi search: {query}"]
             if output:
-                lines.append(output[:2000])
+                lines.append(output)
             for r in refs[:5]:
                 title = r.get("title", "")
                 url = r.get("url", "")
-                snippet = r.get("snippet", "")[:200]
+                snippet = r.get("snippet", "")
                 lines.append(f"- {title} [{url}]: {snippet}")
             return "\n".join(lines)
     except Exception as exc:
@@ -212,11 +212,11 @@ async def _search_tavily(query: str, num_results: int = 5) -> str:
                 return ""
             lines = [f"Tavily search: {query}"]
             if answer:
-                lines.append(answer[:2000])
+                lines.append(answer)
             for r in results[:num_results]:
                 title = r.get("title", "")
                 url = r.get("url", "")
-                content = r.get("content", "")[:300]
+                content = r.get("content", "")
                 lines.append(f"- {title} [{url}]: {content}")
             return "\n".join(lines)
     except Exception as exc:
@@ -260,7 +260,7 @@ async def _search_perplexity(query: str) -> str:
             citations = data.get("citations", [])
             if not content:
                 return ""
-            lines = [f"Perplexity search: {query}", content[:3000]]
+            lines = [f"Perplexity search: {query}", content]
             for i, url in enumerate(citations[:10], 1):
                 if isinstance(url, str):
                     lines.append(f"  [{i}] {url}")
@@ -293,7 +293,7 @@ async def _search_jina(query: str, num_results: int = 5) -> str:
             for r in results[:num_results]:
                 title = r.get("title", "")
                 url = r.get("url", "")
-                content = r.get("content", "")[:500]
+                content = r.get("content", "")
                 lines.append(f"- {title} [{url}]: {content}")
             return "\n".join(lines)
     except Exception as exc:
@@ -325,7 +325,7 @@ async def _search_mojeek(query: str, num_results: int = 5) -> str:
             for r in results[:num_results]:
                 title = r.get("title", "")
                 url = r.get("url", "")
-                desc = r.get("desc", "")[:200]
+                desc = r.get("desc", "")
                 lines.append(f"- {title} [{url}]: {desc}")
             return "\n".join(lines)
     except Exception as exc:
@@ -354,7 +354,7 @@ async def _search_marginalia(query: str, num_results: int = 5) -> str:
             for r in results[:num_results]:
                 title = r.get("title", "")
                 url = r.get("url", "")
-                desc = r.get("description", "")[:200]
+                desc = r.get("description", "")
                 lines.append(f"- {title} [{url}]: {desc}")
             return "\n".join(lines)
     except Exception as exc:
@@ -369,7 +369,8 @@ async def _search_marginalia(query: str, num_results: int = 5) -> str:
 async def _jina_reader(url: str) -> str:
     """Extract full markdown content from a URL via Jina Reader.
 
-    Returns clean markdown text (up to 5000 chars) or empty string.
+    Returns the COMPLETE markdown text — no truncation.  The full content
+    flows into ``ingest_raw()`` which stores it verbatim before chunking.
     """
     if not _JINA_API_KEY:
         return ""
@@ -390,7 +391,7 @@ async def _jina_reader(url: str) -> str:
             if not content:
                 return ""
             lines = [f"Content extracted from: {title} [{url}]"]
-            lines.append(content[:5000])
+            lines.append(content)
             return "\n".join(lines)
     except Exception as exc:
         logger.warning("Jina reader failed for '%s': %s", url[:80], exc)
@@ -431,7 +432,7 @@ async def _apify_extract(url: str) -> str:
             if not text:
                 return ""
             lines = [f"Content extracted (Apify) from: {title} [{url}]"]
-            lines.append(text[:5000])
+            lines.append(text)
             return "\n".join(lines)
     except Exception as exc:
         logger.warning("Apify extract failed for '%s': %s", url[:80], exc)
@@ -473,7 +474,7 @@ async def _search_semantic_scholar(
                 title = p.get("title", "")
                 year = p.get("year", "")
                 citations = p.get("citationCount", 0)
-                abstract = (p.get("abstract") or "")[:400]
+                abstract = p.get("abstract") or ""
                 url = p.get("url", "")
                 authors = ", ".join(
                     a.get("name", "")
@@ -526,7 +527,7 @@ async def _search_arxiv(query: str, num_results: int = 3) -> str:
                     r"<summary>(.*?)</summary>", entry, re.DOTALL,
                 )
                 summary = (
-                    summary_m.group(1).strip()[:400] if summary_m else ""
+                    summary_m.group(1).strip() if summary_m else ""
                 )
                 summary = re.sub(r"\s+", " ", summary)
                 id_m = re.search(r"<id>(.*?)</id>", entry)

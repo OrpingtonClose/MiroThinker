@@ -94,26 +94,43 @@ GROUP BY processing_status;
    SELECT COUNT(*) FROM conditions WHERE expansion_tool != 'none' \
 AND expansion_fulfilled = FALSE;
 
-2. SCORE unscored conditions (if any with scored_at = ''):
-   This is critical — new findings from the search executor arrive \
-unscored.  Use Flock to score them:
+2. SCORE unscored conditions (if any with score_version = 0):
+   This is critical — new findings arrive unscored.  You MUST use Flock \
+LLM functions to score them PER-ROW.  Each finding must be evaluated \
+individually against its actual content — NEVER write a bulk UPDATE with \
+flat hardcoded score values.
 
-   For EACH unscored condition, evaluate these dimensions via LLM:
-   - trust_score (0-1): source credibility
-   - novelty_score (0-1): how new/unique is this finding
-   - specificity_score (0-1): concrete data vs vague claims
-   - relevance_score (0-1): relevance to the research query
-   - actionability_score (0-1): practical utility
-   - fabrication_risk (0-1): likelihood of being fabricated
-
-   You can score in bulk:
+   CORRECT (per-row LLM scoring — each finding assessed individually):
    UPDATE conditions SET
-     trust_score = ..., novelty_score = ..., specificity_score = ...,
-     relevance_score = ..., actionability_score = ...,
-     fabrication_risk = ...,
+     trust_score = CAST(llm_complete(
+       'Rate source trustworthiness 0.0-1.0. 0.1=unreliable, 0.5=news, \
+0.9=peer-reviewed. Return ONLY a number.', source_url) AS FLOAT),
+     novelty_score = CAST(llm_complete(
+       'Rate novelty 0.0-1.0. 0.1=textbook, 0.5=known to specialists, \
+0.9=surprising. Return ONLY a number.', fact) AS FLOAT),
+     specificity_score = CAST(llm_complete(
+       'Rate specificity 0.0-1.0. 0.1=vague, 0.5=named concepts, \
+0.9=exact data points. Return ONLY a number.', fact) AS FLOAT),
+     relevance_score = CAST(llm_complete(
+       'Rate relevance to the research query 0.0-1.0. Return ONLY a \
+number. Research query: {user_query}', fact) AS FLOAT),
+     actionability_score = CAST(llm_complete(
+       'Rate actionability 0.0-1.0. 0.1=background only, 0.5=useful \
+reference, 0.9=key finding. Return ONLY a number.', fact) AS FLOAT),
+     fabrication_risk = CAST(llm_complete(
+       'Rate fabrication risk 0.0-1.0. 0.0=clearly real, 0.5=hard to \
+verify, 1.0=likely fabricated. Return ONLY a number.', fact) AS FLOAT),
      scored_at = CURRENT_TIMESTAMP,
+     score_version = score_version + 1,
      processing_status = 'scored'
-   WHERE scored_at = '' AND consider_for_use = TRUE;
+   WHERE score_version = 0 AND consider_for_use = TRUE \
+AND row_type = 'finding';
+
+   FORBIDDEN (bulk flat scoring — assigns identical scores to all findings):
+   UPDATE conditions SET trust_score = 0.6, novelty_score = 0.7 ... ;
+   ^^^ This destroys the scoring system.  Every finding MUST be assessed \
+individually via llm_complete().  The safety-net scorer will override \
+any flat scores it detects (via score_version = 0 check).
 
 3. COMPUTE composite quality:
    UPDATE conditions SET composite_quality = (

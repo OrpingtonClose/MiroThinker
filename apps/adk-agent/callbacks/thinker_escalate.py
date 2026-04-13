@@ -45,17 +45,39 @@ def thinker_escalate_callback(
     state = callback_context.state
     strategy = state.get("research_strategy", "")
 
-    # ── P1: Track strategies for iteration context injection ──
-    # Save a condensed summary of this strategy for the next iteration's
-    # thinker prompt so it knows what was tried before.
+    # ── THOUGHT LINEAGE: Preserve thinker's FULL reasoning ──────────
+    # Store the thinker's complete output as an immutable thought row in
+    # the Flock table.  This replaces the old 500-char truncation which
+    # destroyed the most valuable intellectual artifact of each iteration.
+    # The thinker's briefing already includes thought rows, so this closes
+    # the loop: thinker reasons → stored as thought → fed back next iteration.
     if strategy and strategy.strip():
         iteration = state.get("_corpus_iteration", 0)
-        # Keep last ~500 chars per iteration to avoid prompt bloat
-        summary = strategy[:500]
+        try:
+            from callbacks.condition_manager import _get_corpus
+            corpus = _get_corpus(state)
+            corpus.admit_thought(
+                reasoning=strategy,
+                angle="thinker_strategy",
+                strategy=f"thinker_iteration_{iteration}",
+                iteration=iteration,
+            )
+            logger.info(
+                "Thinker thought preserved: %d chars at iteration %d",
+                len(strategy), iteration,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to preserve thinker thought (non-fatal)",
+                exc_info=True,
+            )
+
+        # Also keep a condensed version in state for the prompt context
+        # (thought rows are in the corpus briefing, but this provides
+        # a quick summary the thinker prompt can reference directly).
         prev = state.get("_prev_thinker_strategies", "")
         separator = f"\n--- Iteration {iteration} strategy ---\n"
-        # Cap total history at ~2000 chars to prevent prompt overflow
-        new_history = prev + separator + summary
+        new_history = prev + separator + strategy[:500]
         if len(new_history) > 2000:
             new_history = new_history[-2000:]
         state["_prev_thinker_strategies"] = new_history
