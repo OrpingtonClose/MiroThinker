@@ -993,7 +993,7 @@ def _generate_serendipitous_queries(
         return []
 
     import random
-    random.seed(hash(user_query) & 0xFFFFFFFF)  # deterministic per query
+    rng = random.Random(hash(user_query) & 0xFFFFFFFF)  # deterministic per query
 
     # Templates that produce structurally contrarian queries
     _TEMPLATES = [
@@ -1011,13 +1011,13 @@ def _generate_serendipitous_queries(
 
     # Pick which queries get serendipitous variants
     n_serendipitous = max(1, int(len(queries) * _SERENDIPITY_RATE))
-    selected = random.sample(queries, min(n_serendipitous, len(queries)))
+    selected = rng.sample(queries, min(n_serendipitous, len(queries)))
 
     variants: list[str] = []
     for q in selected:
         # Shorten the query for template insertion (first 80 chars)
         short_q = q[:80].strip()
-        template = random.choice(_TEMPLATES)
+        template = rng.choice(_TEMPLATES)
         variant = template.format(q=short_q)
         if len(variant) >= 10:
             variants.append(variant)
