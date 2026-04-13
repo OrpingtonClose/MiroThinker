@@ -69,7 +69,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+import os
+from typing import Optional, TYPE_CHECKING
 
 from google.adk.agents import SequentialAgent
 from google.adk.agents.callback_context import CallbackContext
@@ -86,6 +87,9 @@ from callbacks.condition_manager import (
     run_swarm_synthesis,
     search_executor_callback,
 )
+
+if TYPE_CHECKING:
+    from models.pipeline_block import PipelineRunner
 
 logger = logging.getLogger(__name__)
 
@@ -394,3 +398,92 @@ pipeline_agent = SequentialAgent(
     before_agent_callback=_init_pipeline_state,
     after_agent_callback=_cleanup_pipeline_state,
 )
+
+
+# ---------------------------------------------------------------------------
+# PIPELINE_MODE=blocks — aspect-oriented block pipeline (feature-flagged)
+# ---------------------------------------------------------------------------
+# When PIPELINE_MODE=blocks, ADK callbacks delegate to PipelineRunner
+# which applies aspects uniformly around each block's execution.
+# The ADK agent graph is unchanged — blocks wrap the same logic that
+# callbacks currently do, but with clean I/O contracts and cross-cutting
+# concerns handled by aspects instead of ad-hoc inline code.
+# ---------------------------------------------------------------------------
+
+_PIPELINE_MODE = os.environ.get("PIPELINE_MODE", "callbacks")
+
+
+def build_pipeline_runner() -> "PipelineRunner":
+    """Construct a PipelineRunner with all blocks and aspects wired up.
+
+    Called once per pipeline session.  The runner is stateful — it tracks
+    health, costs, and error counts across all blocks in a session.
+    """
+    from models.pipeline_block import PipelineRunner
+
+    from aspects.timing import TimingAspect
+    from aspects.heartbeat import HeartbeatAspect
+    from aspects.io_validation import InputOutputValidationAspect
+    from aspects.duckdb_safety import DuckDBSafetyAspect
+    from aspects.health_gate import HealthGateAspect
+    from aspects.cost_tracking import CostTrackingAspect
+    from aspects.corpus_refresh import CorpusRefreshAspect
+    from aspects.error_escalation import ErrorEscalationAspect
+
+    from blocks.scout_block import ScoutBlock
+    from blocks.thinker_block import ThinkerBlock
+    from blocks.search_executor_block import SearchExecutorBlock
+    from blocks.maestro_block import MaestroBlock
+    from blocks.swarm_block import SwarmSynthesisBlock
+    from blocks.synthesiser_block import SynthesiserBlock
+
+    # Aspect order matters:
+    # 1. Timing — outermost, measures total wall-clock
+    # 2. Heartbeat — dashboard events at boundaries
+    # 3. I/O Validation — validate inputs before execution
+    # 4. DuckDB Safety — thread-safety gate for corpus blocks
+    # 5. Health Gate — cumulative health tracking
+    # 6. Cost Tracking — API cost deltas
+    # 7. Corpus Refresh — state refresh after corpus mutators
+    # 8. Error Escalation — LAST, decides absorb vs propagate
+    aspects = [
+        TimingAspect(),
+        HeartbeatAspect(),
+        InputOutputValidationAspect(),
+        DuckDBSafetyAspect(),
+        HealthGateAspect(),
+        CostTrackingAspect(),
+        CorpusRefreshAspect(),
+        ErrorEscalationAspect(),
+    ]
+
+    blocks = [
+        ScoutBlock(),
+        ThinkerBlock(),
+        SearchExecutorBlock(),
+        MaestroBlock(),
+        SwarmSynthesisBlock(),
+        SynthesiserBlock(),
+    ]
+
+    return PipelineRunner(blocks=blocks, aspects=aspects)
+
+
+# Module-level runner instance (lazy, created on first use in blocks mode)
+_runner: Optional["PipelineRunner"] = None
+
+
+def get_pipeline_runner() -> "PipelineRunner":
+    """Get or create the module-level PipelineRunner singleton."""
+    global _runner
+    if _runner is None:
+        _runner = build_pipeline_runner()
+        logger.info("PipelineRunner created with %d blocks, %d aspects",
+                     len(_runner.blocks), len(_runner.aspects))
+    return _runner
+
+
+def reset_pipeline_runner() -> None:
+    """Reset the runner (e.g. between pipeline sessions)."""
+    global _runner
+    _runner = None
