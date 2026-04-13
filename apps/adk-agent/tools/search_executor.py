@@ -1407,13 +1407,9 @@ async def run_search_executor(
             stats["queries_deduped"],
         )
 
-    if not search_tasks and not fan_out_tasks:
-        logger.info("Search executor: no searches to execute")
-        return stats
-
-    # Track rejected noise queries in stats (use _query_relevance_score
-    # directly to avoid double-logging — _validate_query_relevance already
-    # ran inside extract_search_queries above).
+    # Track rejected noise queries in stats BEFORE the early return so
+    # that even when all queries are rejected, stats capture the root cause.
+    # Uses _query_relevance_score directly to avoid double-logging.
     if user_query:
         raw_all = extract_search_queries(strategy)
         rejected_count = sum(
@@ -1421,12 +1417,17 @@ async def run_search_executor(
             if _query_relevance_score(q, user_query) <= 0.0
         )
         stats["queries_rejected_noise"] = rejected_count
+        stats["total_raw_queries"] = len(raw_all)
 
-    # Track tripped circuit breakers
+    # Track tripped circuit breakers (also before early return)
     stats["circuit_breakers_tripped"] = sum(
         1 for fn_name in _circuit_breaker
         if _circuit_is_open(fn_name)
     )
+
+    if not search_tasks and not fan_out_tasks:
+        logger.info("Search executor: no searches to execute")
+        return stats
 
     logger.info(
         "Search executor Phase A: %d expansion + %d strategy (fan-out)",

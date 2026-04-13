@@ -342,20 +342,25 @@ def check_search_executor(report: PhaseReport, state: dict) -> None:
         )
 
     # Check 2: noise rejection
+    # Compare against total_raw_queries (pre-filtering count) so the
+    # populations match.  Fallback: rejected + strategy_searches.
     rejected = metrics.get("queries_rejected_noise", 0)
-    total_queries = metrics.get("strategy_searches", 0)
-    if total_queries > 0 and rejected >= total_queries:
+    total_raw = metrics.get("total_raw_queries", 0)
+    if total_raw == 0:
+        # Fallback when total_raw_queries wasn't tracked
+        total_raw = rejected + metrics.get("strategy_searches", 0)
+    if rejected > 0 and metrics.get("strategy_searches", 0) == 0:
         report.add_check(
             "query_noise", Severity.CRITICAL,
-            f"All {total_queries} queries rejected as noise — thinker strategy "
+            f"All {rejected} queries rejected as noise — thinker strategy "
             "has zero topical overlap with user question",
-            rejected=rejected, total=total_queries,
+            rejected=rejected, total=total_raw,
         )
-    elif total_queries > 0 and rejected > total_queries * 0.5:
+    elif total_raw > 0 and rejected > total_raw * 0.5:
         report.add_check(
             "query_noise", Severity.WARNING,
-            f"{rejected}/{total_queries} queries rejected as noise",
-            rejected=rejected, total=total_queries,
+            f"{rejected}/{total_raw} queries rejected as noise",
+            rejected=rejected, total=total_raw,
         )
 
     # Check 3: circuit breakers
