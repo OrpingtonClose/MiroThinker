@@ -50,8 +50,12 @@ class ErrorEscalationAspect(Aspect):
     async def after(
         self, block: PipelineBlock, ctx: BlockContext, result: BlockResult,
     ) -> None:
-        # Reset consecutive failures on successful execution
-        if not result.metrics.get("error") and not result.metrics.get("block_failed"):
+        # Reset consecutive failures on successful execution.
+        # Only check "block_failed" (set by runner/on_error on real exceptions).
+        # Don't check "error" — blocks like SearchExecutorBlock catch their own
+        # exceptions and set metrics["error"] as a soft failure; the consecutive
+        # failure counter should still reset for those.
+        if not result.metrics.get("block_failed"):
             self._consecutive_failures = 0
 
     async def on_error(

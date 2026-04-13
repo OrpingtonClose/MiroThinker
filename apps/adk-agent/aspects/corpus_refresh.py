@@ -43,23 +43,26 @@ class CorpusRefreshAspect(Aspect):
             iteration = ctx.iteration
             user_query = ctx.user_query
 
-            # Refresh thinker briefing
-            briefing = ""
-            try:
-                briefing = ctx.corpus.synthesise(user_query) if user_query else ""
-            except Exception:
-                logger.debug("Swarm briefing failed, falling back to format_for_thinker")
-            if not briefing:
-                briefing = ctx.corpus.format_for_thinker(current_iteration=iteration)
+            # Only compute corpus-derived values for keys the block
+            # didn't already set.  We must NOT use setdefault() here
+            # because Python always evaluates the default argument —
+            # that would hit DuckDB even when the key exists, which is
+            # unsafe after MaestroBlock starts its background scoring
+            # thread (DuckDB connections are not thread-safe).
+            if "research_findings" not in result.state_updates:
+                briefing = ""
+                try:
+                    briefing = ctx.corpus.synthesise(user_query) if user_query else ""
+                except Exception:
+                    logger.debug("Swarm briefing failed, falling back to format_for_thinker")
+                if not briefing:
+                    briefing = ctx.corpus.format_for_thinker(current_iteration=iteration)
+                result.state_updates["research_findings"] = briefing
 
-            # Only fill keys the block didn't already set — blocks like
-            # MaestroBlock (devil's advocate injection) and SwarmSynthesisBlock
-            # (swarm narrative) produce their own values that we must not overwrite.
-            result.state_updates.setdefault("research_findings", briefing)
-            result.state_updates.setdefault(
-                "corpus_for_synthesis",
-                ctx.corpus.format_for_synthesiser(),
-            )
+            if "corpus_for_synthesis" not in result.state_updates:
+                result.state_updates["corpus_for_synthesis"] = (
+                    ctx.corpus.format_for_synthesiser()
+                )
 
             # Inject expansion targets (only if block didn't set them)
             if "_expansion_targets" not in result.state_updates:
