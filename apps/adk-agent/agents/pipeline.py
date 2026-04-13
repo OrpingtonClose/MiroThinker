@@ -228,12 +228,15 @@ def _init_pipeline_state(
                     from models.pipeline_health import PipelineHealth, check_scout
                     health = PipelineHealth.from_state(state)
                     phase = health.begin_phase("scout")
-                    phase.metrics["sub_queries"] = len(
-                        state.get("_scout_sub_queries", [])
+                    # The scout writes landscape text to research_findings.
+                    # Measure whether it produced content (non-default value).
+                    findings_text = state.get("research_findings", "")
+                    has_landscape = (
+                        bool(findings_text)
+                        and findings_text != "(no findings yet)"
                     )
-                    phase.metrics["initial_findings"] = len(
-                        state.get("_scout_findings", [])
-                    )
+                    phase.metrics["has_landscape"] = has_landscape
+                    phase.metrics["landscape_length"] = len(findings_text) if has_landscape else 0
                     check_scout(phase, state)
                     health.evaluate_gate(phase)
                     health.save(state)
@@ -293,9 +296,12 @@ def _cleanup_pipeline_state(
         from models.pipeline_health import PipelineHealth, check_synthesiser
         health = PipelineHealth.from_state(state)
         phase = health.begin_phase("synthesiser")
-        # The synthesiser writes to corpus_for_synthesis / the final output
-        synth_output = state.get("corpus_for_synthesis", "")
-        phase.metrics["report_length"] = len(synth_output) if synth_output else 0
+        # corpus_for_synthesis is the swarm output (synthesiser's INPUT).
+        # The synthesiser itself has no output_key so its output goes to
+        # conversation history.  We measure whether the swarm provided
+        # content for the synthesiser to work with.
+        swarm_output = state.get("corpus_for_synthesis", "")
+        phase.metrics["swarm_input_length"] = len(swarm_output) if swarm_output else 0
         # Count corpus findings for the health check
         try:
             from callbacks.condition_manager import _corpus_stores

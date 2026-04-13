@@ -95,7 +95,8 @@ def thinker_escalate_callback(
         # Count extractable queries for health check
         try:
             from tools.search_executor import extract_search_queries
-            queries = extract_search_queries(strategy)
+            user_query = state.get("user_query", "")
+            queries = extract_search_queries(strategy, user_query=user_query)
             phase.metrics["extractable_queries"] = len(queries)
         except Exception:
             phase.metrics["extractable_queries"] = 0

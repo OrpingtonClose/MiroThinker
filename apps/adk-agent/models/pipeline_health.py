@@ -455,22 +455,26 @@ def check_synthesiser(report: PhaseReport, state: dict) -> None:
     """Algorithmic health checks for the synthesiser phase.
 
     Checks:
-    1. Did the synthesiser produce a non-empty report?
+    1. Did the swarm produce input for the synthesiser?
     2. Is the corpus it received non-trivial?
     """
     metrics = report.metrics
 
-    report_len = metrics.get("report_length", 0)
-    if report_len == 0:
+    # swarm_input_length measures the swarm output (synthesiser's INPUT).
+    # The synthesiser itself has no output_key so we can't measure its
+    # actual output from state — but if the swarm produced nothing, the
+    # synthesiser has nothing to work with.
+    swarm_len = metrics.get("swarm_input_length", 0)
+    if swarm_len == 0:
         report.add_check(
-            "no_report", Severity.CRITICAL,
-            "Synthesiser produced no output — pipeline has no deliverable",
+            "no_swarm_input", Severity.CRITICAL,
+            "Swarm produced no content for synthesiser — pipeline has no material to synthesise",
         )
-    elif report_len < 200:
+    elif swarm_len < 200:
         report.add_check(
-            "short_report", Severity.WARNING,
-            f"Synthesiser report is very short ({report_len} chars)",
-            report_length=report_len,
+            "short_swarm_input", Severity.WARNING,
+            f"Swarm input to synthesiser is very short ({swarm_len} chars)",
+            swarm_input_length=swarm_len,
         )
 
     corpus_findings = metrics.get("corpus_findings", 0)
@@ -485,21 +489,20 @@ def check_scout(report: PhaseReport, state: dict) -> None:
     """Algorithmic health checks for the scout phase.
 
     Checks:
-    1. Did the scout produce sub-queries?
-    2. Did it find any initial landscape?
+    1. Did the scout produce a landscape assessment?
     """
     metrics = report.metrics
 
-    sub_queries = metrics.get("sub_queries", 0)
-    if sub_queries == 0:
+    has_landscape = metrics.get("has_landscape", False)
+    landscape_len = metrics.get("landscape_length", 0)
+    if not has_landscape:
         report.add_check(
-            "no_sub_queries", Severity.WARNING,
-            "Scout produced no sub-queries — research may lack decomposition",
+            "no_landscape", Severity.WARNING,
+            "Scout produced no landscape assessment — research starts without orientation",
         )
-
-    initial_findings = metrics.get("initial_findings", 0)
-    if initial_findings == 0:
+    elif landscape_len < 100:
         report.add_check(
-            "no_initial_findings", Severity.WARNING,
-            "Scout found no initial landscape — topic may be very niche",
+            "thin_landscape", Severity.WARNING,
+            f"Scout landscape is very thin ({landscape_len} chars)",
+            landscape_length=landscape_len,
         )
