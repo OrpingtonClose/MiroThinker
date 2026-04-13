@@ -52,24 +52,29 @@ class CorpusRefreshAspect(Aspect):
             if not briefing:
                 briefing = ctx.corpus.format_for_thinker(current_iteration=iteration)
 
-            result.state_updates["research_findings"] = briefing
-            result.state_updates["corpus_for_synthesis"] = (
-                ctx.corpus.format_for_synthesiser()
+            # Only fill keys the block didn't already set — blocks like
+            # MaestroBlock (devil's advocate injection) and SwarmSynthesisBlock
+            # (swarm narrative) produce their own values that we must not overwrite.
+            result.state_updates.setdefault("research_findings", briefing)
+            result.state_updates.setdefault(
+                "corpus_for_synthesis",
+                ctx.corpus.format_for_synthesiser(),
             )
 
-            # Inject expansion targets
-            expansion_targets = ctx.corpus.get_expansion_targets()
-            if expansion_targets:
-                lines = ["=== ENRICHMENT TASKS (from corpus analysis) ==="]
-                for t in expansion_targets[:10]:
-                    lines.append(
-                        f"- Finding [{t['id']}] needs enrichment via "
-                        f"{t['strategy']}: {t['hint']}"
-                    )
-                lines.append("=== END ENRICHMENT TASKS ===")
-                result.state_updates["_expansion_targets"] = "\n".join(lines)
-            else:
-                result.state_updates["_expansion_targets"] = ""
+            # Inject expansion targets (only if block didn't set them)
+            if "_expansion_targets" not in result.state_updates:
+                expansion_targets = ctx.corpus.get_expansion_targets()
+                if expansion_targets:
+                    lines = ["=== ENRICHMENT TASKS (from corpus analysis) ==="]
+                    for t in expansion_targets[:10]:
+                        lines.append(
+                            f"- Finding [{t['id']}] needs enrichment via "
+                            f"{t['strategy']}: {t['hint']}"
+                        )
+                    lines.append("=== END ENRICHMENT TASKS ===")
+                    result.state_updates["_expansion_targets"] = "\n".join(lines)
+                else:
+                    result.state_updates["_expansion_targets"] = ""
 
             logger.debug(
                 "Corpus refresh after '%s': briefing=%d chars",
