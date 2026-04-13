@@ -79,9 +79,10 @@ class CorpusRefreshAspect(Aspect):
                 else:
                     result.state_updates["_expansion_targets"] = ""
 
+            briefing_len = len(result.state_updates.get("research_findings", ""))
             logger.debug(
                 "Corpus refresh after '%s': briefing=%d chars",
-                block.name, len(briefing),
+                block.name, briefing_len,
             )
         except Exception as exc:
             logger.warning(

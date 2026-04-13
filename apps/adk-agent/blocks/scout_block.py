@@ -69,7 +69,8 @@ class ScoutBlock(PipelineBlock):
                         asyncio.run,
                         run_scout_phase(query, ctx.state, _cancel=cancel_event),
                     )
-                    future.result(timeout=90)
+                    wrapped = asyncio.wrap_future(future)
+                    await asyncio.wait_for(wrapped, timeout=90)
                 finally:
                     cancel_event.set()
                     pool.shutdown(wait=False, cancel_futures=True)
