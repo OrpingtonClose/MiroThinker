@@ -56,6 +56,9 @@ _MIN_FINDINGS_FOR_SWARM = int(os.environ.get("MIN_FINDINGS_FOR_SWARM", "5"))
 # Toggle entire swarm on/off
 _SWARM_ENABLED = os.environ.get("SWARM_ENABLED", "1") == "1"
 
+# Serendipity: cross-angle surprise detection after specialists
+_SERENDIPITY_ENABLED = os.environ.get("SERENDIPITY_ENABLED", "1") == "1"
+
 # Minimum chars for a specialist output to be worth storing
 _MIN_THOUGHT_CHARS = 100
 
@@ -692,6 +695,132 @@ class SwarmRouter:
 _swarm_router: SwarmRouter | None = None
 
 
+def _detect_cross_angle_surprises(
+    corpus,
+    angles: list[str],
+    user_query: str,
+    iteration: int,
+) -> list[int]:
+    """Detect unexpected connections between different specialist angles.
+
+    After specialists have independently analysed their angles, this
+    function asks: "What would a polymath notice that domain specialists
+    missed?"  Connections between angles are materialised as insight rows
+    with ``strategy='serendipitous_connection'``.
+
+    Returns list of new insight row IDs.
+    """
+    # Gather top findings from each angle
+    angle_summaries: list[str] = []
+    for angle in angles:
+        rows = corpus.conn.execute(
+            "SELECT id, fact FROM conditions "
+            "WHERE row_type = 'finding' AND consider_for_use = TRUE "
+            "AND angle LIKE ? "
+            "ORDER BY composite_quality DESC LIMIT 5",
+            [f"%{angle[:30]}%"],
+        ).fetchall()
+        if rows:
+            lines = [f"ANGLE '{angle}':"]
+            for rid, fact in rows:
+                lines.append(f"  [#{rid}] {fact[:300]}")
+            angle_summaries.append("\n".join(lines))
+
+    if len(angle_summaries) < 2:
+        return []
+
+    # Also gather recent thoughts per angle for richer context
+    for angle in angles:
+        thoughts = corpus.get_thoughts_by_angle(angle)
+        if thoughts:
+            latest = thoughts[-1]
+            angle_summaries.append(
+                f"SPECIALIST THOUGHT for '{angle}': {latest['fact'][:500]}"
+            )
+
+    prompt = f"""\
+You are a polymath research connector. Multiple specialist analysts have \
+independently investigated different angles of a research query. Your job \
+is to find UNEXPECTED CONNECTIONS between their angles — insights that \
+no single specialist would have noticed because they require knowledge \
+from multiple domains simultaneously.
+
+USER QUERY: {user_query}
+
+FINDINGS BY ANGLE:
+{chr(10).join(angle_summaries)}
+
+INSTRUCTIONS:
+1. Look for surprising convergences — where different angles unexpectedly \
+   point to the same underlying mechanism, cause, or pattern
+2. Look for hidden contradictions — where findings from one angle \
+   undermine assumptions in another angle
+3. Look for transfer opportunities — where a method, framework, or \
+   insight from one angle could illuminate another
+4. ONLY report genuinely unexpected connections. Do NOT report obvious \
+   or trivial relationships.
+5. Each connection MUST cite specific finding IDs from multiple angles
+
+If no genuinely surprising connections exist, respond with: NO_SURPRISES
+
+OUTPUT FORMAT:
+CONNECTION 1: [description] EVIDENCE: [finding #X from angle A, #Y from angle B]
+CONNECTION 2: [description] EVIDENCE: [finding #X, #Z]
+..."""
+
+    response = corpus._http_complete(
+        prompt, caller="serendipity_cross_angle",
+        max_tokens=1024,
+    )
+    if not response or "NO_SURPRISES" in response:
+        logger.debug("Cross-angle surprise detection: no surprises found")
+        return []
+
+    # Parse connections and materialise as insight rows
+    created_ids: list[int] = []
+    connections = re.findall(
+        r"CONNECTION\s+\d+:\s*(.+?)EVIDENCE:\s*(.+?)(?=CONNECTION|$)",
+        response,
+        re.DOTALL | re.IGNORECASE,
+    )
+    for conn_text, evidence_refs in connections:
+        conn_text = conn_text.strip().rstrip("-•")
+        evidence_refs = evidence_refs.strip()
+        cited_ids = re.findall(r"#(\d+)", evidence_refs)
+        if not cited_ids or len(conn_text) < 30:
+            continue
+
+        insight_text = (
+            f"Serendipitous connection: {conn_text} "
+            f"[cross-angle evidence: {evidence_refs}]"
+        )
+        try:
+            insight_id = corpus.admit_insight(
+                conclusion=insight_text,
+                source_thought_id=0,
+                angle="serendipitous_cross_angle",
+                grounding_ids=[int(i) for i in cited_ids],
+                iteration=iteration,
+            )
+            created_ids.append(insight_id)
+            logger.info(
+                "Serendipity: cross-angle insight #%d — %s",
+                insight_id, conn_text[:100],
+            )
+        except Exception:
+            logger.warning(
+                "Failed to materialise cross-angle insight",
+                exc_info=True,
+            )
+
+    if created_ids:
+        logger.info(
+            "Cross-angle surprise detection: %d serendipitous insights",
+            len(created_ids),
+        )
+    return created_ids
+
+
 def _get_router() -> SwarmRouter:
     """Get or create the module-level SwarmRouter."""
     global _swarm_router
@@ -769,6 +898,21 @@ def run_swarm_cycle(state: dict, corpus) -> list[int]:
             logger.warning(
                 "Arbitration for '%s' failed (non-fatal)",
                 angle, exc_info=True,
+            )
+
+    # Phase 2.5: Cross-angle surprise detection (serendipity)
+    # After specialists run on separate angles, look for unexpected
+    # connections BETWEEN angles that no single specialist would spot.
+    if _SERENDIPITY_ENABLED and len(active_angles) >= 2 and specialist_ids:
+        try:
+            surprise_ids = _detect_cross_angle_surprises(
+                corpus, active_angles, user_query, iteration,
+            )
+            all_thought_ids.extend(surprise_ids)
+        except Exception:
+            logger.warning(
+                "Cross-angle surprise detection failed (non-fatal)",
+                exc_info=True,
             )
 
     # Phase 3: Split broad thoughts at shallow depth

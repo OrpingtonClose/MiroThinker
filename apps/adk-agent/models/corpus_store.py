@@ -1212,6 +1212,60 @@ class CorpusStore:
     # Algorithm battery — each is a small, composable processing step
     # ------------------------------------------------------------------
 
+    def compute_angle_diversity_boost(self) -> int:
+        """Boost findings from underrepresented angles/source types.
+
+        Findings from rare angles get a small quality boost, nudging
+        the corpus toward breadth without overriding depth.  This is
+        the serendipity-aware scoring layer — it rewards diversity of
+        perspective alongside traditional quality signals.
+
+        Pure SQL — no LLM calls.
+
+        Returns number of conditions with non-zero boost.
+        """
+        if not (os.environ.get("SERENDIPITY_ENABLED", "1") == "1"):
+            return 0
+
+        # Count findings per angle to detect underrepresentation
+        angle_counts = self.conn.execute(
+            "SELECT angle, COUNT(*) as cnt FROM conditions "
+            "WHERE row_type = 'finding' AND consider_for_use = TRUE "
+            "AND angle IS NOT NULL AND angle != '' "
+            "GROUP BY angle"
+        ).fetchall()
+        if not angle_counts or len(angle_counts) < 2:
+            return 0
+
+        max_count = max(cnt for _, cnt in angle_counts)
+        if max_count <= 1:
+            return 0
+
+        # Apply diversity boost: findings from rare angles get up to
+        # 0.08 extra composite quality.  The most common angle gets 0.
+        # This is additive to cross_ref_boost (reused column to avoid
+        # schema changes).
+        updated = 0
+        for angle, cnt in angle_counts:
+            diversity_bonus = round(0.08 * (1.0 - cnt / max_count), 4)
+            if diversity_bonus > 0.005:
+                self.conn.execute(
+                    "UPDATE conditions SET cross_ref_boost = cross_ref_boost + ? "
+                    "WHERE angle = ? AND row_type = 'finding' "
+                    "AND consider_for_use = TRUE AND scored_at != ''",
+                    [diversity_bonus, angle],
+                )
+                updated += self.conn.execute(
+                    "SELECT changes()"
+                ).fetchone()[0]
+
+        if updated:
+            logger.info(
+                "Angle diversity boost: %d conditions boosted across %d angles",
+                updated, len(angle_counts),
+            )
+        return updated
+
     def compute_composite_quality(self) -> int:
         """Compute a weighted composite quality score for all scored
         conditions.  Pure SQL — no LLM calls.
@@ -1220,6 +1274,11 @@ class CorpusStore:
                  + 0.15*novelty + 0.10*specificity + 0.10*actionability
                  - 0.15*fabrication_risk - staleness_penalty
                  + cross_ref_boost
+
+        The cross_ref_boost column accumulates multiple boosts:
+        - Cross-reference boost (from compute_cross_ref_boost)
+        - Source diversity bonus (from compute_source_diversity)
+        - Angle diversity bonus (from compute_angle_diversity_boost)
 
         Recomputes every battery run so that changes to staleness_penalty
         and cross_ref_boost from earlier algorithms are reflected.
@@ -2260,6 +2319,9 @@ class CorpusStore:
         )
         results["source_diversity"] = self._trace_algorithm(
             "source_diversity", self.compute_source_diversity,
+        )
+        results["angle_diversity"] = self._trace_algorithm(
+            "angle_diversity", self.compute_angle_diversity_boost,
         )
         results["composite_quality"] = self._trace_algorithm(
             "composite_quality", self.compute_composite_quality,
