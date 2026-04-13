@@ -46,10 +46,8 @@ _FLOCK_LLM_FUNCTIONS = (
     "llm_complete_json", "llm_extract",
 )
 
-# Maximum rows to return in a single query result (prevents context blow-up)
+# Maximum rows to return in a single query result
 _MAX_RESULT_ROWS = 200
-# Maximum chars per cell in the result (prevents huge text fields)
-_MAX_CELL_CHARS = 500
 
 
 def _fix_unescaped_quotes(query: str) -> str:
@@ -329,8 +327,6 @@ async def execute_flock_sql(query: str, tool_context: ToolContext) -> str:
                 cells = []
                 for val in row:
                     s = str(val) if val is not None else "NULL"
-                    if len(s) > _MAX_CELL_CHARS:
-                        s = s[:_MAX_CELL_CHARS] + "..."
                     cells.append(s)
                 lines.append(" | ".join(cells))
 

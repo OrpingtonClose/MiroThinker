@@ -1021,10 +1021,9 @@ class CorpusStore:
         "novel" meant.
         """
         url_text = source_url if source_url else "(no URL)"
-        # Truncate for prompt budget (fact can be long)
-        fact_short = fact[:800]
+        fact_short = fact
         query_ctx = (
-            f"Research question: {user_query[:500]}\n" if user_query else ""
+            f"Research question: {user_query}\n" if user_query else ""
         )
 
         # Build all scoring prompts up front — each one is query-aware
@@ -2872,14 +2871,14 @@ class CorpusStore:
             f"({len(delta)} new this iteration, {len(prior)} from prior iterations)\n",
         ]
 
-        # ── Tier 2: Condensed summary of PRIOR findings ──
+        # ── Tier 2: PRIOR findings (full detail, no truncation) ──
         if prior:
             lines.append("=" * 60)
-            lines.append("PRIOR FINDINGS (condensed summary)")
+            lines.append("PRIOR FINDINGS")
             lines.append("=" * 60)
             lines.append("")
 
-            # Group prior findings by angle/topic for compact display
+            # Group prior findings by angle/topic
             by_angle: dict[str, list[dict]] = defaultdict(list)
             for c in prior:
                 angle = c.get("angle", "") or "general"
@@ -2887,18 +2886,16 @@ class CorpusStore:
 
             for angle, findings in sorted(by_angle.items()):
                 lines.append(f"[{angle}] ({len(findings)} findings):")
-                # Show top findings by quality, one-line each
+                # Show ALL findings by quality — no cap, no truncation
                 top = sorted(
                     findings,
                     key=lambda x: x.get("composite_quality") or 0,
                     reverse=True,
-                )[:15]  # Cap at 15 per angle to keep it compact
+                )
                 for c in top:
                     q = c.get("composite_quality") or 0
-                    fact = (c.get("fact") or "")[:200]
+                    fact = c.get("fact") or ""
                     lines.append(f"  [{c['id']}] (q={q:.2f}) {fact}")
-                if len(findings) > 15:
-                    lines.append(f"  ... and {len(findings) - 15} more findings")
                 lines.append("")
 
         # ── Tier 1: Full detail for DELTA (new) findings ──
@@ -2936,7 +2933,7 @@ class CorpusStore:
 
             lines.append(f"--- Source Passage (chunk {chunk_id}) ---")
             if chunk_text:
-                lines.append(chunk_text[:2000])
+                lines.append(chunk_text)
             lines.append("")
             lines.append("Extracted findings:")
 
@@ -2964,13 +2961,13 @@ class CorpusStore:
         if edges:
             lines.append("RELATIONSHIPS BETWEEN FINDINGS:")
             for src, tgt, rel in edges:
-                src_preview = cond_by_id[src]["fact"][:80] if src in cond_by_id else f"[{src}]"
-                tgt_preview = cond_by_id[tgt]["fact"][:80] if tgt in cond_by_id else f"[{tgt}]"
+                src_fact = cond_by_id[src]["fact"] if src in cond_by_id else f"[{src}]"
+                tgt_fact = cond_by_id[tgt]["fact"] if tgt in cond_by_id else f"[{tgt}]"
                 lines.append(
                     f"  [{src}] --{rel}--> [{tgt}]"
                 )
-                lines.append(f"    {src_preview}")
-                lines.append(f"    → {tgt_preview}")
+                lines.append(f"    {src_fact}")
+                lines.append(f"    → {tgt_fact}")
                 lines.append("")
 
         if chains:
@@ -2981,7 +2978,7 @@ class CorpusStore:
                     if mid in cond_by_id:
                         chain_facts.append(
                             f"  {len(chain_facts) + 1}. [{mid}] "
-                            f"{cond_by_id[mid]['fact'][:120]}"
+                            f"{cond_by_id[mid]['fact']}"
                         )
                 if chain_facts:
                     lines.append(f"Thread {i}:")
@@ -3005,8 +3002,8 @@ class CorpusStore:
                 if partner_c:
                     lines.append(
                         f"  [{c['id']}] vs [{partner}]: "
-                        f"{c['fact'][:200]} CONTRADICTS "
-                        f"{partner_c['fact'][:200]}"
+                        f"{c['fact']} CONTRADICTS "
+                        f"{partner_c['fact']}"
                     )
             lines.append("")
 
@@ -3055,7 +3052,7 @@ class CorpusStore:
                 for ins in insights:
                     lines.append(
                         f"  [insight #{ins['id']}, angle={ins['angle']}]: "
-                        f"{ins['fact'][:500]}"
+                        f"{ins['fact']}"
                     )
                 lines.append("")
 
@@ -3074,7 +3071,7 @@ class CorpusStore:
                     for v in verdicts:
                         lines.append(
                             f"    [thought #{v['id']}, iter={v['iteration']}]: "
-                            f"{v['fact'][:400]}"
+                            f"{v['fact']}"
                         )
                 if specialists:
                     lines.append("  SPECIALIST ANALYSIS:")
@@ -3082,7 +3079,7 @@ class CorpusStore:
                         depth_tag = f" depth={s['expansion_depth']}" if s.get("expansion_depth", 0) > 0 else ""
                         lines.append(
                             f"    [thought #{s['id']}, iter={s['iteration']}"
-                            f"{depth_tag}]: {s['fact'][:300]}"
+                            f"{depth_tag}]: {s['fact']}"
                         )
                 lines.append("")
 
@@ -3095,24 +3092,6 @@ class CorpusStore:
             )
 
         result = "\n".join(lines)
-
-        # ── Context overflow safeguard ──
-        # gpt-4o-mini has 128K tokens (~512K chars).  The thinker prompt
-        # also includes system instructions + conversation history, so
-        # cap the corpus briefing at ~300K chars (~75K tokens) to leave
-        # headroom.  Prefer keeping the corpus health summary (end) and
-        # the most recent findings (later chunks = higher iteration).
-        _MAX_THINKER_CHARS = 300_000
-        if len(result) > _MAX_THINKER_CHARS:
-            # Keep the last N chars (most recent findings + health summary)
-            truncation_note = (
-                f"[CORPUS TRUNCATED: {len(result)} chars → {_MAX_THINKER_CHARS} chars. "
-                f"Oldest findings omitted to fit context window. "
-                f"Focus on the newest material below.]\n\n"
-            )
-            result = truncation_note + result[-(
-                _MAX_THINKER_CHARS - len(truncation_note)
-            ):]
 
         return result
 
@@ -3152,7 +3131,7 @@ class CorpusStore:
 
             lines.append(f"--- Source Passage (chunk {chunk_id}) ---")
             if chunk_text:
-                lines.append(chunk_text[:2000])
+                lines.append(chunk_text)
             lines.append("")
             lines.append("Key findings for synthesis:")
             for c in atoms:
@@ -3177,7 +3156,7 @@ class CorpusStore:
                     if mid in cond_by_id:
                         chain_items.append(
                             f"  {len(chain_items) + 1}. "
-                            f"{cond_by_id[mid]['fact'][:150]}"
+                            f"{cond_by_id[mid]['fact']}"
                         )
                 if chain_items:
                     lines.append(f"Thread {i}:")
@@ -3201,17 +3180,6 @@ class CorpusStore:
         )
 
         result = "\n".join(lines)
-
-        # ── Context overflow safeguard (same as format_for_thinker) ──
-        _MAX_SYNTH_CHARS = 300_000
-        if len(result) > _MAX_SYNTH_CHARS:
-            truncation_note = (
-                f"[CORPUS TRUNCATED: {len(result)} chars → {_MAX_SYNTH_CHARS} chars. "
-                f"Oldest findings omitted to fit context window.]\n\n"
-            )
-            result = truncation_note + result[-(
-                _MAX_SYNTH_CHARS - len(truncation_note)
-            ):]
 
         return result
 

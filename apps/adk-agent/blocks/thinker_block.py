@@ -69,13 +69,9 @@ class ThinkerBlock(PipelineBlock):
 
         # Track strategies for iteration context injection
         if strategy and strategy.strip():
-            summary = strategy[:500]
             prev = state.get("_prev_thinker_strategies", "")
             separator = f"\n--- Iteration {iteration} strategy ---\n"
-            new_history = prev + separator + summary
-            if len(new_history) > 2000:
-                new_history = new_history[-2000:]
-            state["_prev_thinker_strategies"] = new_history
+            state["_prev_thinker_strategies"] = prev + separator + strategy
 
         # Count extractable queries for metrics (regex-only — fast, no LLM).
         # The full LLM dissolution happens later in SearchExecutorBlock;
@@ -156,8 +152,8 @@ def _strategies_converged(current: str, previous: str) -> bool:
                 "Signs of repetition: same questions rephrased, same "
                 "angles with minor rewording, no new intellectual content.\n\n"
                 "Return ONLY one word: PROGRESSING or CONVERGED\n\n"
-                f"PREVIOUS STRATEGY:\n{previous[:1500]}\n\n"
-                f"CURRENT STRATEGY:\n{current[:1500]}"
+                f"PREVIOUS STRATEGY:\n{previous}\n\n"
+                f"CURRENT STRATEGY:\n{current}"
             )
             body = _json.dumps({
                 "model": "flock-model",
