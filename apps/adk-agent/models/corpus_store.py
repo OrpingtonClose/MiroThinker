@@ -3140,11 +3140,11 @@ class CorpusStore:
         if total == 0:
             return "(empty corpus — no conditions to organise)"
 
-        status_counts = self.count_by_status()
+        status_counts = self._status_snapshot()
         lines.append(f"CORPUS OVERVIEW: {total} total conditions")
         if status_counts:
             status_parts = [f"{s}={n}" for s, n in sorted(status_counts.items())]
-            lines.append(f"  By status: {', '.join(status_parts)}")
+            lines.append(f"  By processing_status: {', '.join(status_parts)}")
 
         # Row type breakdown
         try:
