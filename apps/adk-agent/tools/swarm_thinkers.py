@@ -799,8 +799,10 @@ class SwarmRouter:
                             data = _json.loads(resp.read())
                         choices = data.get("choices", [])
                         answer = (choices[0]["message"]["content"] if choices else "").strip().upper()
-                        if "EXHAUST" in answer or "ACTIVE" in answer:
-                            self_reported_exhaustion = "EXHAUST" in answer
+                        if answer == "EXHAUSTED":
+                            self_reported_exhaustion = True
+                            llm_decided = True
+                        elif answer == "ACTIVE":
                             llm_decided = True
                 except Exception:
                     pass  # fall through to substring fallback

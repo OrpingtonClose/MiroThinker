@@ -175,10 +175,10 @@ def _strategies_converged(current: str, previous: str) -> bool:
                 data = _json.loads(resp.read())
             choices = data.get("choices", [])
             answer = (choices[0]["message"]["content"] if choices else "").strip().upper()
-            if "CONVERGED" in answer:
+            if answer == "CONVERGED":
                 logger.info("LLM convergence check: CONVERGED")
                 return True
-            if "PROGRESS" in answer:
+            if answer in ("PROGRESSING", "PROGRESS"):
                 logger.info("LLM convergence check: PROGRESSING")
                 return False
     except Exception:
