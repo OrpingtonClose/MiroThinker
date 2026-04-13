@@ -533,7 +533,18 @@ def maestro_condition_callback(
     #     before the maestro runs, so the maestro always sees scored data.
     #  3. Blocking the event loop here would defeat the purpose of this PR.
     iteration = state.get("_corpus_iteration", 0)
-    state["research_findings"] = corpus.format_for_thinker(current_iteration=iteration)
+    thinker_briefing = corpus.format_for_thinker(current_iteration=iteration)
+
+    # ── Serendipity: Devil’s Advocate injection ───────────────────────────
+    # When the corpus has been building for 2+ iterations and shows
+    # strong consensus with no contradictions, inject a sceptic’s prompt
+    # to push the thinker toward unexplored territory.  This costs zero
+    # LLM calls — just a conditional string append.
+    thinker_briefing = _maybe_inject_devils_advocate(
+        thinker_briefing, corpus, iteration,
+    )
+
+    state["research_findings"] = thinker_briefing
     state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
 
     # Emit corpus stats to dashboard (also before thread start)
@@ -665,6 +676,92 @@ def maestro_condition_callback(
     state["_corpus_iteration"] = iteration + 1
 
     return None  # preserve maestro output
+
+
+# ---------------------------------------------------------------------------
+# Serendipity: Devil's Advocate injection
+# ---------------------------------------------------------------------------
+
+def _maybe_inject_devils_advocate(
+    briefing: str,
+    corpus: "CorpusStore",
+    iteration: int,
+) -> str:
+    """Inject a devil's advocate prompt when the corpus shows one-sided consensus.
+
+    After 2+ iterations, if the corpus has many findings but zero
+    contradictions detected, the research may be stuck in a confirmation
+    bubble.  This injects a sceptic's prompt into the thinker's briefing
+    to push toward unexplored counter-evidence.
+
+    Zero LLM calls — pure SQL check + conditional string append.
+
+    Returns the (possibly augmented) briefing string.
+    """
+    if not (os.environ.get("SERENDIPITY_ENABLED", "1") == "1"):
+        return briefing
+    if iteration < 2:
+        return briefing
+
+    try:
+        # Check: are there any contradictions?
+        contradiction_count = corpus.conn.execute(
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE contradiction_flag = TRUE AND consider_for_use = TRUE"
+        ).fetchone()[0]
+
+        # Check: how many findings exist?
+        finding_count = corpus.conn.execute(
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE row_type = 'finding' AND consider_for_use = TRUE"
+        ).fetchone()[0]
+
+        # Only inject if we have substantial findings but zero contradictions
+        if contradiction_count > 0 or finding_count < 10:
+            return briefing
+
+        # Identify the dominant consensus by looking at the most common angle
+        top_angle = corpus.conn.execute(
+            "SELECT angle, COUNT(*) as cnt FROM conditions "
+            "WHERE row_type = 'finding' AND consider_for_use = TRUE "
+            "AND angle IS NOT NULL AND angle != '' "
+            "GROUP BY angle ORDER BY cnt DESC LIMIT 1"
+        ).fetchone()
+        angle_hint = f" on '{top_angle[0]}'" if top_angle else ""
+
+        devils_advocate = (
+            "\n\n" + "=" * 60 + "\n"
+            "DEVIL'S ADVOCATE (serendipity injection)\n"
+            + "=" * 60 + "\n"
+            f"After {iteration} iterations and {finding_count} findings, "
+            f"the corpus shows ZERO contradictions{angle_hint}. "
+            "This level of consensus is suspicious — real research topics "
+            "almost always have dissenting views, methodological critiques, "
+            "or competing explanations.\n\n"
+            "Consider:\n"
+            "- What counter-evidence SHOULD exist but hasn't been found?\n"
+            "- What assumptions are ALL sources sharing uncritically?\n"
+            "- What would a rigorous sceptic ask about these findings?\n"
+            "- Are there industries, institutions, or ideologies that "
+            "would challenge this consensus?\n"
+            "- What was the PREVIOUS consensus before current understanding, "
+            "and why did it change?\n\n"
+            "Actively search for DISSENT, CRITICISM, and ALTERNATIVE "
+            "EXPLANATIONS in your next strategy. The best research "
+            "steelmans the opposition.\n"
+            + "=" * 60 + "\n"
+        )
+
+        logger.info(
+            "Serendipity: injected devil's advocate at iteration %d "
+            "(%d findings, 0 contradictions)",
+            iteration, finding_count,
+        )
+        return briefing + devils_advocate
+
+    except Exception:
+        logger.debug("Devil's advocate check failed (non-fatal)", exc_info=True)
+        return briefing
 
 
 # ---------------------------------------------------------------------------

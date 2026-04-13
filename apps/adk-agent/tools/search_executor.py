@@ -60,6 +60,10 @@ _SEMANTIC_SCHOLAR_API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
 # Maximum concurrent searches to prevent API rate limiting
 _MAX_CONCURRENT = int(os.environ.get("SEARCH_EXECUTOR_CONCURRENCY", "4"))
 
+# Serendipity: fraction of strategy queries that get contrarian variants
+_SERENDIPITY_RATE = float(os.environ.get("SERENDIPITY_QUERY_RATE", "0.3"))
+_SERENDIPITY_ENABLED = os.environ.get("SERENDIPITY_ENABLED", "1") == "1"
+
 # Content extraction budget per iteration — Jina Reader / Apify are
 # expensive (~$0.01-0.05 each).  Keep low to stay under ~$2/run.
 _MAX_CONTENT_EXTRACTIONS = int(
@@ -970,6 +974,63 @@ def _record_executed_queries(state: dict, queries: list[str]) -> None:
         state["_executed_query_fingerprints"] = new_fps
 
 
+def _generate_serendipitous_queries(
+    queries: list[str],
+    user_query: str,
+    corpus_summary: str,
+) -> list[str]:
+    """Generate contrarian/unexpected query variants for serendipity.
+
+    For a fraction of the strategy queries, produce structurally
+    contrarian variants that push the search toward unexpected but
+    relevant directions.  No LLM call — uses deterministic templates
+    applied to the existing queries.
+
+    Returns additional queries (not replacements) marked for
+    serendipitous discovery.
+    """
+    if not _SERENDIPITY_ENABLED or not queries:
+        return []
+
+    import random
+    rng = random.Random(hash(user_query) & 0xFFFFFFFF)  # deterministic per query
+
+    # Templates that produce structurally contrarian queries
+    _TEMPLATES = [
+        "criticisms of {q}",
+        "evidence against {q}",
+        "{q} controversy OR debate OR disputed",
+        "{q} unexpected findings OR surprising results",
+        "alternative explanation for {q}",
+        "historical evolution of understanding {q}",
+        "{q} cross-disciplinary perspectives",
+        "what was wrong about early research on {q}",
+        "{q} minority viewpoint OR dissenting opinion",
+        "{q} unintended consequences OR side effects",
+    ]
+
+    # Pick which queries get serendipitous variants
+    n_serendipitous = max(1, int(len(queries) * _SERENDIPITY_RATE))
+    selected = rng.sample(queries, min(n_serendipitous, len(queries)))
+
+    variants: list[str] = []
+    for q in selected:
+        # Shorten the query for template insertion (first 80 chars)
+        short_q = q[:80].strip()
+        template = rng.choice(_TEMPLATES)
+        variant = template.replace("{q}", short_q)
+        if len(variant) >= 10:
+            variants.append(variant)
+
+    if variants:
+        logger.info(
+            "Serendipity: generated %d contrarian query variants from %d queries",
+            len(variants), len(selected),
+        )
+
+    return variants
+
+
 def _detect_academic_need(strategy_text: str) -> bool:
     """Detect if the thinker's strategy flags academic research needs."""
     if not strategy_text:
@@ -1072,9 +1133,37 @@ async def run_search_executor(
 
     # A2. Strategy queries -- fan-out to multiple APIs
     strategy_queries = extract_search_queries(strategy)
+
+    # ── Serendipity: inject contrarian query variants ──
+    # Generate unexpected-but-relevant query variants that push the
+    # search toward directions the thinker wouldn't have chosen.
+    # Serendipitous queries are interleaved with regular queries so
+    # they share the fan-out budget rather than being silently dropped
+    # when the thinker produces 6+ strategy queries.
+    serendipitous_queries = _generate_serendipitous_queries(
+        strategy_queries, user_query, "",
+    )
+    if serendipitous_queries:
+        # Interleave: after every 2 regular queries, insert 1 serendipitous
+        merged: list[str] = []
+        s_idx = 0
+        for r_idx, q in enumerate(strategy_queries):
+            merged.append(q)
+            if (r_idx + 1) % 2 == 0 and s_idx < len(serendipitous_queries):
+                merged.append(serendipitous_queries[s_idx])
+                s_idx += 1
+        # Append any remaining serendipitous queries
+        while s_idx < len(serendipitous_queries):
+            merged.append(serendipitous_queries[s_idx])
+            s_idx += 1
+        strategy_queries = merged
+        stats["serendipitous_queries"] = len(serendipitous_queries)
+
+    # Budget: 6 regular + however many serendipitous queries were injected
+    fan_out_cap = min(6 + len(serendipitous_queries), len(strategy_queries))
     fan_out_tasks: list[tuple[str, int]] = []
     new_queries: list[str] = []
-    for i, query in enumerate(strategy_queries[:6]):
+    for i, query in enumerate(strategy_queries[:fan_out_cap]):
         # Skip queries already executed in previous iterations
         if query.strip().lower() in executed_fps:
             stats["queries_deduped"] += 1
