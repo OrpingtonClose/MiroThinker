@@ -226,6 +226,42 @@ async def execute_flock_sql(query: str, tool_context: ToolContext) -> str:
             "insight rows should be IMMUTABLE. Query: %.200s", query,
         )
 
+    # ── FLAT-SCORING GUARD ──────────────────────────────────────────
+    # Detect bulk UPDATEs that set score columns to literal float values
+    # without using llm_complete() — this is the flat-scoring anti-pattern
+    # that assigns identical scores to all findings.
+    _SCORE_COLS = (
+        "trust_score", "novelty_score", "specificity_score",
+        "relevance_score", "actionability_score", "fabrication_risk",
+    )
+    if re.search(r"(?i)\bupdate\b.*\bconditions\b", _ql):
+        # Check if any score column is set to a literal number (not an
+        # llm_complete call or subquery).
+        has_flat_score = False
+        for col in _SCORE_COLS:
+            # Match patterns like: trust_score = 0.6  or  trust_score=0.7
+            # but NOT: trust_score = CAST(llm_complete(...) AS FLOAT)
+            # and NOT: trust_score = (SELECT ...)
+            pattern = rf"{col}\s*=\s*(\d+\.?\d*)"
+            match = re.search(pattern, _ql)
+            if match:
+                # Verify it's a literal, not inside an llm_complete call
+                # by checking there's no llm_complete between the column
+                # name and the number on the same line
+                pos = match.start()
+                context_before = _ql[max(0, pos - 200):pos]
+                if "llm_complete" not in context_before.split(col)[-1] if col in context_before else True:
+                    has_flat_score = True
+                    break
+        if has_flat_score:
+            logger.warning(
+                "FLAT SCORING DETECTED: UPDATE sets score columns to literal "
+                "values instead of using llm_complete() for per-row assessment. "
+                "The safety-net scorer will override these with genuine "
+                "per-finding LLM scores (via score_version=0 check). "
+                "Query: %.300s", query,
+            )
+
     # Detect Flock LLM queries — they can take minutes and must not block
     # the asyncio event loop (which would freeze SSE streaming).
     query_lower = query.lower()

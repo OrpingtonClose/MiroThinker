@@ -974,10 +974,19 @@ class CorpusStore:
         return False
 
     def score_new_conditions(self, user_query: str = "") -> int:
-        """Score all unscored conditions using Flock. Returns count."""
+        """Score all unscored conditions using genuine per-finding LLM assessment.
+
+        Uses ``score_version = 0`` (not ``scored_at = ''``) to find unscored
+        findings.  This is critical: if the maestro writes flat default scores
+        via a bulk UPDATE (setting scored_at but NOT incrementing score_version),
+        those findings will be RE-SCORED here with genuine per-finding LLM
+        assessment.  This breaks the flat-scoring pre-emption chain.
+
+        Returns count of findings scored.
+        """
         unscored = self.conn.execute(
             "SELECT id, fact, source_url FROM conditions "
-            "WHERE scored_at = '' AND consider_for_use = TRUE "
+            "WHERE score_version = 0 AND consider_for_use = TRUE "
             "AND row_type = 'finding'"
         ).fetchall()
         if not unscored:

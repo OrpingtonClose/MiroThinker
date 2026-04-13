@@ -406,6 +406,27 @@ async def search_executor_callback(
     # Drain any queued search results from previous tool callbacks
     _drain_search_queue(state)
 
+    # ── DEFERRED THOUGHT LINEAGE: admit thinker's thought ────────────
+    # thinker_escalate_callback stashes the thinker's full reasoning in
+    # state["_pending_thinker_thought"] instead of writing directly to
+    # DuckDB (because the previous iteration's background scoring thread
+    # may still be alive at that point).  Now that _wait_for_pending_scoring
+    # has confirmed DuckDB is safe to access, we flush the pending thought.
+    pending_thought = state.pop("_pending_thinker_thought", None)
+    if pending_thought:
+        try:
+            corpus.admit_thought(**pending_thought)
+            logger.info(
+                "Deferred thinker thought admitted: %d chars at iteration %d",
+                len(pending_thought.get("reasoning", "")),
+                pending_thought.get("iteration", 0),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to admit deferred thinker thought (non-fatal)",
+                exc_info=True,
+            )
+
     # Run the automated search executor
     try:
         import threading
@@ -507,6 +528,31 @@ def maestro_condition_callback(
 
     # Drain any remaining queued search results
     _drain_search_queue(state)
+
+    # ── THOUGHT LINEAGE: Preserve maestro's reasoning ─────────────────
+    # The maestro's text output (its reasoning about what SQL operations
+    # to perform and why) would otherwise be overwritten when we refresh
+    # state["research_findings"] below.  Store it as an immutable thought
+    # row so the full reasoning chain is preserved in the Flock table.
+    maestro_output = state.get("research_findings", "")
+    if maestro_output and maestro_output.strip():
+        iteration = state.get("_corpus_iteration", 0)
+        try:
+            corpus.admit_thought(
+                reasoning=maestro_output,
+                angle="maestro_reasoning",
+                strategy=f"maestro_iteration_{iteration}",
+                iteration=iteration,
+            )
+            logger.info(
+                "Maestro reasoning preserved: %d chars at iteration %d",
+                len(maestro_output), iteration,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to preserve maestro reasoning (non-fatal)",
+                exc_info=True,
+            )
 
     # Scoring safety net: ensure all conditions ingested during the
     # search executor + maestro phase are scored and deduped.  The

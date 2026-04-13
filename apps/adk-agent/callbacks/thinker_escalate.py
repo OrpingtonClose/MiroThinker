@@ -45,17 +45,32 @@ def thinker_escalate_callback(
     state = callback_context.state
     strategy = state.get("research_strategy", "")
 
-    # ── P1: Track strategies for iteration context injection ──
-    # Save a condensed summary of this strategy for the next iteration's
-    # thinker prompt so it knows what was tried before.
+    # ── THOUGHT LINEAGE: Defer thinker thought to search_executor_callback ──
+    # We do NOT write to DuckDB here because the previous iteration's
+    # background scoring thread (started in maestro_condition_callback) may
+    # still be running.  DuckDB connections are not thread-safe.  Instead,
+    # we stash the full strategy in state; search_executor_callback (which
+    # runs _wait_for_pending_scoring() before touching DuckDB) will call
+    # admit_thought() on our behalf.
     if strategy and strategy.strip():
         iteration = state.get("_corpus_iteration", 0)
-        # Keep last ~500 chars per iteration to avoid prompt bloat
-        summary = strategy[:500]
+        state["_pending_thinker_thought"] = {
+            "reasoning": strategy,
+            "angle": "thinker_strategy",
+            "strategy": f"thinker_iteration_{iteration}",
+            "iteration": iteration,
+        }
+        logger.info(
+            "Thinker thought queued for deferred admission: %d chars at iteration %d",
+            len(strategy), iteration,
+        )
+
+        # Also keep a condensed version in state for the prompt context
+        # (thought rows are in the corpus briefing, but this provides
+        # a quick summary the thinker prompt can reference directly).
         prev = state.get("_prev_thinker_strategies", "")
         separator = f"\n--- Iteration {iteration} strategy ---\n"
-        # Cap total history at ~2000 chars to prevent prompt overflow
-        new_history = prev + separator + summary
+        new_history = prev + separator + strategy[:500]
         if len(new_history) > 2000:
             new_history = new_history[-2000:]
         state["_prev_thinker_strategies"] = new_history
