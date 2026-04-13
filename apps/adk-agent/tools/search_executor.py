@@ -1018,7 +1018,7 @@ def _generate_serendipitous_queries(
         # Shorten the query for template insertion (first 80 chars)
         short_q = q[:80].strip()
         template = rng.choice(_TEMPLATES)
-        variant = template.format(q=short_q)
+        variant = template.replace("{q}", short_q)
         if len(variant) >= 10:
             variants.append(variant)
 
