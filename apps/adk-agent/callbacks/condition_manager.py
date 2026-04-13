@@ -589,6 +589,23 @@ def maestro_condition_callback(
         except Exception:
             pass
 
+    # ── Snapshot health metrics BEFORE background thread starts ────
+    # DuckDB connections are not thread-safe.  All reads must happen
+    # on the main thread before the scoring thread starts writing.
+    _health_metrics: dict = {}
+    try:
+        _health_metrics["unscored_findings"] = corpus.conn.execute(
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE row_type = 'finding' AND score_version = 0"
+        ).fetchone()[0]
+        _health_metrics["total_findings"] = corpus.conn.execute(
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE row_type = 'finding'"
+        ).fetchone()[0]
+        _health_metrics["total_conditions"] = corpus.count()
+    except Exception:
+        pass
+
     def _background_scoring() -> None:
         """Run scoring + dedup in a background thread.
 
@@ -701,9 +718,8 @@ def maestro_condition_callback(
         logger.warning("Swarm dispatch failed (non-fatal)", exc_info=True)
 
     # ── Pipeline health gate: maestro ───────────────────────────────
-    # Snapshot corpus scoring state for the health check.
-    # IMPORTANT: This runs BEFORE the background scoring thread starts,
-    # on the main thread where DuckDB access is safe.
+    # Uses _health_metrics snapshotted BEFORE the background scoring
+    # thread started (no DuckDB access here — thread-safe).
     try:
         from models.pipeline_health import (
             PipelineHealth, check_maestro,
@@ -711,23 +727,8 @@ def maestro_condition_callback(
         health = PipelineHealth.from_state(state)
         phase = health.begin_phase(f"maestro_iter{iteration}")
 
-        # Measure scoring state — safe to query DuckDB here (main thread,
-        # background scoring hasn't started yet).
-        try:
-            unscored = corpus.conn.execute(
-                "SELECT COUNT(*) FROM conditions "
-                "WHERE row_type = 'finding' AND score_version = 0"
-            ).fetchone()[0]
-            total_f = corpus.conn.execute(
-                "SELECT COUNT(*) FROM conditions "
-                "WHERE row_type = 'finding'"
-            ).fetchone()[0]
-            phase.metrics["unscored_findings"] = unscored
-            phase.metrics["total_findings"] = total_f
-        except Exception:
-            pass
-
-        phase.metrics["total_conditions"] = corpus.count()
+        # Use pre-snapshotted metrics (captured before thread start)
+        phase.metrics.update(_health_metrics)
         phase.metrics["maestro_produced_output"] = True
         check_maestro(phase, state)
         decision = health.evaluate_gate(phase)

@@ -257,9 +257,13 @@ class PipelineHealth:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise the full health state for session state storage."""
+        # Include both historical phases (from previous hydrations)
+        # and new phases added since last hydration.
+        historical = getattr(self, '_raw_phases', [])
+        current = [p.to_dict() for p in self.phases]
         return {
             "verdict": self.verdict.value,
-            "phases": [p.to_dict() for p in self.phases],
+            "phases": historical + current,
             "errors": self.errors,
             "warnings": self.warnings,
             "elapsed_s": round(time.time() - self.started_at, 2),
@@ -317,7 +321,7 @@ def check_search_executor(report: PhaseReport, state: dict) -> None:
     metrics = report.metrics
 
     # Check 1: findings ingested
-    ingested = metrics.get("ingested", 0)
+    ingested = metrics.get("total_ingested", 0)
     if ingested == 0:
         report.add_check(
             "findings_ingested", Severity.CRITICAL,
@@ -339,7 +343,7 @@ def check_search_executor(report: PhaseReport, state: dict) -> None:
 
     # Check 2: noise rejection
     rejected = metrics.get("queries_rejected_noise", 0)
-    total_queries = metrics.get("queries_extracted", 0)
+    total_queries = metrics.get("strategy_searches", 0)
     if total_queries > 0 and rejected >= total_queries:
         report.add_check(
             "query_noise", Severity.CRITICAL,
