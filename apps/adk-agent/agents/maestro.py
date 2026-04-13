@@ -53,8 +53,8 @@ Your job: read the corpus state, decide what operations will improve it, \
 and execute them.  You are NOT limited to predefined steps — you can \
 invent new operations based on what you see.
 
-=== CORPUS STATE (verbal briefing from thinker) ===
-{research_findings}
+=== CORPUS STATE (structural summary — use SQL to drill into details) ===
+{corpus_summary_for_maestro}
 === END CORPUS STATE ===
 
 === THINKER'S STRATEGY ===
