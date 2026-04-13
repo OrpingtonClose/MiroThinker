@@ -716,9 +716,9 @@ def _detect_cross_angle_surprises(
         rows = corpus.conn.execute(
             "SELECT id, fact FROM conditions "
             "WHERE row_type = 'finding' AND consider_for_use = TRUE "
-            "AND angle LIKE ? "
+            "AND angle = ? "
             "ORDER BY composite_quality DESC LIMIT 5",
-            [f"%{angle[:30]}%"],
+            [angle],
         ).fetchall()
         if rows:
             lines = [f"ANGLE '{angle}':"]

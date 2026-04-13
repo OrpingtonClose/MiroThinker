@@ -1249,15 +1249,19 @@ class CorpusStore:
         for angle, cnt in angle_counts:
             diversity_bonus = round(0.08 * (1.0 - cnt / max_count), 4)
             if diversity_bonus > 0.005:
+                n = self.conn.execute(
+                    "SELECT COUNT(*) FROM conditions "
+                    "WHERE angle = ? AND row_type = 'finding' "
+                    "AND consider_for_use = TRUE AND scored_at != ''",
+                    [angle],
+                ).fetchone()[0]
                 self.conn.execute(
                     "UPDATE conditions SET cross_ref_boost = cross_ref_boost + ? "
                     "WHERE angle = ? AND row_type = 'finding' "
                     "AND consider_for_use = TRUE AND scored_at != ''",
                     [diversity_bonus, angle],
                 )
-                updated += self.conn.execute(
-                    "SELECT changes()"
-                ).fetchone()[0]
+                updated += n
 
         if updated:
             logger.info(
