@@ -45,32 +45,25 @@ def thinker_escalate_callback(
     state = callback_context.state
     strategy = state.get("research_strategy", "")
 
-    # ── THOUGHT LINEAGE: Preserve thinker's FULL reasoning ──────────
-    # Store the thinker's complete output as an immutable thought row in
-    # the Flock table.  This replaces the old 500-char truncation which
-    # destroyed the most valuable intellectual artifact of each iteration.
-    # The thinker's briefing already includes thought rows, so this closes
-    # the loop: thinker reasons → stored as thought → fed back next iteration.
+    # ── THOUGHT LINEAGE: Defer thinker thought to search_executor_callback ──
+    # We do NOT write to DuckDB here because the previous iteration's
+    # background scoring thread (started in maestro_condition_callback) may
+    # still be running.  DuckDB connections are not thread-safe.  Instead,
+    # we stash the full strategy in state; search_executor_callback (which
+    # runs _wait_for_pending_scoring() before touching DuckDB) will call
+    # admit_thought() on our behalf.
     if strategy and strategy.strip():
         iteration = state.get("_corpus_iteration", 0)
-        try:
-            from callbacks.condition_manager import _get_corpus
-            corpus = _get_corpus(state)
-            corpus.admit_thought(
-                reasoning=strategy,
-                angle="thinker_strategy",
-                strategy=f"thinker_iteration_{iteration}",
-                iteration=iteration,
-            )
-            logger.info(
-                "Thinker thought preserved: %d chars at iteration %d",
-                len(strategy), iteration,
-            )
-        except Exception:
-            logger.warning(
-                "Failed to preserve thinker thought (non-fatal)",
-                exc_info=True,
-            )
+        state["_pending_thinker_thought"] = {
+            "reasoning": strategy,
+            "angle": "thinker_strategy",
+            "strategy": f"thinker_iteration_{iteration}",
+            "iteration": iteration,
+        }
+        logger.info(
+            "Thinker thought queued for deferred admission: %d chars at iteration %d",
+            len(strategy), iteration,
+        )
 
         # Also keep a condensed version in state for the prompt context
         # (thought rows are in the corpus briefing, but this provides

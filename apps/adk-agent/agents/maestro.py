@@ -90,7 +90,7 @@ WORKFLOW — Start by assessing, then act:
 1. ASSESS the corpus:
    SELECT COUNT(*), processing_status FROM conditions \
 GROUP BY processing_status;
-   SELECT COUNT(*) FROM conditions WHERE scored_at = '';
+   SELECT COUNT(*) FROM conditions WHERE score_version = 0;
    SELECT COUNT(*) FROM conditions WHERE expansion_tool != 'none' \
 AND expansion_fulfilled = FALSE;
 
