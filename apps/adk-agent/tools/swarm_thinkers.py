@@ -67,19 +67,68 @@ _MIN_THOUGHT_CHARS = 100
 # 1. Angle extraction from thinker strategy
 # ═══════════════════════════════════════════════════════════════════════
 
-def extract_angles(strategy_text: str) -> list[str]:
-    """Extract specialist angles from the thinker's strategy output.
+def _extract_angles_via_llm(strategy_text: str) -> list[str]:
+    """Use LLM to identify distinct research angles in the strategy.
 
-    The thinker is instructed to include a structured block::
-
-        SPECIALIST_ANGLES: [angle1, angle2, angle3]
-
-    Falls back to heuristic extraction from section headings if no
-    structured block is found.
+    The thinker's strategy is rich prose that may not follow any fixed
+    format.  An LLM understands the conceptual structure and can extract
+    the genuinely distinct research facets regardless of formatting.
     """
-    if not strategy_text:
+    from utils.flock_proxy import get_flock_proxy_url
+    import json as _json
+    import urllib.request
+
+    proxy_url = get_flock_proxy_url()
+    if not proxy_url:
         return []
 
+    prompt = (
+        "You are a research strategist. Read the following research strategy "
+        "and identify the distinct specialist research ANGLES — the separate "
+        "facets, disciplines, or lines of inquiry the strategy proposes.\n\n"
+        "Each angle should be a concise label (3-8 words) that names a "
+        "specific investigative direction. Do NOT return generic labels like "
+        "'further research' or 'additional analysis'. Each angle must name "
+        "the actual domain, theory, mechanism, or question to investigate.\n\n"
+        "Return 2-5 angles, one per line, prefixed with ANGLE: \n"
+        "If the strategy only has one coherent direction, return just one.\n\n"
+        f"STRATEGY:\n{strategy_text[:3000]}"
+    )
+
+    body = _json.dumps({
+        "model": "flock-model",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 256,
+        "temperature": 0.3,
+    }).encode()
+    req = urllib.request.Request(
+        f"{proxy_url}/v1/chat/completions",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = _json.loads(resp.read())
+        choices = data.get("choices", [])
+        raw = choices[0]["message"]["content"] if choices else ""
+    except Exception as exc:
+        logger.warning("LLM angle extraction failed: %s", exc)
+        return []
+
+    angles: list[str] = []
+    for line in raw.split("\n"):
+        line = line.strip()
+        if line.upper().startswith("ANGLE:"):
+            a = line[6:].strip().strip("'\"-.•")
+            if a and len(a) > 2:
+                angles.append(a[:80])
+    return angles[:_MAX_SPECIALISTS]
+
+
+def _regex_extract_angles(strategy_text: str) -> list[str]:
+    """Fallback: regex-based angle extraction for when LLM is unavailable."""
     # Try structured format first
     m = re.search(
         r"SPECIALIST_ANGLES:\s*\[([^\]]+)\]",
@@ -101,6 +150,30 @@ def extract_angles(strategy_text: str) -> list[str]:
         return [a.strip()[:80] for a in angle_items][:_MAX_SPECIALISTS]
 
     return []
+
+
+def extract_angles(strategy_text: str) -> list[str]:
+    """Extract specialist angles from the thinker's strategy output.
+
+    Primary path: LLM-powered extraction that understands the conceptual
+    structure of the strategy regardless of formatting.  Falls back to
+    regex if the LLM call fails.
+    """
+    if not strategy_text:
+        return []
+
+    # Primary: LLM-powered angle extraction
+    angles = _extract_angles_via_llm(strategy_text)
+    if angles:
+        logger.info(
+            "LLM angle extraction produced %d angles: %s",
+            len(angles), angles,
+        )
+        return angles
+
+    # Fallback: regex extraction
+    logger.warning("LLM angle extraction failed — falling back to regex")
+    return _regex_extract_angles(strategy_text)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -561,12 +634,67 @@ class AngleState:
 def _estimate_novelty(current: str, previous: str) -> float:
     """Estimate novelty of *current* thought relative to *previous*.
 
-    Uses a cheap heuristic: Jaccard similarity on word trigrams.
+    Primary path: LLM-powered semantic novelty assessment that
+    understands whether genuinely new intellectual content has been
+    introduced, regardless of vocabulary overlap.
+
+    Falls back to trigram Jaccard if the LLM is unavailable.
     Returns 0.0 (identical) to 1.0 (completely novel).
     """
     if not previous or not current:
         return 1.0
 
+    # Primary: LLM-powered novelty assessment
+    try:
+        from utils.flock_proxy import get_flock_proxy_url
+        import json as _json
+        import urllib.request
+
+        proxy_url = get_flock_proxy_url()
+        if proxy_url:
+            prompt = (
+                "Rate the intellectual novelty of THOUGHT B relative to "
+                "THOUGHT A. Does B introduce genuinely new claims, "
+                "evidence, connections, or perspectives that A did not "
+                "contain?\n\n"
+                "Return a decimal from 0.0 to 1.0:\n"
+                "  0.0 = identical content (just rephrased)\n"
+                "  0.3 = minor additions but mostly the same ideas\n"
+                "  0.6 = substantial new content mixed with familiar ideas\n"
+                "  1.0 = completely new intellectual territory\n\n"
+                "Return ONLY a decimal number.\n\n"
+                f"THOUGHT A:\n{previous[:1000]}\n\n"
+                f"THOUGHT B:\n{current[:1000]}"
+            )
+            body = _json.dumps({
+                "model": "flock-model",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 16,
+                "temperature": 0.1,
+            }).encode()
+            req = urllib.request.Request(
+                f"{proxy_url}/v1/chat/completions",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = _json.loads(resp.read())
+            choices = data.get("choices", [])
+            raw = (choices[0]["message"]["content"] if choices else "").strip()
+            import re as _re
+            m = _re.search(r"(\d+\.?\d*)", raw)
+            if m:
+                val = float(m.group(1))
+                novelty = max(0.0, min(1.0, val))
+                logger.debug(
+                    "LLM novelty estimate: %.2f", novelty,
+                )
+                return novelty
+    except Exception:
+        pass  # fall through to trigram heuristic
+
+    # Fallback: Jaccard similarity on word trigrams
     def _trigrams(text: str) -> set[str]:
         words = text.lower().split()
         if len(words) < 3:
@@ -626,15 +754,59 @@ class SwarmRouter:
                 state.novelty_scores.append(novelty)
                 state.prev_thought_summary = latest_text[:2000]
 
-                # Signal 2: Check for self-reported exhaustion
-                exhaustion_markers = [
-                    "no additional", "already covered", "nothing new",
-                    "previously established", "as noted before",
-                    "reiterating", "no further evidence",
-                ]
-                self_reported_exhaustion = any(
-                    marker in latest_text.lower() for marker in exhaustion_markers
-                )
+                # Signal 2: LLM-powered exhaustion detection
+                # Instead of brittle substring matching, ask the LLM
+                # whether the specialist is signalling it has run out
+                # of new material (vs. academic prose that references
+                # prior work while making new claims).
+                self_reported_exhaustion = False
+                try:
+                    from utils.flock_proxy import get_flock_proxy_url
+                    import json as _json
+                    import urllib.request
+
+                    proxy_url = get_flock_proxy_url()
+                    if proxy_url:
+                        exh_prompt = (
+                            "Is this research specialist signalling that it "
+                            "has EXHAUSTED its line of inquiry (no more new "
+                            "material to contribute), or is it still making "
+                            "substantive new claims?\n\n"
+                            "IMPORTANT: Academic prose often references prior "
+                            "work ('as previously established...') while "
+                            "making NEW points. That is NOT exhaustion.\n"
+                            "True exhaustion = the specialist is explicitly "
+                            "saying it has nothing new to add.\n\n"
+                            "Return ONLY one word: EXHAUSTED or ACTIVE\n\n"
+                            f"TEXT:\n{latest_text[:1000]}"
+                        )
+                        body = _json.dumps({
+                            "model": "flock-model",
+                            "messages": [{"role": "user", "content": exh_prompt}],
+                            "max_tokens": 16,
+                            "temperature": 0.1,
+                        }).encode()
+                        req = urllib.request.Request(
+                            f"{proxy_url}/v1/chat/completions",
+                            data=body,
+                            headers={"Content-Type": "application/json"},
+                            method="POST",
+                        )
+                        with urllib.request.urlopen(req, timeout=10) as resp:
+                            data = _json.loads(resp.read())
+                        choices = data.get("choices", [])
+                        answer = (choices[0]["message"]["content"] if choices else "").strip().upper()
+                        self_reported_exhaustion = "EXHAUST" in answer
+                except Exception:
+                    # Fallback: substring markers (less accurate)
+                    _exhaustion_markers = [
+                        "no additional", "already covered", "nothing new",
+                        "no further evidence",
+                    ]
+                    self_reported_exhaustion = any(
+                        marker in latest_text.lower()
+                        for marker in _exhaustion_markers
+                    )
 
                 # Signal 3: Diminishing output length
                 short_output = state.last_thought_chars < _MIN_THOUGHT_CHARS

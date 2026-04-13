@@ -1114,11 +1114,8 @@ class CorpusStore:
                 f"{query_ctx}"
                 "Rate how relevant this finding is to the research "
                 "question on 0.0-1.0.\n"
-                "IMPORTANT: Be discriminating. A finding about "
-                "'corporate growth strategy' is NOT relevant to a "
-                "question about 'Lacanian psychic economy'. A finding "
-                "about 'Elasticsearch search strategy' is NOT relevant "
-                "to a question about 'research methodology'.\n"
+                "Score based on genuine conceptual connection to the "
+                "research question — not surface keyword overlap.\n"
                 "0.0 = completely off-topic, no conceptual connection. "
                 "0.2 = shares a keyword but different domain entirely. "
                 "0.5 = tangentially related, same broad field. "
@@ -1180,9 +1177,9 @@ class CorpusStore:
         results as relationship rows (row_type='similarity') in
         the conditions table.  Returns count of pairs evaluated.
 
-        Uses a keyword-overlap pre-filter to skip obviously unrelated
-        pairs, then batches the remaining LLM comparisons in parallel
-        via ``_http_complete_batch()``.
+        Uses a proper-noun / technical-term pre-filter to skip obviously
+        unrelated pairs, then batches the remaining LLM comparisons in
+        parallel via ``_http_complete_batch()``.
         """
         new_ids = self.conn.execute(
             "SELECT id FROM conditions "
@@ -1205,16 +1202,41 @@ class CorpusStore:
                 [new_id, new_id],
             ).fetchall()
 
-            # Pre-filter: skip pairs with <15% keyword overlap
-            new_words = set(new_fact.lower().split())
+            # Pre-filter: use proper nouns & technical terms (not generic
+            # words) to identify candidate pairs for LLM comparison.
+            # Generic word overlap misses paraphrases that use different
+            # vocabulary for the same claim.  Proper nouns, numbers, and
+            # technical terms are much stronger signals of topical overlap.
+            def _signature_terms(text: str) -> set[str]:
+                """Extract proper nouns, numbers, and technical terms."""
+                terms: set[str] = set()
+                for word in text.split():
+                    clean = word.strip(".,;:!?\"'()[]")
+                    if not clean:
+                        continue
+                    # Capitalised words (proper nouns, named theories)
+                    if clean[0].isupper() and len(clean) > 1:
+                        terms.add(clean.lower())
+                    # Numbers and measurements
+                    elif any(c.isdigit() for c in clean):
+                        terms.add(clean.lower())
+                    # Hyphenated compound terms (technical jargon)
+                    elif "-" in clean and len(clean) > 5:
+                        terms.add(clean.lower())
+                return terms
+
+            new_terms = _signature_terms(new_fact)
             candidates: list[tuple[int, str]] = []
             for other_id, other_fact in others:
-                other_words = set(other_fact.lower().split())
-                union_size = len(new_words | other_words)
-                if union_size > 0:
-                    overlap = len(new_words & other_words) / union_size
-                    if overlap >= 0.15:
-                        candidates.append((other_id, other_fact))
+                # If either has very few signature terms, include as
+                # candidate — the LLM should decide
+                other_terms = _signature_terms(other_fact)
+                if not new_terms or not other_terms:
+                    candidates.append((other_id, other_fact))
+                    continue
+                shared = len(new_terms & other_terms)
+                if shared >= 1:
+                    candidates.append((other_id, other_fact))
 
             if not candidates:
                 self.conn.execute(
@@ -3392,54 +3414,15 @@ class CorpusStore:
                 )
                 continue
 
-            # Semantic dedup: keyword-overlap pre-filter.
-            # If >80% of this atom's significant words appear in an
-            # existing finding, it's likely a paraphrase — skip it.
-            _stop = {
-                "the", "a", "an", "is", "are", "was", "were", "be",
-                "been", "being", "have", "has", "had", "do", "does",
-                "did", "will", "would", "could", "should", "may",
-                "might", "shall", "can", "to", "of", "in", "for",
-                "on", "with", "at", "by", "from", "as", "into",
-                "through", "during", "before", "after", "and", "but",
-                "or", "nor", "not", "so", "yet", "both", "either",
-                "neither", "each", "every", "all", "any", "few",
-                "more", "most", "other", "some", "such", "no", "only",
-                "own", "same", "than", "too", "very", "that", "this",
-                "these", "those", "it", "its", "they", "their", "them",
-                "which", "what", "who", "whom", "when", "where", "how",
-            }
-            new_words = {
-                w for w in re.findall(r'\w+', stripped.lower())
-                if len(w) > 2 and w not in _stop
-            }
-            is_semantic_dup = False
-            if len(new_words) >= 3:
-                # Check against recent findings (last 200 to keep it fast)
-                recent = self.conn.execute(
-                    "SELECT id, fact FROM conditions "
-                    "WHERE row_type = 'finding' "
-                    "AND consider_for_use = TRUE "
-                    "ORDER BY id DESC LIMIT 200",
-                ).fetchall()
-                for eid, efact in recent:
-                    existing_words = {
-                        w for w in re.findall(r'\w+', (efact or "").lower())
-                        if len(w) > 2 and w not in _stop
-                    }
-                    if not existing_words:
-                        continue
-                    overlap = len(new_words & existing_words) / len(new_words)
-                    if overlap > 0.80:
-                        logger.debug(
-                            "Semantic dedup: %.0f%% overlap with id=%d, "
-                            "skipping: %.80s",
-                            overlap * 100, eid, stripped,
-                        )
-                        is_semantic_dup = True
-                        break
-            if is_semantic_dup:
-                continue
+            # Semantic dedup: LLM-powered via compute_duplications()
+            # downstream. We deliberately do NOT pre-filter by keyword
+            # overlap here — word overlap is a bag-of-words heuristic
+            # that destroys meaning.  Two findings can share 85% of
+            # their vocabulary while making opposite claims (e.g.
+            # "mTOR signals growth when resources are abundant" vs
+            # "...when resources are scarce").  The downstream
+            # compute_duplications() uses LLM comparison to detect
+            # true semantic duplicates accurately.
 
             # Insert atom with parent_id → chunk for lineage
             cid = self._next_id

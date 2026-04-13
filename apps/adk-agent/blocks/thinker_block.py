@@ -129,8 +129,62 @@ class ThinkerBlock(PipelineBlock):
 def _strategies_converged(current: str, previous: str) -> bool:
     """Detect if two strategies are substantively the same.
 
-    Uses keyword overlap as a lightweight convergence signal.
+    Primary path: LLM-powered semantic comparison that understands
+    whether the thinker is making genuine intellectual progress or
+    repeating the same ideas with different words.
+
+    Falls back to keyword overlap if LLM is unavailable.
     """
+    if not current or not previous:
+        return False
+
+    # Primary: LLM-powered convergence check
+    try:
+        from utils.flock_proxy import get_flock_proxy_url
+        import json as _json
+        import urllib.request
+
+        proxy_url = get_flock_proxy_url()
+        if proxy_url:
+            prompt = (
+                "Compare these two research strategies from consecutive "
+                "iterations.  Is the second one making GENUINE NEW "
+                "INTELLECTUAL PROGRESS, or is it repeating the same ideas "
+                "(possibly with different vocabulary)?\n\n"
+                "Signs of real progress: new research angles, deeper "
+                "questions, new connections, refined hypotheses.\n"
+                "Signs of repetition: same questions rephrased, same "
+                "angles with minor rewording, no new intellectual content.\n\n"
+                "Return ONLY one word: PROGRESSING or CONVERGED\n\n"
+                f"PREVIOUS STRATEGY:\n{previous[:1500]}\n\n"
+                f"CURRENT STRATEGY:\n{current[:1500]}"
+            )
+            body = _json.dumps({
+                "model": "flock-model",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 16,
+                "temperature": 0.1,
+            }).encode()
+            req = urllib.request.Request(
+                f"{proxy_url}/v1/chat/completions",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = _json.loads(resp.read())
+            choices = data.get("choices", [])
+            answer = (choices[0]["message"]["content"] if choices else "").strip().upper()
+            if "CONVERGED" in answer:
+                logger.info("LLM convergence check: CONVERGED")
+                return True
+            if "PROGRESS" in answer:
+                logger.info("LLM convergence check: PROGRESSING")
+                return False
+    except Exception:
+        pass  # fall through to keyword heuristic
+
+    # Fallback: keyword overlap
     import re as _re
 
     def _keywords(text: str) -> set[str]:
