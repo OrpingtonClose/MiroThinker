@@ -302,15 +302,25 @@ def _cleanup_pipeline_state(
         # content for the synthesiser to work with.
         swarm_output = state.get("corpus_for_synthesis", "")
         phase.metrics["swarm_input_length"] = len(swarm_output) if swarm_output else 0
-        # Count corpus findings for the health check
+        # Count corpus findings for the health check.
+        # MUST check that no background scoring thread is alive before
+        # touching DuckDB — connections are not thread-safe.
         try:
-            from callbacks.condition_manager import _corpus_stores
+            from callbacks.condition_manager import (
+                _corpus_stores, _wait_for_pending_scoring,
+            )
             corpus_key = state.get("_corpus_key")
             if corpus_key and corpus_key in _corpus_stores:
-                corpus = _corpus_stores[corpus_key]
-                phase.metrics["corpus_findings"] = corpus.conn.execute(
-                    "SELECT COUNT(*) FROM conditions WHERE row_type = 'finding'"
-                ).fetchone()[0]
+                safe = _wait_for_pending_scoring(corpus_key)
+                if safe:
+                    corpus = _corpus_stores[corpus_key]
+                    phase.metrics["corpus_findings"] = corpus.conn.execute(
+                        "SELECT COUNT(*) FROM conditions "
+                        "WHERE row_type = 'finding'"
+                    ).fetchone()[0]
+                else:
+                    # Scoring thread still alive — skip DuckDB query
+                    phase.metrics["corpus_findings"] = -1
         except Exception:
             phase.metrics["corpus_findings"] = 0
         check_synthesiser(phase, state)

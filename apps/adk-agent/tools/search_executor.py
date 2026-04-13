@@ -1020,8 +1020,13 @@ def _query_relevance_score(query: str, user_query: str) -> float:
     q_tokens = _content_tokens(query)
     u_tokens = _content_tokens(user_query)
 
-    if not q_tokens or not u_tokens:
+    if not q_tokens:
         return 0.0
+    if not u_tokens:
+        # User query reduced to empty after stopword removal — we can't
+        # compute meaningful overlap.  Allow the query through rather
+        # than rejecting everything.
+        return 1.0
 
     overlap = q_tokens & u_tokens
     # Jaccard-like: overlap / smaller set
