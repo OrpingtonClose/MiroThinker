@@ -75,9 +75,8 @@ class HealthGateAspect(Aspect):
     async def on_error(
         self, block: PipelineBlock, ctx: BlockContext, error: Exception,
     ) -> Optional[BlockResult]:
-        ph = self._get(block.name)
-        ph.failures += 1
-        ph.total_runs += 1
+        # Don't increment here — after() is always called by the runner
+        # (even on error paths) and will handle the counting.
         return None
 
     def summary(self) -> dict[str, Any]:

@@ -146,15 +146,13 @@ def validate_output_quality(text: str) -> dict[str, Any]:
 
     Returns a combined metrics dict with per-validator results.
     """
-    return {
+    results: dict[str, Any] = {
         "repetition": check_repetition(text),
         "stretching": check_stretching(text),
         "template_leaks": check_template_leaks(text),
         "instruction_regurgitation": check_instruction_regurgitation(text),
-        "any_flagged": any([
-            check_repetition(text).get("flagged", False),
-            check_stretching(text).get("flagged", False),
-            check_template_leaks(text).get("flagged", False),
-            check_instruction_regurgitation(text).get("flagged", False),
-        ]),
     }
+    results["any_flagged"] = any(
+        v.get("flagged", False) for v in results.values()
+    )
+    return results

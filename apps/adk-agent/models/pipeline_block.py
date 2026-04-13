@@ -275,16 +275,18 @@ class PipelineRunner:
             )
 
         # --- before (in order) ---
+        ran_before: list[Aspect] = []
         for aspect in self.aspects:
             try:
                 short_circuit = await aspect.before(block, ctx)
+                ran_before.append(aspect)
                 if short_circuit is not None:
                     logger.info(
                         "Aspect '%s' short-circuited block '%s'",
                         aspect.name, block.name,
                     )
-                    # Run after() for aspects that already ran before()
-                    for done in reversed(self.aspects):
+                    # Run after() only for aspects whose before() already ran
+                    for done in reversed(ran_before):
                         try:
                             await done.after(block, ctx, short_circuit)
                         except Exception as ae:
@@ -292,10 +294,9 @@ class PipelineRunner:
                                 "Aspect '%s' after() during short-circuit: %s",
                                 done.name, ae,
                             )
-                        if done is aspect:
-                            break
                     return short_circuit
             except Exception as exc:
+                ran_before.append(aspect)
                 logger.warning(
                     "Aspect '%s' before() failed for '%s': %s",
                     aspect.name, block.name, exc,
