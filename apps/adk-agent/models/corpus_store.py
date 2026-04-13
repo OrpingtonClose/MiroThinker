@@ -599,7 +599,7 @@ class CorpusStore:
     def admit_insight(
         self,
         conclusion: str,
-        source_thought_id: int,
+        source_thought_id: int | None,
         angle: str = "",
         grounding_ids: list[int] | None = None,
         iteration: int = 0,
@@ -644,8 +644,9 @@ class CorpusStore:
                  iteration, now],
             )
         logger.debug(
-            "Admitted insight #%d from thought #%d (grounded in %d findings)",
-            cid, source_thought_id, len(grounding_ids or []),
+            "Admitted insight #%d from thought #%s (grounded in %d findings)",
+            cid, source_thought_id if source_thought_id is not None else "N/A",
+            len(grounding_ids or []),
         )
         return cid
 
