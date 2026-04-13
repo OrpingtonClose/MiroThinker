@@ -1104,7 +1104,13 @@ class CorpusStore:
                 f"Finding: {fact_short}",
                 "score_actionability",
             ),
-            (
+        ]
+
+        # Conditionally add relevance scoring — needs a user query to
+        # evaluate against; without one the LLM has no frame of reference
+        has_relevance = bool(user_query)
+        if has_relevance:
+            prompts.append((
                 f"{query_ctx}"
                 "Rate how relevant this finding is to the research "
                 "question on 0.0-1.0.\n"
@@ -1121,8 +1127,7 @@ class CorpusStore:
                 "Return ONLY a decimal number.\n"
                 f"Finding: {fact_short}",
                 "score_relevance",
-            ),
-        ]
+            ))
 
         # Fire all prompts in parallel
         responses = self._http_complete_batch(prompts, max_tokens=32)
@@ -1134,7 +1139,10 @@ class CorpusStore:
         fabrication = self._parse_float(responses[3], 0.0)
         novelty = self._parse_float(responses[4], 0.5)
         actionability = self._parse_float(responses[5], 0.5)
-        relevance = self._parse_float(responses[6], 0.5)
+        relevance = (
+            self._parse_float(responses[6], 0.5)
+            if has_relevance else 0.5
+        )
 
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
