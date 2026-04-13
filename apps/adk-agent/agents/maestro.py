@@ -18,9 +18,10 @@ The maestro can:
   - Compose arbitrary analytical queries
   - Invent entirely new operations based on corpus state
 
-The 11-step algorithm battery is provided as *templates* — the maestro
-uses them as starting points but is free to deviate, skip, or invent
-new operations based on what it sees in the corpus.
+The 13-step algorithm battery (8 core + 5 serendipity) is provided as
+*templates* — the maestro uses them as starting points but is free to
+deviate, skip, or invent new operations based on what it sees in the
+corpus.
 
 Architecture::
 
@@ -143,7 +144,157 @@ unscored.  Use Flock to score them:
      AND processing_status NOT IN ('merged', 'ready')
      AND (expansion_tool = 'none' OR expansion_fulfilled = TRUE);
 
-BEYOND THE TEMPLATES — You are NOT limited to these 8 steps.  Based on \
+SERENDIPITY TEMPLATES — Apply these to break confirmation bubbles and \
+push the corpus toward unexpected-but-relevant directions.  Run these \
+AFTER the core scoring/clustering steps above.  Apply them selectively \
+based on corpus state — not every template is needed every iteration.
+
+9. CONTRARIAN CHALLENGE (per angle, Flock LLM):
+   For each well-populated angle, generate a devil''s advocate critique \
+of the top findings.  Materialise the critique as a new thought row — \
+the swarm integrates it as a peer contribution.
+
+   -- For each angle with 5+ scored findings:
+   INSERT INTO conditions (id, fact, row_type, parent_id, angle, \
+consider_for_use, created_at, strategy)
+   VALUES (
+     nextval('seq'),
+     (SELECT llm_complete(
+       {{'model_name': 'corpus_model'}},
+       'You are a rigorous sceptic. Here are the top findings for angle "' \
+       || '<ANGLE>' || '": ' \
+       || (SELECT STRING_AGG(SUBSTR(fact, 1, 300), '; ') \
+           FROM (SELECT fact FROM conditions \
+                 WHERE angle = ''<ANGLE>'' AND row_type = ''finding'' \
+                 AND consider_for_use = TRUE \
+                 ORDER BY composite_quality DESC LIMIT 10)) \
+       || '. Challenge these findings: what counter-evidence SHOULD exist? ' \
+       || 'What assumptions are shared uncritically? What would a dissenter say?'
+     )),
+     'thought', NULL, '<ANGLE>', TRUE, CURRENT_TIMESTAMP, \
+'serendipitous_contrarian'
+   );
+
+   Replace <ANGLE> with the actual angle name.  Only spawn one \
+contrarian per angle per iteration.
+
+10. CROSS-ANGLE BRIDGE (Flock LLM):
+    When the corpus has 2+ angles, use Flock to discover unexpected \
+connections BETWEEN angles that single-angle analysis misses.  \
+Materialise discoveries as insight rows.
+
+   INSERT INTO conditions (id, fact, row_type, angle, consider_for_use, \
+created_at, strategy)
+   VALUES (
+     nextval('seq'),
+     (SELECT llm_complete(
+       {{'model_name': 'corpus_model'}},
+       'You are a polymath connector. Here are findings from different ' \
+       || 'research angles:' || CHR(10) \
+       || (SELECT STRING_AGG(
+            ''ANGLE '' || angle || '': '' || SUBSTR(fact, 1, 250),
+            CHR(10)
+          ) FROM (
+            SELECT angle, fact FROM conditions \
+            WHERE row_type = ''finding'' AND consider_for_use = TRUE \
+            AND composite_quality > 0.4 \
+            ORDER BY angle, composite_quality DESC LIMIT 30
+          )) \
+       || CHR(10) || 'Find UNEXPECTED connections between these angles — ' \
+       || 'convergences, hidden contradictions, or transfer opportunities ' \
+       || 'that no single specialist would notice.'
+     )),
+     'insight', 'serendipitous_cross_angle', TRUE, CURRENT_TIMESTAMP, \
+'serendipitous_connection'
+   );
+
+11. SURPRISE SCORING (pure SQL):
+    Boost findings whose content diverges from the angle consensus.  \
+Findings that are high-quality but UNEXPECTED relative to their angle \
+peers deserve extra attention.
+
+   -- Compute per-angle average composite quality
+   UPDATE conditions SET cross_ref_boost = cross_ref_boost + 0.06
+   WHERE id IN (
+     SELECT c.id FROM conditions c
+     JOIN (
+       SELECT angle, AVG(composite_quality) as avg_q, \
+STDDEV_SAMP(composite_quality) as std_q
+       FROM conditions WHERE row_type = 'finding' \
+AND consider_for_use = TRUE AND scored_at != ''
+       GROUP BY angle HAVING COUNT(*) >= 5
+     ) stats ON c.angle = stats.angle
+     WHERE c.row_type = 'finding' AND c.consider_for_use = TRUE
+       AND c.composite_quality > stats.avg_q + stats.std_q
+       AND c.novelty_score > 0.6
+   );
+
+   This nudges outlier high-novelty findings upward without overriding \
+the core scoring formula.
+
+12. CONSENSUS DETECTOR (pure SQL + conditional Flock LLM):
+    Check whether the corpus shows one-sided consensus — many findings \
+but zero contradictions.  If so, spawn a targeted dissent-seeker.
+
+   -- Step A: detect consensus
+   SELECT
+     (SELECT COUNT(*) FROM conditions WHERE row_type = 'finding' \
+AND consider_for_use = TRUE) AS total_findings,
+     (SELECT COUNT(*) FROM conditions WHERE contradiction_flag = TRUE \
+AND consider_for_use = TRUE) AS contradictions;
+
+   -- Step B: if total_findings > 10 AND contradictions = 0, spawn dissent:
+   INSERT INTO conditions (id, fact, row_type, angle, consider_for_use, \
+created_at, strategy)
+   VALUES (
+     nextval('seq'),
+     (SELECT llm_complete(
+       {{'model_name': 'corpus_model'}},
+       'The research corpus has ' || '<N>' || ' findings and ZERO ' \
+       || 'contradictions. This is suspicious. Generate 3-5 specific, ' \
+       || 'falsifiable counter-claims that a rigorous sceptic would ' \
+       || 'investigate. For each, name the specific finding it challenges ' \
+       || 'and what evidence would disprove it. Here are the top findings: ' \
+       || (SELECT STRING_AGG(SUBSTR(fact, 1, 200), '; ') \
+           FROM (SELECT fact FROM conditions \
+                 WHERE row_type = ''finding'' AND consider_for_use = TRUE \
+                 ORDER BY composite_quality DESC LIMIT 15))
+     )),
+     'thought', 'serendipitous_dissent', TRUE, CURRENT_TIMESTAMP, \
+'serendipitous_dissent'
+   );
+
+13. ANGLE DIVERSITY BOOST (pure SQL):
+    Findings from underrepresented angles get a small quality nudge, \
+rewarding breadth of perspective alongside depth.
+
+   -- For each angle, boost findings proportional to how rare that angle is:
+   UPDATE conditions SET cross_ref_boost = cross_ref_boost + (
+     0.08 * (1.0 - (
+       (SELECT COUNT(*) FROM conditions c2 \
+        WHERE c2.angle = conditions.angle AND c2.row_type = 'finding' \
+        AND c2.consider_for_use = TRUE)
+       / CAST(
+         (SELECT MAX(cnt) FROM (SELECT COUNT(*) as cnt FROM conditions \
+          WHERE row_type = 'finding' AND consider_for_use = TRUE \
+          GROUP BY angle)) AS FLOAT)
+     ))
+   )
+   WHERE row_type = 'finding' AND consider_for_use = TRUE \
+AND scored_at != '' AND angle IS NOT NULL AND angle != '';
+
+   Apply once per iteration — underrepresented angles gradually surface.
+
+APPLYING SERENDIPITY: You do NOT need to run all 5 serendipity templates \
+every iteration.  Use judgement:
+  - Iteration 1: skip serendipity (too few findings)
+  - Iteration 2+: run CONSENSUS DETECTOR first; if it fires, skip \
+    CONTRARIAN CHALLENGE (they overlap)
+  - Run CROSS-ANGLE BRIDGE only when 2+ angles have 5+ findings each
+  - Run SURPRISE SCORING every iteration after scoring (it is cheap SQL)
+  - Run ANGLE DIVERSITY BOOST every iteration (also cheap SQL)
+
+BEYOND THE TEMPLATES — You are NOT limited to these 13 steps.  Based on \
 what you see in the corpus, you might:
   - CREATE new columns for domain-specific scoring
   - INSERT new rows that synthesise clusters into meta-findings
@@ -151,6 +302,9 @@ what you see in the corpus, you might:
   - RECLASSIFY findings by angle or strategy
   - Compute CUSTOM metrics the templates don't cover
   - Flag findings that need SPECIFIC types of enrichment
+  - Combine serendipity templates in novel ways — e.g. run CONTRARIAN \
+    CHALLENGE on the output of CROSS-ANGLE BRIDGE to stress-test \
+    newly discovered connections
 
 RULES:
 1. Start with assessment — understand the corpus before acting
