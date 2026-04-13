@@ -97,9 +97,30 @@ class MaestroBlock(PipelineBlock):
         except Exception:
             pass
 
+        # Pre-compute ALL corpus-derived state BEFORE the background thread
+        # starts.  DuckDB connections are not thread-safe, so every read must
+        # happen here on the main thread.  CorpusRefreshAspect skips keys
+        # that are already in state_updates, so setting them here prevents
+        # any post-block DuckDB access.
+        expansion_text = ""
+        try:
+            expansion_targets = corpus.get_expansion_targets()
+            if expansion_targets:
+                lines = ["=== ENRICHMENT TASKS (from corpus analysis) ==="]
+                for t in expansion_targets[:10]:
+                    lines.append(
+                        f"- Finding [{t['id']}] needs enrichment via "
+                        f"{t['strategy']}: {t['hint']}"
+                    )
+                lines.append("=== END ENRICHMENT TASKS ===")
+                expansion_text = "\n".join(lines)
+        except Exception:
+            logger.debug("Expansion targets computation failed (non-fatal)")
+
         state_updates = {
             "research_findings": thinker_briefing,
             "corpus_for_synthesis": corpus.format_for_synthesiser(),
+            "_expansion_targets": expansion_text,
         }
 
         # Emit corpus stats to dashboard
