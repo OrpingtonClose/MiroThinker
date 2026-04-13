@@ -1137,16 +1137,33 @@ async def run_search_executor(
     # ── Serendipity: inject contrarian query variants ──
     # Generate unexpected-but-relevant query variants that push the
     # search toward directions the thinker wouldn't have chosen.
+    # Serendipitous queries are interleaved with regular queries so
+    # they share the fan-out budget rather than being silently dropped
+    # when the thinker produces 6+ strategy queries.
     serendipitous_queries = _generate_serendipitous_queries(
         strategy_queries, user_query, "",
     )
     if serendipitous_queries:
-        strategy_queries = strategy_queries + serendipitous_queries
+        # Interleave: after every 2 regular queries, insert 1 serendipitous
+        merged: list[str] = []
+        s_idx = 0
+        for r_idx, q in enumerate(strategy_queries):
+            merged.append(q)
+            if (r_idx + 1) % 2 == 0 and s_idx < len(serendipitous_queries):
+                merged.append(serendipitous_queries[s_idx])
+                s_idx += 1
+        # Append any remaining serendipitous queries
+        while s_idx < len(serendipitous_queries):
+            merged.append(serendipitous_queries[s_idx])
+            s_idx += 1
+        strategy_queries = merged
         stats["serendipitous_queries"] = len(serendipitous_queries)
 
+    # Budget: 6 regular + up to 2 serendipitous queries
+    fan_out_cap = min(8, len(strategy_queries))
     fan_out_tasks: list[tuple[str, int]] = []
     new_queries: list[str] = []
-    for i, query in enumerate(strategy_queries[:6]):
+    for i, query in enumerate(strategy_queries[:fan_out_cap]):
         # Skip queries already executed in previous iterations
         if query.strip().lower() in executed_fps:
             stats["queries_deduped"] += 1

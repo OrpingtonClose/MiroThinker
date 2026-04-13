@@ -733,7 +733,7 @@ def _detect_cross_angle_surprises(
     for angle in angles:
         thoughts = corpus.get_thoughts_by_angle(angle)
         if thoughts:
-            latest = thoughts[-1]
+            latest = thoughts[0]
             angle_summaries.append(
                 f"SPECIALIST THOUGHT for '{angle}': {latest['fact'][:500]}"
             )
