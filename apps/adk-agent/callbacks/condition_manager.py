@@ -820,6 +820,7 @@ def build_corpus_state(db_path: str = "") -> dict:
         "_last_thinker_strategy": "",
         # Cumulative cost tracking (P3) — only set if not already present
         # (preserved across runs by cleanup_corpus)
+        "_cumulative_api_cost": 0.0,
     }
 
 
