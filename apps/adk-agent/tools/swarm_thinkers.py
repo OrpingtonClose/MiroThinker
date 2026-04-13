@@ -759,7 +759,10 @@ class SwarmRouter:
                 # whether the specialist is signalling it has run out
                 # of new material (vs. academic prose that references
                 # prior work while making new claims).
+                # Track whether the LLM gave a definitive answer so we
+                # can fall back to substring markers when it didn't.
                 self_reported_exhaustion = False
+                llm_decided = False
                 try:
                     from utils.flock_proxy import get_flock_proxy_url
                     import json as _json
@@ -796,9 +799,15 @@ class SwarmRouter:
                             data = _json.loads(resp.read())
                         choices = data.get("choices", [])
                         answer = (choices[0]["message"]["content"] if choices else "").strip().upper()
-                        self_reported_exhaustion = "EXHAUST" in answer
+                        if "EXHAUST" in answer or "ACTIVE" in answer:
+                            self_reported_exhaustion = "EXHAUST" in answer
+                            llm_decided = True
                 except Exception:
-                    # Fallback: substring markers (less accurate)
+                    pass  # fall through to substring fallback
+
+                if not llm_decided:
+                    # Fallback: substring markers (less accurate but
+                    # always available when LLM proxy is absent or fails)
                     _exhaustion_markers = [
                         "no additional", "already covered", "nothing new",
                         "no further evidence",

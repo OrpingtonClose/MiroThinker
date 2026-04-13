@@ -1207,35 +1207,62 @@ class CorpusStore:
             # Generic word overlap misses paraphrases that use different
             # vocabulary for the same claim.  Proper nouns, numbers, and
             # technical terms are much stronger signals of topical overlap.
+            # Common sentence starters that get capitalised but are
+            # NOT proper nouns or technical terms.
+            _SIG_STOPS = {
+                "the", "this", "that", "these", "there", "their",
+                "a", "an", "in", "it", "is", "are", "for", "from",
+                "with", "has", "have", "was", "were", "will", "been",
+                "some", "many", "most", "several", "according",
+                "however", "although", "research", "studies", "recent",
+                "new", "our", "its", "other", "such", "both", "each",
+                "one", "two", "three", "four", "five", "six", "seven",
+                "eight", "nine", "ten", "more", "less", "much", "very",
+                "while", "when", "where", "what", "which", "who",
+                "how", "why", "also", "but", "yet", "nor", "not",
+                "all", "any", "no", "only", "so", "too", "than",
+                "they", "we", "he", "she", "you", "may", "can",
+                "would", "could", "should", "must", "shall", "might",
+            }
+
             def _signature_terms(text: str) -> set[str]:
-                """Extract proper nouns, numbers, and technical terms."""
+                """Extract proper nouns, numbers, and technical terms.
+
+                Filters out common sentence starters that happen to be
+                capitalised at sentence boundaries.
+                """
                 terms: set[str] = set()
                 for word in text.split():
                     clean = word.strip(".,;:!?\"'()[]")
                     if not clean:
                         continue
+                    low = clean.lower()
+                    if low in _SIG_STOPS:
+                        continue
                     # Capitalised words (proper nouns, named theories)
                     if clean[0].isupper() and len(clean) > 1:
-                        terms.add(clean.lower())
+                        terms.add(low)
                     # Numbers and measurements
                     elif any(c.isdigit() for c in clean):
-                        terms.add(clean.lower())
+                        terms.add(low)
                     # Hyphenated compound terms (technical jargon)
                     elif "-" in clean and len(clean) > 5:
-                        terms.add(clean.lower())
+                        terms.add(low)
                 return terms
 
             new_terms = _signature_terms(new_fact)
             candidates: list[tuple[int, str]] = []
             for other_id, other_fact in others:
+                other_terms = _signature_terms(other_fact)
                 # If either has very few signature terms, include as
                 # candidate — the LLM should decide
-                other_terms = _signature_terms(other_fact)
-                if not new_terms or not other_terms:
+                if len(new_terms) < 2 or len(other_terms) < 2:
                     candidates.append((other_id, other_fact))
                     continue
+                # Require >=2 shared terms to tolerate one coincidental
+                # match (e.g. a common methodology name)
                 shared = len(new_terms & other_terms)
-                if shared >= 1:
+                if shared >= 2:
                     candidates.append((other_id, other_fact))
 
             if not candidates:
