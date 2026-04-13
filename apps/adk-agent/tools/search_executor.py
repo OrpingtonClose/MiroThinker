@@ -1092,7 +1092,10 @@ def extract_search_queries(
 
     # Primary: LLM dissolution (when user_query is available)
     if user_query:
-        dissolved = _dissolve_via_llm(strategy_text, user_query)
+        try:
+            dissolved = _dissolve_via_llm(strategy_text, user_query)
+        except Exception:
+            dissolved = []
         if dissolved:
             logger.info(
                 "LLM query dissolution produced %d conceptually rich queries",
@@ -1205,30 +1208,30 @@ def _generate_serendipitous_queries(
 
     # Try LLM-powered serendipity first
     if user_query:
-        from utils.flock_proxy import get_flock_proxy_url
-        import json as _json
-        import urllib.request
+        try:
+            from utils.flock_proxy import get_flock_proxy_url
+            import json as _json
+            import urllib.request
 
-        proxy_url = get_flock_proxy_url()
-        if proxy_url:
-            prompt = _SERENDIPITY_DISSOLUTION_PROMPT.format(
-                n=n_variants,
-                user_query=user_query[:1000],
-                queries="\n".join(f"- {q}" for q in queries[:8]),
-            )
-            body = _json.dumps({
-                "model": "flock-model",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 512,
-                "temperature": 0.7,
-            }).encode()
-            req = urllib.request.Request(
-                f"{proxy_url}/v1/chat/completions",
-                data=body,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            try:
+            proxy_url = get_flock_proxy_url()
+            if proxy_url:
+                prompt = _SERENDIPITY_DISSOLUTION_PROMPT.format(
+                    n=n_variants,
+                    user_query=user_query[:1000],
+                    queries="\n".join(f"- {q}" for q in queries[:8]),
+                )
+                body = _json.dumps({
+                    "model": "flock-model",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 512,
+                    "temperature": 0.7,
+                }).encode()
+                req = urllib.request.Request(
+                    f"{proxy_url}/v1/chat/completions",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
                 with urllib.request.urlopen(req, timeout=20) as resp:
                     data = _json.loads(resp.read())
                 choices = data.get("choices", [])
@@ -1251,8 +1254,8 @@ def _generate_serendipitous_queries(
                         len(variants),
                     )
                     return variants[:n_variants + 1]
-            except Exception as exc:
-                logger.warning("LLM serendipity failed: %s", exc)
+        except Exception as exc:
+            logger.warning("LLM serendipity failed: %s", exc)
 
     # Fallback: deterministic templates
     import random

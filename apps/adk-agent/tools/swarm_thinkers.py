@@ -163,7 +163,10 @@ def extract_angles(strategy_text: str) -> list[str]:
         return []
 
     # Primary: LLM-powered angle extraction
-    angles = _extract_angles_via_llm(strategy_text)
+    try:
+        angles = _extract_angles_via_llm(strategy_text)
+    except Exception:
+        angles = []
     if angles:
         logger.info(
             "LLM angle extraction produced %d angles: %s",
