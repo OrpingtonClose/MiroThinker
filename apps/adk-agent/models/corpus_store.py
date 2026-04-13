@@ -1231,7 +1231,7 @@ class CorpusStore:
         angle_counts = self.conn.execute(
             "SELECT angle, COUNT(*) as cnt FROM conditions "
             "WHERE row_type = 'finding' AND consider_for_use = TRUE "
-            "AND angle IS NOT NULL AND angle != '' "
+            "AND angle IS NOT NULL AND angle != '' AND scored_at != '' "
             "GROUP BY angle"
         ).fetchall()
         if not angle_counts or len(angle_counts) < 2:

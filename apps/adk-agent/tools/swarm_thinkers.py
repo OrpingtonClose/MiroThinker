@@ -797,7 +797,7 @@ CONNECTION 2: [description] EVIDENCE: [finding #X, #Z]
         try:
             insight_id = corpus.admit_insight(
                 conclusion=insight_text,
-                source_thought_id=0,
+                source_thought_id=None,
                 angle="serendipitous_cross_angle",
                 grounding_ids=[int(i) for i in cited_ids],
                 iteration=iteration,
