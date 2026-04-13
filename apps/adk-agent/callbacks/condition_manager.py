@@ -602,7 +602,67 @@ def maestro_condition_callback(
 
     # Advance iteration at the loop boundary — the maestro is the last
     # agent in each LoopAgent iteration.
-    state["_corpus_iteration"] = state.get("_corpus_iteration", 0) + 1
+    iteration = state.get("_corpus_iteration", 0)
+
+    # ── Periodic synthesis ────────────────────────────────────────────
+    # After refreshing corpus state and before advancing the iteration
+    # counter, run a swarm synthesis and persist it as a thought row so
+    # the thinker can integrate cross-angle insights.
+    synthesis_interval = int(os.environ.get("SYNTHESIS_INTERVAL", "1"))
+    if iteration > 0 and iteration % synthesis_interval == 0:
+        try:
+            swarm_report = run_swarm_synthesis(state)
+            if swarm_report and swarm_report.strip():
+                corpus = _get_corpus(state)
+                corpus.admit_thought(
+                    reasoning=swarm_report,
+                    angle="periodic_synthesis",
+                    strategy="periodic_synthesis_report",
+                    iteration=iteration,
+                )
+        except Exception:
+            logger.warning("Periodic synthesis failed (non-fatal)", exc_info=True)
+
+    # ── Thought swarm cycle (async offload) ─────────────────────────────
+    # Spawn parallel specialist thinkers for angles identified by the
+    # main thinker, then arbitrate competing conclusions and split broad
+    # thoughts into focused sub-claims.  Runs in a background thread so
+    # the callback returns fast (addresses ADK guidance re: heavy callback
+    # work).  Results are written to DuckDB and visible to the thinker on
+    # the NEXT iteration (eventual consistency, not blocking).
+    try:
+        from tools.swarm_thinkers import run_swarm_cycle
+        corpus = _get_corpus(state)
+
+        # Capture state values the swarm cycle needs (avoid holding a
+        # reference to the full mutable state dict across threads).
+        swarm_state_snapshot = {
+            "_corpus_iteration": iteration,
+            "user_query": state.get("user_query", ""),
+            "research_strategy": state.get("research_strategy", ""),
+        }
+
+        def _bg_swarm() -> None:
+            """Background swarm cycle — writes directly to DuckDB."""
+            try:
+                swarm_ids = run_swarm_cycle(swarm_state_snapshot, corpus)
+                if swarm_ids:
+                    logger.info(
+                        "Background swarm produced %d new thoughts at iter %d",
+                        len(swarm_ids), iteration,
+                    )
+            except Exception:
+                logger.warning("Background swarm cycle failed (non-fatal)", exc_info=True)
+
+        swarm_thread = threading.Thread(
+            target=_bg_swarm, daemon=True, name=f"swarm-iter-{iteration}",
+        )
+        swarm_thread.start()
+        logger.debug("Swarm cycle dispatched to background thread (iter=%d)", iteration)
+    except Exception:
+        logger.warning("Swarm dispatch failed (non-fatal)", exc_info=True)
+
+    state["_corpus_iteration"] = iteration + 1
 
     return None  # preserve maestro output
 
@@ -898,3 +958,10 @@ def cleanup_corpus(state: dict) -> None:
     # messages reopen the same DuckDB file.  _get_corpus() lazily
     # recreates the CorpusStore from the surviving _corpus_db_path.
     # "Runs are episodes, the swarm is eternal." (PR #54 architecture)
+
+    # Reset the swarm router so the next pipeline run starts fresh.
+    try:
+        from tools.swarm_thinkers import reset_swarm_router
+        reset_swarm_router()
+    except Exception:
+        pass

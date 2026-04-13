@@ -24,6 +24,7 @@ import json as _json
 import logging
 import os
 import re
+import threading
 import time
 import urllib.request
 from collections import defaultdict
@@ -127,6 +128,7 @@ class CorpusStore:
 
         self._setup_tables()
         self._next_id = self._compute_next_id()
+        self._write_lock = threading.Lock()
 
         # -- Tracing context (set by caller before battery runs) --
         self._trace_session_id: str = ""
@@ -528,6 +530,208 @@ class CorpusStore:
             if cid is not None:
                 ids.append(cid)
         return ids
+
+    def admit_thought(
+        self,
+        reasoning: str,
+        parent_thought_id: int | None = None,
+        angle: str = "",
+        strategy: str = "",
+        iteration: int = 0,
+        expansion_depth: int = 0,
+    ) -> int:
+        """Persist a full reasoning trace as a ``row_type='thought'`` row.
+
+        Thought rows form parent-child lineage chains via ``parent_id``.
+        They are IMMUTABLE — the maestro must never UPDATE, DELETE, or
+        set ``consider_for_use=FALSE`` on them.
+
+        Thread-safe: uses ``_write_lock`` so parallel specialist thinkers
+        can call this concurrently without ID collisions.
+
+        Returns the new row's ID.
+        """
+        fact = reasoning.strip()
+        if not fact:
+            raise ValueError("Cannot admit empty thought")
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self._write_lock:
+            cid = self._next_id
+            self._next_id += 1
+            self.conn.execute(
+                """INSERT INTO conditions
+                   (id, fact, row_type, parent_id, angle, strategy,
+                    iteration, expansion_depth, consider_for_use, created_at)
+                   VALUES (?, ?, 'thought', ?, ?, ?, ?, ?, TRUE, ?)""",
+                [cid, fact, parent_thought_id, angle, strategy,
+                 iteration, expansion_depth, now],
+            )
+        logger.debug("Admitted thought #%d: %d chars (parent=%s)", cid, len(fact), parent_thought_id)
+        return cid
+
+    def get_latest_thought(self, angle: str | None = None) -> dict | None:
+        """Return the most recent ``row_type='thought'`` row, or None.
+
+        Optionally filtered by *angle* (e.g. a specific agent name).
+        """
+        if angle is not None:
+            rows = self.conn.execute(
+                """SELECT * FROM conditions
+                   WHERE row_type = 'thought' AND angle = ?
+                   ORDER BY id DESC LIMIT 1""",
+                [angle],
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT * FROM conditions
+                   WHERE row_type = 'thought'
+                   ORDER BY id DESC LIMIT 1""",
+            ).fetchall()
+        if not rows:
+            return None
+        cols = [d[0] for d in self.conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'conditions' ORDER BY ordinal_position"
+        ).fetchall()]
+        return dict(zip(cols, rows[0]))
+
+    def admit_insight(
+        self,
+        conclusion: str,
+        source_thought_id: int,
+        angle: str = "",
+        grounding_ids: list[int] | None = None,
+        iteration: int = 0,
+    ) -> int:
+        """Materialize an evidence-grounded insight as ``row_type='insight'``.
+
+        Insight rows bridge the epistemic gap between internal reasoning
+        (thoughts) and the synthesiser's evidence base.  Unlike thoughts,
+        insights are:
+        - Visible to the synthesiser (they are evidence-grounded conclusions)
+        - Grounded in specific finding-row IDs (stored in ``strategy`` field)
+        - Linked to their source thought via ``parent_id``
+
+        Thread-safe: uses ``_write_lock``.
+
+        Args:
+            conclusion: The materialized conclusion text.
+            source_thought_id: The arbitration verdict thought that produced
+                this insight.
+            angle: Research angle this insight belongs to.
+            grounding_ids: List of finding-row IDs that support this insight.
+            iteration: Pipeline iteration number.
+
+        Returns the new row's ID.
+        """
+        fact = conclusion.strip()
+        if not fact:
+            raise ValueError("Cannot admit empty insight")
+
+        grounding_str = ",".join(str(i) for i in (grounding_ids or []))
+        strategy = f"grounded_insight|findings:{grounding_str}"
+        now = datetime.now(timezone.utc).isoformat()
+        with self._write_lock:
+            cid = self._next_id
+            self._next_id += 1
+            self.conn.execute(
+                """INSERT INTO conditions
+                   (id, fact, row_type, parent_id, angle, strategy,
+                    iteration, expansion_depth, consider_for_use, created_at)
+                   VALUES (?, ?, 'insight', ?, ?, ?, ?, 0, TRUE, ?)""",
+                [cid, fact, source_thought_id, angle, strategy,
+                 iteration, now],
+            )
+        logger.debug(
+            "Admitted insight #%d from thought #%d (grounded in %d findings)",
+            cid, source_thought_id, len(grounding_ids or []),
+        )
+        return cid
+
+    def get_thoughts_by_angle(self, angle: str) -> list[dict]:
+        """Return all thought rows for a given *angle*, newest first."""
+        rows = self.conn.execute(
+            """SELECT id, fact, angle, strategy, iteration,
+                      expansion_depth, parent_id, created_at
+               FROM conditions
+               WHERE row_type = 'thought' AND angle = ?
+               ORDER BY id DESC""",
+            [angle],
+        ).fetchall()
+        cols = [
+            "id", "fact", "angle", "strategy", "iteration",
+            "expansion_depth", "parent_id", "created_at",
+        ]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def get_thought_chain(self, thought_id: int) -> list[dict]:
+        """Walk the parent chain from *thought_id* up to the root.
+
+        Returns a list ordered root-first (oldest ancestor first).
+        """
+        chain: list[dict] = []
+        seen: set[int] = set()
+        current_id: int | None = thought_id
+        while current_id is not None and current_id not in seen:
+            seen.add(current_id)
+            row = self.conn.execute(
+                """SELECT id, fact, angle, strategy, iteration,
+                          expansion_depth, parent_id, created_at
+                   FROM conditions
+                   WHERE id = ? AND row_type = 'thought'""",
+                [current_id],
+            ).fetchone()
+            if row is None:
+                break
+            cols = [
+                "id", "fact", "angle", "strategy", "iteration",
+                "expansion_depth", "parent_id", "created_at",
+            ]
+            d = dict(zip(cols, row))
+            chain.append(d)
+            current_id = d["parent_id"]
+        chain.reverse()
+        return chain
+
+    def get_thought_children(self, parent_id: int) -> list[dict]:
+        """Return all direct child thoughts of a given thought."""
+        rows = self.conn.execute(
+            """SELECT id, fact, angle, strategy, iteration,
+                      expansion_depth, parent_id, created_at
+               FROM conditions
+               WHERE row_type = 'thought' AND parent_id = ?
+               ORDER BY id ASC""",
+            [parent_id],
+        ).fetchall()
+        cols = [
+            "id", "fact", "angle", "strategy", "iteration",
+            "expansion_depth", "parent_id", "created_at",
+        ]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def count_thoughts(self, angle: str | None = None) -> int:
+        """Count thought rows, optionally filtered by angle."""
+        if angle is not None:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions "
+                "WHERE row_type = 'thought' AND angle = ?",
+                [angle],
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions WHERE row_type = 'thought'"
+            ).fetchone()
+        return row[0] if row else 0
+
+    def get_distinct_thought_angles(self) -> list[str]:
+        """Return all distinct angle values from thought rows."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT angle FROM conditions "
+            "WHERE row_type = 'thought' AND angle != '' "
+            "ORDER BY angle"
+        ).fetchall()
+        return [r[0] for r in rows]
 
     # ------------------------------------------------------------------
     # Counting helpers
@@ -2209,10 +2413,81 @@ class CorpusStore:
         ]
         return [dict(zip(cols, row)) for row in rows]
 
-    def get_for_synthesiser(self) -> list[dict]:
-        """Return findings for the synthesiser.
+    def get_thoughts_for_thinker(self, max_per_angle: int = 5) -> list[dict]:
+        """Return a budget-governed selection of thought rows for the thinker.
 
-        Stricter than thinker: also excludes high fabrication risk.
+        Retrieval governance rules:
+        1. **Leaf/verdict prioritization**: Arbitration verdicts and leaf
+           thoughts (no children) are prioritized over intermediate thoughts.
+        2. **Angle-scoped budgets**: At most *max_per_angle* thoughts per
+           angle, preventing context window flooding from prolific angles.
+        3. **Insight rows included**: ``row_type='insight'`` rows are always
+           included (they are evidence-grounded and compact).
+        4. **Depth cap**: Thoughts at expansion_depth > 2 are deprioritized
+           (summaries preferred over deep tree branches).
+
+        Returns a list of dicts with thought metadata.
+        """
+        # Gather all thought angles
+        angles = self.get_distinct_thought_angles()
+
+        selected: list[dict] = []
+        for angle_name in angles:
+            # Fetch thoughts for this angle, prioritizing verdicts and leaves
+            rows = self.conn.execute(
+                """SELECT id, fact, angle, strategy, iteration,
+                          expansion_depth, parent_id, created_at
+                   FROM conditions
+                   WHERE row_type = 'thought' AND angle = ?
+                     AND consider_for_use = TRUE
+                   ORDER BY
+                     -- Verdicts first, then leaf thoughts, then others
+                     CASE
+                       WHEN strategy = 'arbitration_verdict' THEN 0
+                       WHEN id NOT IN (
+                         SELECT DISTINCT parent_id FROM conditions
+                         WHERE parent_id IS NOT NULL AND row_type = 'thought'
+                       ) THEN 1
+                       ELSE 2
+                     END,
+                     -- Prefer shallower depth
+                     expansion_depth ASC,
+                     -- Most recent first within priority tier
+                     id DESC
+                   LIMIT ?""",
+                [angle_name, max_per_angle],
+            ).fetchall()
+            cols = [
+                "id", "fact", "angle", "strategy", "iteration",
+                "expansion_depth", "parent_id", "created_at",
+            ]
+            selected.extend(dict(zip(cols, r)) for r in rows)
+
+        # Also include all insight rows (compact, evidence-grounded)
+        insight_rows = self.conn.execute(
+            """SELECT id, fact, angle, strategy, iteration,
+                      expansion_depth, parent_id, created_at
+               FROM conditions
+               WHERE row_type = 'insight' AND consider_for_use = TRUE
+               ORDER BY id DESC
+               LIMIT 20""",
+        ).fetchall()
+        insight_cols = [
+            "id", "fact", "angle", "strategy", "iteration",
+            "expansion_depth", "parent_id", "created_at",
+        ]
+        selected.extend(dict(zip(insight_cols, r)) for r in insight_rows)
+
+        return selected
+
+    def get_for_synthesiser(self) -> list[dict]:
+        """Return findings and insights for the synthesiser.
+
+        Stricter than thinker: excludes high fabrication risk and
+        thought rows (the synthesiser works from findings, not internal
+        reasoning).  INCLUDES ``row_type='insight'`` rows — these are
+        evidence-grounded conclusions materialized from arbitration,
+        safe for the synthesiser to consume.
         """
         rows = self.conn.execute(
             """SELECT id, fact, source_url, confidence, trust_score,
@@ -2228,7 +2503,7 @@ class CorpusStore:
                       staleness_penalty, processing_status
                FROM conditions
                WHERE consider_for_use = TRUE
-                 AND row_type = 'finding'
+                 AND row_type IN ('finding', 'insight')
                  AND fabrication_risk < 0.80
                ORDER BY composite_quality DESC, confidence DESC, id ASC"""
         ).fetchall()
@@ -2575,6 +2850,63 @@ class CorpusStore:
             f"{len(contradictions)} contradictions. "
             f"{awaiting} awaiting enrichment."
         )
+
+        # ------ Layer 4: Specialist thought briefing (budget-governed) --
+        thought_rows = self.get_thoughts_for_thinker()
+        if thought_rows:
+            lines.append("")
+            lines.append("=" * 60)
+            lines.append("LAYER 4: SPECIALIST THOUGHTS AND INSIGHTS")
+            lines.append("=" * 60)
+            lines.append("")
+
+            # Separate insights from thoughts
+            insights = [t for t in thought_rows if "grounded_insight" in (t.get("strategy") or "")]
+            thoughts = [t for t in thought_rows if "grounded_insight" not in (t.get("strategy") or "")]
+
+            if insights:
+                lines.append("EVIDENCE-GROUNDED INSIGHTS (safe for synthesis):")
+                for ins in insights:
+                    lines.append(
+                        f"  [insight #{ins['id']}, angle={ins['angle']}]: "
+                        f"{ins['fact'][:500]}"
+                    )
+                lines.append("")
+
+            # Group thoughts by angle
+            by_angle: dict[str, list[dict]] = defaultdict(list)
+            for t in thoughts:
+                by_angle[t.get("angle", "")].append(t)
+
+            for angle_name, angle_thoughts in sorted(by_angle.items()):
+                verdicts = [t for t in angle_thoughts if t["strategy"] == "arbitration_verdict"]
+                specialists = [t for t in angle_thoughts if t["strategy"] != "arbitration_verdict"]
+
+                lines.append(f"ANGLE: {angle_name} ({len(angle_thoughts)} thoughts)")
+                if verdicts:
+                    lines.append("  VERDICTS (arbitrated conclusions):")
+                    for v in verdicts:
+                        lines.append(
+                            f"    [thought #{v['id']}, iter={v['iteration']}]: "
+                            f"{v['fact'][:400]}"
+                        )
+                if specialists:
+                    lines.append("  SPECIALIST ANALYSIS:")
+                    for s in specialists:
+                        depth_tag = f" depth={s['expansion_depth']}" if s.get("expansion_depth", 0) > 0 else ""
+                        lines.append(
+                            f"    [thought #{s['id']}, iter={s['iteration']}"
+                            f"{depth_tag}]: {s['fact'][:300]}"
+                        )
+                lines.append("")
+
+            lines.append(
+                f"THOUGHT HEALTH: {len(thought_rows)} thoughts shown "
+                f"({len(insights)} insights, "
+                f"{sum(1 for t in thoughts if t['strategy'] == 'arbitration_verdict')} verdicts, "
+                f"{sum(1 for t in thoughts if t['strategy'] == 'specialist_analysis')} specialist). "
+                f"Budget: {len(by_angle)} angles."
+            )
 
         result = "\n".join(lines)
 

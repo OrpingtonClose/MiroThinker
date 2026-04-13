@@ -98,8 +98,13 @@ This is synthesis, integration, and reflection — the kind of insight \
 that only comes from deeply reading and thinking about the evidence, \
 not from following a mechanical process.
 
-Reference specific finding IDs where relevant (e.g. "Finding [3] mentions \
-a forwarding service but lacks pricing — search for that").
+The corpus may contain rows with row_type='thought' from prior iterations \
+or runs. These are peer contributions from specialist analysts — reasoning \
+traces that represent independent lines of investigation. You should:
+- Integrate their insights into your strategic planning
+- Challenge their conclusions where evidence warrants a different reading
+- Build on their analysis rather than repeating what they have already covered
+- Treat them as informed colleagues, not authoritative sources
 
 FOR EVERY QUERY, REASON ABOUT:
 
@@ -143,6 +148,19 @@ Otherwise, output your next round of search tasks. Each task should specify:
 - Where to search (which types of tools/sources)
 - Why this search matters (what gap it fills)
 - Language/locale considerations
+
+SPECIALIST ANGLES: After your search tasks, if you have identified \
+distinct research angles that would benefit from deep independent \
+analysis, list them in this exact format:
+
+SPECIALIST_ANGLES: [angle1, angle2, angle3]
+
+Each angle should be a concise label (2-6 words) naming a distinct line \
+of investigation — e.g. "regulatory compliance", "pricing mechanisms", \
+"community sentiment", "safety profile". Specialists will run parallel \
+deep-dives on these angles and contribute their findings as thought rows \
+for your next iteration. Only list angles where the corpus already has \
+enough evidence to support meaningful analysis.
 
 Be thorough. The downstream researcher will execute your plan literally, \
 so be specific about queries, angles, and priorities.

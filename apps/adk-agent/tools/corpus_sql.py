@@ -179,7 +179,9 @@ async def execute_flock_sql(query: str, tool_context: ToolContext) -> str:
       created_at, scored_at, staleness_penalty, cross_ref_boost,
       contradiction_flag, contradiction_partner, obsolete_reason
 
-    Row types: 'finding', 'similarity', 'contradiction', 'raw', 'synthesis'
+    Row types: 'finding', 'similarity', 'contradiction', 'raw', 'synthesis', 'thought', 'insight'
+    Note: 'thought' rows are IMMUTABLE — do not UPDATE or DELETE them.
+    Note: 'insight' rows are evidence-grounded conclusions from arbitration — treat as findings.
 
     Processing statuses: 'raw', 'scored', 'analysed', 'ready', 'merged'
 
@@ -199,6 +201,30 @@ async def execute_flock_sql(query: str, tool_context: ToolContext) -> str:
 
     # Fix unescaped single quotes (LLMs write Anna's not Anna''s)
     query = _fix_unescaped_quotes(query)
+
+    # Soft guard: warn (but do not block) if the query mutates thought or insight rows.
+    # The maestro is trusted, but violations should be visible in logs.
+    _ql = query.lower()
+    if re.search(r"update\s+conditions\b.*\brow_type\s*=\s*'thought'", _ql, re.DOTALL):
+        logger.warning(
+            "THOUGHT SOVEREIGNTY: UPDATE on thought rows detected — "
+            "thought rows should be IMMUTABLE. Query: %.200s", query,
+        )
+    if re.search(r"delete\s+from\s+conditions\b.*\brow_type\s*=\s*'thought'", _ql, re.DOTALL):
+        logger.warning(
+            "THOUGHT SOVEREIGNTY: DELETE on thought rows detected — "
+            "thought rows should be IMMUTABLE. Query: %.200s", query,
+        )
+    if re.search(r"update\s+conditions\b.*\brow_type\s*=\s*'insight'", _ql, re.DOTALL):
+        logger.warning(
+            "INSIGHT SOVEREIGNTY: UPDATE on insight rows detected — "
+            "insight rows should be IMMUTABLE. Query: %.200s", query,
+        )
+    if re.search(r"delete\s+from\s+conditions\b.*\brow_type\s*=\s*'insight'", _ql, re.DOTALL):
+        logger.warning(
+            "INSIGHT SOVEREIGNTY: DELETE on insight rows detected — "
+            "insight rows should be IMMUTABLE. Query: %.200s", query,
+        )
 
     # Detect Flock LLM queries — they can take minutes and must not block
     # the asyncio event loop (which would freeze SSE streaming).
