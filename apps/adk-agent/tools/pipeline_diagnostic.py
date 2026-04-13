@@ -42,7 +42,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import duckdb
-import litellm
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -381,7 +380,7 @@ def _llm_call(system: str, user: str) -> str:
         base_url=_BASE_URL,
     )
     response = client.chat.completions.create(
-        model="openai/gpt-4o-mini",
+        model=_MODEL,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
