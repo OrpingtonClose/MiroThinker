@@ -20,18 +20,19 @@ Every architectural layer exists to manufacture unexpected connections:
 - **The corpus itself** is a single DuckDB table with gradient-flag columns
   where nothing is ever deleted — only scored, boosted, or suppressed.
 
-The formula: **Serendipity = Unexpected AND Pleasant (adhering to the prompt)**.
+The formula: **Serendipity = Unexpected AND Relevant to the prompt**.
 
 This is not random noise.  "Unexpected" means the researcher would not
-have found it by following the obvious path.  "Pleasant" means it
-advances the user's actual research prompt — it is *useful*, not merely
-surprising.  A finding that contradicts the dominant narrative is
-serendipitous only if it deepens understanding of the topic the user
-asked about.  A random tangent to an unrelated domain is noise.
+have found it by following the obvious path.  "Relevant" means it
+serves the user's actual research prompt — it deepens, challenges, or
+reframes their inquiry.  The content may be disturbing, contradictory,
+or uncomfortable — that doesn't matter.  What matters is that it
+advances understanding of the topic the user asked about.  A random
+tangent to an unrelated domain is noise, no matter how surprising.
 
 Every architectural layer exists to maximise both sides of this equation:
 unexpectedness (multi-angle decomposition, contrarian queries, cross-angle
-bridges) and prompt-adherence (relevance scoring, quality gates, the
+bridges) and prompt-relevance (relevance scoring, quality gates, the
 thinker's angle assignments that tie everything back to the user's query).
 
 ---
@@ -457,8 +458,8 @@ battery and search fan-out continue unchanged.
 1. **Serendipity is not a feature — it is the architecture.**
    Every layer generates surprises, from search query templates to
    the maestro's free-form SQL invention.  But surprises must be
-   *pleasant* — they must serve the user's research prompt.  Raw
-   unexpectedness without prompt-adherence is noise, not serendipity.
+   *relevant* — they must serve the user's research prompt.  Raw
+   unexpectedness without prompt-relevance is noise, not serendipity.
 
 2. **Flock makes new ideas trivially implementable.**
    A new scoring heuristic is a SQL UPDATE.  A new analysis pattern
@@ -494,11 +495,13 @@ battery and search fan-out continue unchanged.
    the swarm's architecture is *designed* to produce friction
    that generates unexpected insights.
 
-8. **Unexpected AND pleasant — always both.**
+8. **Unexpected AND relevant — always both.**
    Every serendipity mechanism has a built-in relevance anchor.
    Contrarian queries are derived from the user's query, not
    random topics.  Cross-angle bridges cite specific findings
    from the user's research.  Diversity boost rewards rare angles
    *that the thinker assigned* — angles the user's query demands.
    The system never chases novelty for its own sake.  It chases
-   novelty that serves the prompt.
+   novelty that serves the prompt.  The findings may be unsettling
+   or uncomfortable — serendipity is not about pleasantness, it is
+   about relevance the researcher would not have found alone.
