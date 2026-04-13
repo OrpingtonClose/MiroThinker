@@ -77,11 +77,12 @@ class ThinkerBlock(PipelineBlock):
                 new_history = new_history[-2000:]
             state["_prev_thinker_strategies"] = new_history
 
-        # Count extractable queries for metrics
+        # Count extractable queries for metrics (regex-only — fast, no LLM).
+        # The full LLM dissolution happens later in SearchExecutorBlock;
+        # we only need a rough count here for observability.
         try:
-            from tools.search_executor import extract_search_queries
-            user_query = state.get("user_query", "")
-            queries = extract_search_queries(strategy, user_query=user_query)
+            from tools.search_executor import _regex_extract_queries
+            queries = _regex_extract_queries(strategy)
             metrics["extractable_queries"] = len(queries)
         except Exception:
             metrics["extractable_queries"] = 0
