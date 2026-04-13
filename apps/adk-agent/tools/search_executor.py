@@ -1159,8 +1159,8 @@ async def run_search_executor(
         strategy_queries = merged
         stats["serendipitous_queries"] = len(serendipitous_queries)
 
-    # Budget: 6 regular + up to 2 serendipitous queries
-    fan_out_cap = min(8, len(strategy_queries))
+    # Budget: 6 regular + however many serendipitous queries were injected
+    fan_out_cap = min(6 + len(serendipitous_queries), len(strategy_queries))
     fan_out_tasks: list[tuple[str, int]] = []
     new_queries: list[str] = []
     for i, query in enumerate(strategy_queries[:fan_out_cap]):
