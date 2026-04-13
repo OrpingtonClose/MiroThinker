@@ -801,7 +801,7 @@ class SwarmRouter:
                         with urllib.request.urlopen(req, timeout=10) as resp:
                             data = _json.loads(resp.read())
                         choices = data.get("choices", [])
-                        answer = (choices[0]["message"]["content"] if choices else "").strip().upper()
+                        answer = (choices[0]["message"]["content"] if choices else "").strip().strip(".,!?\n").upper()
                         if answer == "EXHAUSTED":
                             self_reported_exhaustion = True
                             llm_decided = True
