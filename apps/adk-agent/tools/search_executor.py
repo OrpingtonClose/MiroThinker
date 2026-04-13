@@ -868,9 +868,49 @@ def _select_diverse_urls(
 
 
 # ---------------------------------------------------------------------------
-# Strategy query extraction
+# Unicode sanitisation for ASCII-sensitive APIs
 # ---------------------------------------------------------------------------
 
+def _sanitise_query_for_api(query: str) -> str:
+    """Replace Unicode characters that break search APIs with ASCII equivalents.
+
+    Smart quotes, em-dashes, and other typographic characters cause 422
+    errors on Jina, Semantic Scholar, and arXiv.  This is an architectural
+    guardrail — not a one-off fix for a single character.
+    """
+    replacements = {
+        "\u2014": "--",   # em-dash
+        "\u2013": "-",    # en-dash
+        "\u2018": "'",    # left single quote
+        "\u2019": "'",    # right single quote
+        "\u201c": '"',    # left double quote
+        "\u201d": '"',    # right double quote
+        "\u2026": "...",  # ellipsis
+        "\u00e9": "e",    # e-acute
+        "\u00e8": "e",    # e-grave
+        "\u00fc": "u",    # u-umlaut
+        "\u00f6": "o",    # o-umlaut
+        "\u00e4": "a",    # a-umlaut
+    }
+    for char, replacement in replacements.items():
+        query = query.replace(char, replacement)
+    return query.encode("ascii", errors="replace").decode("ascii")
+
+
+# ---------------------------------------------------------------------------
+# Strategy query extraction — LLM-powered deep dissolution
+#
+# The old approach used 7 regex patterns to shred the thinker's prose
+# into fragments.  This produced shallow, generic search terms like
+# "research strategy" or "exact match" that pulled in Elasticsearch
+# docs and HBR strategy articles instead of neuropsychoanalysis papers.
+#
+# The new approach uses an LLM call to deeply deconstruct the user's
+# query AND the thinker's strategy into conceptually rich, specific
+# search queries that encode the full interdisciplinary depth.
+# ---------------------------------------------------------------------------
+
+# Regex fallback patterns (used ONLY when LLM dissolution fails)
 _QUERY_PATTERNS = [
     re.compile(r"(?:SEARCH_)?QUERY:\s*['\"]?(.+?)['\"]?\s*$", re.M),
     re.compile(r"[Ss]earch\s+(?:for\s+)?['\"]?(.+?)['\"]?\s*(?:\.|$)", re.M),
@@ -885,10 +925,121 @@ _QUERY_PATTERNS = [
 ]
 
 
-def extract_search_queries(strategy_text: str) -> list[str]:
-    """Extract search queries from the thinker's research strategy.
+_DISSOLUTION_PROMPT = """\
+You are a research librarian with deep expertise across every academic field.
+Your task: dissolve a research question and strategy into precise, specific
+search queries that will retrieve the exact scholarly and specialist sources
+needed.
 
-    Returns deduplicated queries, capped at 10.
+RULES:
+- Each query must be CONCEPTUALLY RICH: use the actual technical terms,
+  named theorists, specific mechanisms, journal-quality language.
+- NEVER produce generic queries like "research strategy" or "energy allocation".
+  These retrieve business/tech content, not the interdisciplinary scholarship
+  the user needs.
+- Each query should target a DIFFERENT facet or discipline of the question.
+- Include the proper nouns, named theories, specific biological pathways,
+  philosophical concepts, and cross-disciplinary bridges that a domain expert
+  would search for.
+- Aim for 6-10 queries, each 8-25 words.
+- For interdisciplinary questions, make sure queries span ALL relevant fields
+  (e.g. neuroscience AND psychoanalysis AND philosophy AND biology).
+- Output ONLY the queries, one per line, prefixed with "QUERY: ".
+  No commentary, no numbering, no explanation.
+
+EXAMPLE -- for a question about Lacan's psychic economy and metabolic theory:
+QUERY: Lacanian Real as autonomic dysregulation dorsal vagal shutdown polyvagal theory
+QUERY: jouissance allostatic overload metabolic cost psychoanalytic neuropsychoanalysis
+QUERY: "subject supposed to know" transferential safety signaling ventral vagal engagement
+QUERY: mTOR pathway growth signaling polyvagal safe-enough-to-grow neurobiological
+QUERY: Porges polyvagal theory Lacan Symbolic order cortical narrative regulation
+QUERY: imaginary register mirror stage interoception body schema neuroscience
+QUERY: psychoanalytic economy libido as metabolic energy Freud beyond pleasure principle
+QUERY: dorsal vagal conservation trauma freeze response dissociation neurobiology
+
+Now dissolve this:
+
+USER QUERY:
+{user_query}
+
+THINKER STRATEGY:
+{strategy}
+"""
+
+
+def _dissolve_via_llm(
+    strategy_text: str,
+    user_query: str,
+) -> list[str]:
+    """Use LLM to dissolve strategy into conceptually rich search queries.
+
+    Calls the Flock proxy (same LiteLLM backend used for scoring) to
+    deeply deconstruct the user's query and thinker strategy into
+    search queries that encode the full conceptual depth.
+    """
+    from utils.flock_proxy import get_flock_proxy_url
+    import json as _json
+    import urllib.request
+
+    proxy_url = get_flock_proxy_url()
+    if not proxy_url:
+        return []
+
+    prompt = _DISSOLUTION_PROMPT.format(
+        user_query=user_query[:2000],
+        strategy=strategy_text[:3000],
+    )
+
+    body = _json.dumps({
+        "model": "flock-model",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1024,
+        "temperature": 0.4,
+    }).encode()
+    req = urllib.request.Request(
+        f"{proxy_url}/v1/chat/completions",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = _json.loads(resp.read())
+        choices = data.get("choices", [])
+        raw = choices[0]["message"]["content"] if choices else ""
+    except Exception as exc:
+        logger.warning("LLM query dissolution failed: %s", exc)
+        return []
+
+    # Parse QUERY: lines from the response
+    queries: list[str] = []
+    seen: set[str] = set()
+    for line in raw.split("\n"):
+        line = line.strip()
+        if line.upper().startswith("QUERY:"):
+            q = line[6:].strip().strip('"\'')
+        elif line and not line.startswith("#") and len(line) > 15:
+            # Accept bare lines too (LLM may skip the prefix)
+            q = line.strip().strip('"\'')
+        else:
+            continue
+
+        q = _sanitise_query_for_api(q)
+        if len(q) < 10 or len(q) > 250:
+            continue
+        normalised = q.lower()
+        if normalised not in seen:
+            seen.add(normalised)
+            queries.append(q)
+
+    return queries[:12]
+
+
+def _regex_extract_queries(strategy_text: str) -> list[str]:
+    """Regex fallback -- extract queries from thinker prose.
+
+    Used only when LLM dissolution is unavailable.
     """
     if not strategy_text or not strategy_text.strip():
         return []
@@ -921,6 +1072,42 @@ def extract_search_queries(strategy_text: str) -> list[str]:
                 queries.append(q)
 
     return queries[:10]
+
+
+def extract_search_queries(
+    strategy_text: str,
+    user_query: str = "",
+) -> list[str]:
+    """Extract search queries from the thinker's research strategy.
+
+    Primary path: LLM-powered deep dissolution that deconstructs the
+    query's full conceptual architecture into specific, intellectually
+    rich search queries.  Falls back to regex extraction if the LLM
+    call fails.
+
+    Returns deduplicated queries, capped at 12.
+    """
+    if not strategy_text or not strategy_text.strip():
+        return []
+
+    # Primary: LLM dissolution (when user_query is available)
+    if user_query:
+        try:
+            dissolved = _dissolve_via_llm(strategy_text, user_query)
+        except Exception:
+            dissolved = []
+        if dissolved:
+            logger.info(
+                "LLM query dissolution produced %d conceptually rich queries",
+                len(dissolved),
+            )
+            return dissolved
+        logger.warning(
+            "LLM query dissolution failed or empty -- falling back to regex"
+        )
+
+    # Fallback: regex extraction
+    return _regex_extract_queries(strategy_text)
 
 
 def _get_existing_corpus_urls(corpus: Any) -> set[str]:
@@ -974,6 +1161,33 @@ def _record_executed_queries(state: dict, queries: list[str]) -> None:
         state["_executed_query_fingerprints"] = new_fps
 
 
+_SERENDIPITY_DISSOLUTION_PROMPT = """\
+You are a contrarian intellectual provocateur.
+Given these research queries, generate {n} unexpected but deeply relevant
+alternative queries that the researcher would NEVER think to search for.
+
+These should be:
+- From adjacent or opposing fields (e.g. if the queries are about
+  psychoanalysis, try neurobiology, comparative religion, ethology)
+- Historically deep (precursor theories, forgotten debates)
+- Methodologically surprising (opposite paradigm, different species,
+  different culture)
+- Genuinely likely to surface serendipitous connections
+
+Do NOT just add "criticism of" or "debate about" — that's lazy.
+Instead, find the ADJACENT POSSIBLE: what related concept from a
+different field would illuminate this question unexpectedly?
+
+Original user question: {user_query}
+
+Current queries:
+{queries}
+
+Output ONLY the contrarian queries, one per line, prefixed with "QUERY: ".
+No commentary.
+"""
+
+
 def _generate_serendipitous_queries(
     queries: list[str],
     user_query: str,
@@ -981,21 +1195,72 @@ def _generate_serendipitous_queries(
 ) -> list[str]:
     """Generate contrarian/unexpected query variants for serendipity.
 
-    For a fraction of the strategy queries, produce structurally
-    contrarian variants that push the search toward unexpected but
-    relevant directions.  No LLM call — uses deterministic templates
-    applied to the existing queries.
+    Primary path: LLM-powered serendipity that finds the adjacent
+    possible — queries from neighbouring fields that illuminate the
+    research question from unexpected angles.
 
-    Returns additional queries (not replacements) marked for
-    serendipitous discovery.
+    Fallback: deterministic templates (better than nothing).
     """
     if not _SERENDIPITY_ENABLED or not queries:
         return []
 
-    import random
-    rng = random.Random(hash(user_query) & 0xFFFFFFFF)  # deterministic per query
+    n_variants = max(2, int(len(queries) * _SERENDIPITY_RATE))
 
-    # Templates that produce structurally contrarian queries
+    # Try LLM-powered serendipity first
+    if user_query:
+        try:
+            from utils.flock_proxy import get_flock_proxy_url
+            import json as _json
+            import urllib.request
+
+            proxy_url = get_flock_proxy_url()
+            if proxy_url:
+                prompt = _SERENDIPITY_DISSOLUTION_PROMPT.format(
+                    n=n_variants,
+                    user_query=user_query[:1000],
+                    queries="\n".join(f"- {q}" for q in queries[:8]),
+                )
+                body = _json.dumps({
+                    "model": "flock-model",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 512,
+                    "temperature": 0.7,
+                }).encode()
+                req = urllib.request.Request(
+                    f"{proxy_url}/v1/chat/completions",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    data = _json.loads(resp.read())
+                choices = data.get("choices", [])
+                raw = choices[0]["message"]["content"] if choices else ""
+                variants: list[str] = []
+                for line in raw.split("\n"):
+                    line = line.strip()
+                    if line.upper().startswith("QUERY:"):
+                        q = line[6:].strip().strip('"\'')
+                    elif line and not line.startswith("#") and len(line) > 15:
+                        q = line.strip().strip('"\'')
+                    else:
+                        continue
+                    q = _sanitise_query_for_api(q)
+                    if 10 <= len(q) <= 200:
+                        variants.append(q)
+                if variants:
+                    logger.info(
+                        "Serendipity (LLM): generated %d contrarian queries",
+                        len(variants),
+                    )
+                    return variants[:n_variants + 1]
+        except Exception as exc:
+            logger.warning("LLM serendipity failed: %s", exc)
+
+    # Fallback: deterministic templates
+    import random
+    rng = random.Random(hash(user_query) & 0xFFFFFFFF)
+
     _TEMPLATES = [
         "criticisms of {q}",
         "evidence against {q}",
@@ -1009,13 +1274,9 @@ def _generate_serendipitous_queries(
         "{q} unintended consequences OR side effects",
     ]
 
-    # Pick which queries get serendipitous variants
-    n_serendipitous = max(1, int(len(queries) * _SERENDIPITY_RATE))
-    selected = rng.sample(queries, min(n_serendipitous, len(queries)))
-
-    variants: list[str] = []
+    selected = rng.sample(queries, min(n_variants, len(queries)))
+    variants = []
     for q in selected:
-        # Shorten the query for template insertion (first 80 chars)
         short_q = q[:80].strip()
         template = rng.choice(_TEMPLATES)
         variant = template.replace("{q}", short_q)
@@ -1024,7 +1285,7 @@ def _generate_serendipitous_queries(
 
     if variants:
         logger.info(
-            "Serendipity: generated %d contrarian query variants from %d queries",
+            "Serendipity (template fallback): generated %d variants from %d queries",
             len(variants), len(selected),
         )
 
@@ -1132,7 +1393,7 @@ async def run_search_executor(
             stats["expansion_searches"] += 1
 
     # A2. Strategy queries -- fan-out to multiple APIs
-    strategy_queries = extract_search_queries(strategy)
+    strategy_queries = extract_search_queries(strategy, user_query=user_query)
 
     # ── Serendipity: inject contrarian query variants ──
     # Generate unexpected-but-relevant query variants that push the

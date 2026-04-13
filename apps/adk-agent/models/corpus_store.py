@@ -1001,73 +1001,128 @@ class CorpusStore:
     ) -> None:
         """Score a single condition across all gradient dimensions.
 
-        All 6-7 scoring prompts are batched into a single parallel call
+        All 7 scoring prompts are batched into a single parallel call
         via ``_http_complete_batch()`` so they execute concurrently
-        instead of sequentially (6-7x speedup per condition).
+        instead of sequentially (7x speedup per condition).
+
+        Every prompt includes the user's research question so the LLM
+        can calibrate scores relative to the actual topic.  Without
+        this context, all findings received identical scores because
+        the LLM had no frame of reference for what "relevant" or
+        "novel" meant.
         """
         url_text = source_url if source_url else "(no URL)"
+        # Truncate for prompt budget (fact can be long)
+        fact_short = fact[:800]
+        query_ctx = (
+            f"Research question: {user_query[:500]}\n" if user_query else ""
+        )
 
-        # Build all scoring prompts up front
+        # Build all scoring prompts up front — each one is query-aware
         prompts: list[tuple[str, str]] = [
             (
-                "Rate the confidence of this research finding on a scale "
-                "from 0.0 to 1.0. Consider: Is it specific? Does it cite "
-                "sources? Is the language hedged or definitive? Return "
-                "ONLY a decimal number, nothing else. "
-                "Finding: " + fact,
+                f"{query_ctx}"
+                "Rate the confidence of this research finding on 0.0-1.0.\n"
+                "Consider: Does it make specific, verifiable claims? "
+                "Does it cite named sources, studies, or data? "
+                "Is the language hedged ('may', 'might') or definitive?\n"
+                "0.2 = vague opinion with no evidence. "
+                "0.5 = plausible claim with some support. "
+                "0.8 = specific claim citing named studies/data. "
+                "1.0 = verifiable fact with exact citations.\n"
+                "Return ONLY a decimal number.\n"
+                f"Finding: {fact_short}",
                 "score_confidence",
             ),
             (
-                "Rate the trustworthiness of this source URL on a scale "
-                "from 0.0 to 1.0. Academic/government = high, established "
-                "news = medium-high, forums/social = medium, unknown/no "
-                "URL = low. Return ONLY a decimal number. "
-                "URL: " + url_text,
+                f"{query_ctx}"
+                "Rate the trustworthiness of this source on 0.0-1.0.\n"
+                "0.1 = no URL or obviously unreliable. "
+                "0.3 = blog/forum/social media. "
+                "0.5 = established news outlet. "
+                "0.7 = professional/institutional source. "
+                "0.9 = peer-reviewed journal, government data, or "
+                "primary academic source.\n"
+                "Return ONLY a decimal number.\n"
+                f"URL: {url_text}",
                 "score_trust",
             ),
             (
-                "Rate how specific and concrete this finding is on 0.0 to "
-                "1.0. 1.0 = contains exact names, numbers, dates, URLs. "
-                "0.0 = vague generality with no concrete data. Return "
-                "ONLY a decimal number. "
-                "Finding: " + fact,
+                f"{query_ctx}"
+                "Rate how specific and concrete this finding is on 0.0-1.0.\n"
+                "0.1 = completely generic ('experts say it matters'). "
+                "0.3 = names a concept but no data or specifics. "
+                "0.5 = mentions specific mechanisms or named theories. "
+                "0.7 = includes names, dates, numbers, or citations. "
+                "1.0 = contains exact data points, measurements, or "
+                "direct quotes with attribution.\n"
+                "Return ONLY a decimal number.\n"
+                f"Finding: {fact_short}",
                 "score_specificity",
             ),
             (
-                "Rate the risk that this finding is "
-                "fabricated/hallucinated on 0.0 to 1.0. "
-                "0.0 = clearly grounded in real sources. "
-                "1.0 = likely made up, no verifiable details. Consider: "
-                "Does it cite a real URL? Are the claims verifiable? "
-                "Return ONLY a decimal number. "
-                "Finding: " + fact + " Source: " + url_text,
+                f"{query_ctx}"
+                "Rate the fabrication risk of this finding on 0.0-1.0.\n"
+                "0.0 = clearly grounded in verifiable, real sources. "
+                "0.3 = plausible but hard to verify independently. "
+                "0.6 = suspicious — mixes real concepts with "
+                "unverifiable claims. "
+                "1.0 = likely fabricated — names fake studies, "
+                "impossible statistics, or hallucinates details.\n"
+                "Return ONLY a decimal number.\n"
+                f"Finding: {fact_short}\nSource: {url_text}",
                 "score_fabrication",
             ),
             (
-                "Rate how novel this finding is on 0.0 to 1.0. "
-                "1.0 = completely new information not commonly known. "
-                "0.0 = widely known, obvious, or trivial. "
-                "Return ONLY a decimal number. "
-                "Finding: " + fact,
+                f"{query_ctx}"
+                "Rate how novel this finding is on 0.0-1.0.\n"
+                "Consider novelty RELATIVE TO the research question — "
+                "common knowledge about an obscure topic is still novel "
+                "if it's not widely cross-referenced.\n"
+                "0.1 = textbook knowledge anyone in the field knows. "
+                "0.3 = well-known within the discipline. "
+                "0.5 = known to specialists but crosses disciplines "
+                "in a useful way. "
+                "0.8 = unusual connection or rarely cited finding. "
+                "1.0 = genuinely surprising or contrarian.\n"
+                "Return ONLY a decimal number.\n"
+                f"Finding: {fact_short}",
                 "score_novelty",
             ),
             (
-                "Rate how actionable this finding is on 0.0 to 1.0. "
-                "1.0 = directly usable, contains specific steps or data. "
-                "0.0 = purely informational with no actionable content. "
-                "Return ONLY a decimal number. "
-                "Finding: " + fact,
+                f"{query_ctx}"
+                "Rate how actionable this finding is for the research "
+                "question on 0.0-1.0.\n"
+                "0.1 = purely background context, no usable content. "
+                "0.3 = informational but not directly applicable. "
+                "0.5 = provides a useful reference or framework. "
+                "0.8 = contains specific evidence or arguments that "
+                "directly address the research question. "
+                "1.0 = a key finding that could change the direction "
+                "of the research.\n"
+                "Return ONLY a decimal number.\n"
+                f"Finding: {fact_short}",
                 "score_actionability",
             ),
         ]
 
-        # Conditionally add relevance scoring if we have a user query
+        # Conditionally add relevance scoring — needs a user query to
+        # evaluate against; without one the LLM has no frame of reference
         has_relevance = bool(user_query)
         if has_relevance:
             prompts.append((
-                "Rate how relevant this finding is to the user query "
-                "on 0.0 to 1.0. Return ONLY a decimal number. "
-                "Query: " + user_query + " Finding: " + fact,
+                f"{query_ctx}"
+                "Rate how relevant this finding is to the research "
+                "question on 0.0-1.0.\n"
+                "Score based on genuine conceptual connection to the "
+                "research question — not surface keyword overlap.\n"
+                "0.0 = completely off-topic, no conceptual connection. "
+                "0.2 = shares a keyword but different domain entirely. "
+                "0.5 = tangentially related, same broad field. "
+                "0.7 = directly addresses a sub-question. "
+                "1.0 = core finding that precisely answers the query.\n"
+                "Return ONLY a decimal number.\n"
+                f"Finding: {fact_short}",
                 "score_relevance",
             ))
 
@@ -1081,7 +1136,10 @@ class CorpusStore:
         fabrication = self._parse_float(responses[3], 0.0)
         novelty = self._parse_float(responses[4], 0.5)
         actionability = self._parse_float(responses[5], 0.5)
-        relevance = self._parse_float(responses[6], 0.5) if has_relevance else 0.5
+        relevance = (
+            self._parse_float(responses[6], 0.5)
+            if has_relevance else 0.5
+        )
 
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
@@ -1119,9 +1177,9 @@ class CorpusStore:
         results as relationship rows (row_type='similarity') in
         the conditions table.  Returns count of pairs evaluated.
 
-        Uses a keyword-overlap pre-filter to skip obviously unrelated
-        pairs, then batches the remaining LLM comparisons in parallel
-        via ``_http_complete_batch()``.
+        Uses a proper-noun / technical-term pre-filter to skip obviously
+        unrelated pairs, then batches the remaining LLM comparisons in
+        parallel via ``_http_complete_batch()``.
         """
         new_ids = self.conn.execute(
             "SELECT id FROM conditions "
@@ -1144,16 +1202,68 @@ class CorpusStore:
                 [new_id, new_id],
             ).fetchall()
 
-            # Pre-filter: skip pairs with <15% keyword overlap
-            new_words = set(new_fact.lower().split())
+            # Pre-filter: use proper nouns & technical terms (not generic
+            # words) to identify candidate pairs for LLM comparison.
+            # Generic word overlap misses paraphrases that use different
+            # vocabulary for the same claim.  Proper nouns, numbers, and
+            # technical terms are much stronger signals of topical overlap.
+            # Common sentence starters that get capitalised but are
+            # NOT proper nouns or technical terms.
+            _SIG_STOPS = {
+                "the", "this", "that", "these", "there", "their",
+                "a", "an", "in", "it", "is", "are", "for", "from",
+                "with", "has", "have", "was", "were", "will", "been",
+                "some", "many", "most", "several", "according",
+                "however", "although", "research", "studies", "recent",
+                "new", "our", "its", "other", "such", "both", "each",
+                "one", "two", "three", "four", "five", "six", "seven",
+                "eight", "nine", "ten", "more", "less", "much", "very",
+                "while", "when", "where", "what", "which", "who",
+                "how", "why", "also", "but", "yet", "nor", "not",
+                "all", "any", "no", "only", "so", "too", "than",
+                "they", "we", "he", "she", "you", "may", "can",
+                "would", "could", "should", "must", "shall", "might",
+            }
+
+            def _signature_terms(text: str) -> set[str]:
+                """Extract proper nouns, numbers, and technical terms.
+
+                Filters out common sentence starters that happen to be
+                capitalised at sentence boundaries.
+                """
+                terms: set[str] = set()
+                for word in text.split():
+                    clean = word.strip(".,;:!?\"'()[]")
+                    if not clean:
+                        continue
+                    low = clean.lower()
+                    if low in _SIG_STOPS:
+                        continue
+                    # Capitalised words (proper nouns, named theories)
+                    if clean[0].isupper() and len(clean) > 1:
+                        terms.add(low)
+                    # Numbers and measurements
+                    elif any(c.isdigit() for c in clean):
+                        terms.add(low)
+                    # Hyphenated compound terms (technical jargon)
+                    elif "-" in clean and len(clean) > 5:
+                        terms.add(low)
+                return terms
+
+            new_terms = _signature_terms(new_fact)
             candidates: list[tuple[int, str]] = []
             for other_id, other_fact in others:
-                other_words = set(other_fact.lower().split())
-                union_size = len(new_words | other_words)
-                if union_size > 0:
-                    overlap = len(new_words & other_words) / union_size
-                    if overlap >= 0.15:
-                        candidates.append((other_id, other_fact))
+                other_terms = _signature_terms(other_fact)
+                # If either has very few signature terms, include as
+                # candidate — the LLM should decide
+                if len(new_terms) < 2 or len(other_terms) < 2:
+                    candidates.append((other_id, other_fact))
+                    continue
+                # Require >=2 shared terms to tolerate one coincidental
+                # match (e.g. a common methodology name)
+                shared = len(new_terms & other_terms)
+                if shared >= 2:
+                    candidates.append((other_id, other_fact))
 
             if not candidates:
                 self.conn.execute(
@@ -3331,54 +3441,15 @@ class CorpusStore:
                 )
                 continue
 
-            # Semantic dedup: keyword-overlap pre-filter.
-            # If >80% of this atom's significant words appear in an
-            # existing finding, it's likely a paraphrase — skip it.
-            _stop = {
-                "the", "a", "an", "is", "are", "was", "were", "be",
-                "been", "being", "have", "has", "had", "do", "does",
-                "did", "will", "would", "could", "should", "may",
-                "might", "shall", "can", "to", "of", "in", "for",
-                "on", "with", "at", "by", "from", "as", "into",
-                "through", "during", "before", "after", "and", "but",
-                "or", "nor", "not", "so", "yet", "both", "either",
-                "neither", "each", "every", "all", "any", "few",
-                "more", "most", "other", "some", "such", "no", "only",
-                "own", "same", "than", "too", "very", "that", "this",
-                "these", "those", "it", "its", "they", "their", "them",
-                "which", "what", "who", "whom", "when", "where", "how",
-            }
-            new_words = {
-                w for w in re.findall(r'\w+', stripped.lower())
-                if len(w) > 2 and w not in _stop
-            }
-            is_semantic_dup = False
-            if len(new_words) >= 3:
-                # Check against recent findings (last 200 to keep it fast)
-                recent = self.conn.execute(
-                    "SELECT id, fact FROM conditions "
-                    "WHERE row_type = 'finding' "
-                    "AND consider_for_use = TRUE "
-                    "ORDER BY id DESC LIMIT 200",
-                ).fetchall()
-                for eid, efact in recent:
-                    existing_words = {
-                        w for w in re.findall(r'\w+', (efact or "").lower())
-                        if len(w) > 2 and w not in _stop
-                    }
-                    if not existing_words:
-                        continue
-                    overlap = len(new_words & existing_words) / len(new_words)
-                    if overlap > 0.80:
-                        logger.debug(
-                            "Semantic dedup: %.0f%% overlap with id=%d, "
-                            "skipping: %.80s",
-                            overlap * 100, eid, stripped,
-                        )
-                        is_semantic_dup = True
-                        break
-            if is_semantic_dup:
-                continue
+            # Semantic dedup: LLM-powered via compute_duplications()
+            # downstream. We deliberately do NOT pre-filter by keyword
+            # overlap here — word overlap is a bag-of-words heuristic
+            # that destroys meaning.  Two findings can share 85% of
+            # their vocabulary while making opposite claims (e.g.
+            # "mTOR signals growth when resources are abundant" vs
+            # "...when resources are scarce").  The downstream
+            # compute_duplications() uses LLM comparison to detect
+            # true semantic duplicates accurately.
 
             # Insert atom with parent_id → chunk for lineage
             cid = self._next_id
