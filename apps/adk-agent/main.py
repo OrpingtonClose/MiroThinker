@@ -465,6 +465,9 @@ async def run_pipeline(task: str) -> str:
     # InMemorySessionService deep-copies on create, so state set after
     # creation is invisible to the Runner's get_session() call.
     corpus_state = build_corpus_state()
+    # Store the user's query in state so agent instruction templates
+    # (e.g. maestro's {user_query} scoring prompt) can resolve it.
+    corpus_state["user_query"] = task
     session = await _new_session(
         session_service,
         report_mode=True,
