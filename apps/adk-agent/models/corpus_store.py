@@ -2870,14 +2870,14 @@ class CorpusStore:
             f"({len(delta)} new this iteration, {len(prior)} from prior iterations)\n",
         ]
 
-        # ── Tier 2: Condensed summary of PRIOR findings ──
+        # ── Tier 2: PRIOR findings (full detail, no truncation) ──
         if prior:
             lines.append("=" * 60)
-            lines.append("PRIOR FINDINGS (condensed summary)")
+            lines.append("PRIOR FINDINGS")
             lines.append("=" * 60)
             lines.append("")
 
-            # Group prior findings by angle/topic for compact display
+            # Group prior findings by angle/topic
             by_angle: dict[str, list[dict]] = defaultdict(list)
             for c in prior:
                 angle = c.get("angle", "") or "general"
@@ -2885,18 +2885,16 @@ class CorpusStore:
 
             for angle, findings in sorted(by_angle.items()):
                 lines.append(f"[{angle}] ({len(findings)} findings):")
-                # Show top findings by quality, one-line each
+                # Show ALL findings by quality — no cap, no truncation
                 top = sorted(
                     findings,
                     key=lambda x: x.get("composite_quality") or 0,
                     reverse=True,
-                )[:15]  # Cap at 15 per angle to keep it compact
+                )
                 for c in top:
                     q = c.get("composite_quality") or 0
                     fact = c.get("fact") or ""
                     lines.append(f"  [{c['id']}] (q={q:.2f}) {fact}")
-                if len(findings) > 15:
-                    lines.append(f"  ... and {len(findings) - 15} more findings")
                 lines.append("")
 
         # ── Tier 1: Full detail for DELTA (new) findings ──
@@ -2962,13 +2960,13 @@ class CorpusStore:
         if edges:
             lines.append("RELATIONSHIPS BETWEEN FINDINGS:")
             for src, tgt, rel in edges:
-                src_preview = cond_by_id[src]["fact"] if src in cond_by_id else f"[{src}]"
-                tgt_preview = cond_by_id[tgt]["fact"] if tgt in cond_by_id else f"[{tgt}]"
+                src_fact = cond_by_id[src]["fact"] if src in cond_by_id else f"[{src}]"
+                tgt_fact = cond_by_id[tgt]["fact"] if tgt in cond_by_id else f"[{tgt}]"
                 lines.append(
                     f"  [{src}] --{rel}--> [{tgt}]"
                 )
-                lines.append(f"    {src_preview}")
-                lines.append(f"    → {tgt_preview}")
+                lines.append(f"    {src_fact}")
+                lines.append(f"    → {tgt_fact}")
                 lines.append("")
 
         if chains:
