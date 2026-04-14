@@ -1262,14 +1262,7 @@ def _regex_extract_queries(strategy_text: str) -> list[str]:
                 seen.add(normalised)
                 queries.append(q)
 
-    raw_queries = queries[:10]
-
-    # ── Architectural guardrail: query relevance validation ──
-    if user_query:
-        relevant, rejected = _validate_query_relevance(raw_queries, user_query)
-        return relevant
-
-    return raw_queries
+    return queries[:10]
 
 
 def extract_search_queries(
