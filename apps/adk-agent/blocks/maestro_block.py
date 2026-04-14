@@ -86,15 +86,23 @@ class MaestroBlock(PipelineBlock):
         # The maestro's text output would otherwise be overwritten when
         # we refresh state["research_findings"].  Store it as an immutable
         # thought row so the full reasoning chain is preserved.
+        # Uses _safe_corpus_write to acquire the per-corpus async lock,
+        # preventing races with background swarm tasks.
         maestro_output = state.get("research_findings", "")
         if maestro_output and maestro_output.strip():
             try:
-                await asyncio.to_thread(
-                    corpus.admit_thought,
-                    reasoning=maestro_output,
-                    angle="maestro_reasoning",
-                    strategy=f"maestro_iteration_{iteration}",
-                    iteration=iteration,
+                from callbacks.condition_manager import _safe_corpus_write
+                _corpus = corpus
+                _output = maestro_output
+                _iter = iteration
+                await _safe_corpus_write(
+                    corpus_key,
+                    lambda: _corpus.admit_thought(
+                        reasoning=_output,
+                        angle="maestro_reasoning",
+                        strategy=f"maestro_iteration_{_iter}",
+                        iteration=_iter,
+                    ),
                 )
                 logger.info(
                     "Maestro reasoning preserved: %d chars at iteration %d",

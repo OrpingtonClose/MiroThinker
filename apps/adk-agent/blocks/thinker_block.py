@@ -71,14 +71,23 @@ class ThinkerBlock(PipelineBlock):
 
         # ── THOUGHT LINEAGE: Write thinker thought to DuckDB ──
         # Preserves the full reasoning chain as immutable thought rows.
+        # Uses _safe_corpus_write to acquire the per-corpus async lock,
+        # preventing races with background swarm tasks.
+        corpus_key = state.get("_corpus_key", "default")
         if strategy and strategy.strip() and ctx.corpus is not None:
             try:
-                await asyncio.to_thread(
-                    ctx.corpus.admit_thought,
-                    reasoning=strategy,
-                    angle="thinker_reasoning",
-                    strategy=f"thinker_iteration_{iteration}",
-                    iteration=iteration,
+                from callbacks.condition_manager import _safe_corpus_write
+                _corpus = ctx.corpus
+                _strategy = strategy
+                _iter = iteration
+                await _safe_corpus_write(
+                    corpus_key,
+                    lambda: _corpus.admit_thought(
+                        reasoning=_strategy,
+                        angle="thinker_reasoning",
+                        strategy=f"thinker_iteration_{_iter}",
+                        iteration=_iter,
+                    ),
                 )
                 logger.info(
                     "Thinker thought admitted: %d chars at iteration %d",
