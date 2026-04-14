@@ -60,6 +60,44 @@ _SEMANTIC_SCHOLAR_API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
 # Maximum concurrent searches to prevent API rate limiting
 _MAX_CONCURRENT = int(os.environ.get("SEARCH_EXECUTOR_CONCURRENCY", "4"))
 
+# ---------------------------------------------------------------------------
+# Circuit breaker: track consecutive failures per API.  After
+# _CIRCUIT_BREAKER_THRESHOLD consecutive failures, the API is "tripped"
+# and skipped for the rest of the pipeline run.  This prevents the
+# pipeline from wasting time retrying broken APIs (e.g. arXiv returning
+# 301, Semantic Scholar choking on Unicode, scite.ai 404 on OAuth).
+# ---------------------------------------------------------------------------
+_CIRCUIT_BREAKER_THRESHOLD = int(
+    os.environ.get("CIRCUIT_BREAKER_THRESHOLD", "2"),
+)
+_circuit_breaker: dict[str, int] = {}  # fn_name → consecutive failures
+
+
+def _circuit_is_open(fn_name: str) -> bool:
+    """Return True if the circuit breaker is tripped for this API."""
+    return _circuit_breaker.get(fn_name, 0) >= _CIRCUIT_BREAKER_THRESHOLD
+
+
+def _circuit_record_success(fn_name: str) -> None:
+    """Reset the circuit breaker on success."""
+    _circuit_breaker.pop(fn_name, None)
+
+
+def _circuit_record_failure(fn_name: str) -> None:
+    """Increment the consecutive failure count."""
+    _circuit_breaker[fn_name] = _circuit_breaker.get(fn_name, 0) + 1
+    if _circuit_is_open(fn_name):
+        logger.error(
+            "CIRCUIT BREAKER TRIPPED for %s after %d consecutive failures "
+            "— API will be skipped for the rest of this run",
+            fn_name, _circuit_breaker[fn_name],
+        )
+
+
+def reset_circuit_breakers() -> None:
+    """Reset all circuit breakers (call between pipeline runs)."""
+    _circuit_breaker.clear()
+
 # Serendipity: fraction of strategy queries that get contrarian variants
 _SERENDIPITY_RATE = float(os.environ.get("SERENDIPITY_QUERY_RATE", "0.3"))
 _SERENDIPITY_ENABLED = os.environ.get("SERENDIPITY_ENABLED", "1") == "1"
@@ -443,10 +481,44 @@ async def _apify_extract(url: str) -> str:
 # Academic search APIs (Phase C)
 # ---------------------------------------------------------------------------
 
+def _sanitise_query_for_api(query: str) -> str:
+    """Sanitise a query string for ASCII-only APIs.
+
+    Replaces Unicode characters that break APIs like Semantic Scholar
+    (which choke on em-dashes, curly quotes, etc.) with ASCII equivalents.
+    This is an architectural guardrail — not a one-off fix for a single
+    character, but a systematic defence against the entire class of
+    encoding failures.
+    """
+    replacements = {
+        "\u2014": "--",   # em-dash
+        "\u2013": "-",    # en-dash
+        "\u2018": "'",    # left single quote
+        "\u2019": "'",    # right single quote
+        "\u201c": '"',    # left double quote
+        "\u201d": '"',    # right double quote
+        "\u2026": "...",  # ellipsis
+        "\u00e9": "e",    # e-acute
+        "\u00e8": "e",    # e-grave
+        "\u00fc": "u",    # u-umlaut
+        "\u00f6": "o",    # o-umlaut
+        "\u00e4": "a",    # a-umlaut
+    }
+    for char, replacement in replacements.items():
+        query = query.replace(char, replacement)
+    # Final safety net: strip any remaining non-ASCII
+    return query.encode("ascii", errors="replace").decode("ascii")
+
+
 async def _search_semantic_scholar(
     query: str, num_results: int = 5,
 ) -> str:
     """Search Semantic Scholar for academic papers."""
+    fn_name = "_search_semantic_scholar"
+    if _circuit_is_open(fn_name):
+        return ""
+    # Sanitise query to prevent ASCII encoding failures
+    query = _sanitise_query_for_api(query)
     try:
         headers: dict[str, str] = {}
         if _SEMANTIC_SCHOLAR_API_KEY:
@@ -469,6 +541,7 @@ async def _search_semantic_scholar(
             papers = data.get("data", [])
             if not papers:
                 return ""
+            _circuit_record_success(fn_name)
             lines = [f"Semantic Scholar: {query}"]
             for p in papers[:num_results]:
                 title = p.get("title", "")
@@ -490,18 +563,26 @@ async def _search_semantic_scholar(
                 )
             return "\n".join(lines)
     except Exception as exc:
-        logger.warning(
-            "Semantic Scholar search failed for '%s': %s", query[:60], exc,
+        _circuit_record_failure(fn_name)
+        logger.error(
+            "Semantic Scholar search FAILED for '%s': %s", query[:60], exc,
         )
         return ""
 
 
 async def _search_arxiv(query: str, num_results: int = 3) -> str:
     """Search arXiv for preprints via the Atom feed API."""
+    fn_name = "_search_arxiv"
+    if _circuit_is_open(fn_name):
+        return ""
+    # Sanitise query for ASCII safety
+    query = _sanitise_query_for_api(query)
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with httpx.AsyncClient(
+            timeout=20.0, follow_redirects=True,
+        ) as client:
             resp = await client.get(
-                "http://export.arxiv.org/api/query",
+                "https://export.arxiv.org/api/query",
                 params={
                     "search_query": f"all:{query}",
                     "start": 0,
@@ -516,6 +597,7 @@ async def _search_arxiv(query: str, num_results: int = 3) -> str:
             )
             if not entries:
                 return ""
+            _circuit_record_success(fn_name)
             lines = [f"arXiv search: {query}"]
             for entry in entries[:num_results]:
                 title_m = re.search(
@@ -539,12 +621,16 @@ async def _search_arxiv(query: str, num_results: int = 3) -> str:
                 )
             return "\n".join(lines)
     except Exception as exc:
-        logger.warning("arXiv search failed for '%s': %s", query[:60], exc)
+        _circuit_record_failure(fn_name)
+        logger.error("arXiv search FAILED for '%s': %s", query[:60], exc)
         return ""
 
 
 async def _search_scite(query: str, num_results: int = 5) -> str:
     """Search scite.ai for smart citations (support/contradict analysis)."""
+    fn_name = "_search_scite"
+    if _circuit_is_open(fn_name):
+        return ""
     if not _SCITE_REFRESH_TOKEN or not _SCITE_CLIENT_ID:
         return ""
     try:
@@ -585,9 +671,11 @@ async def _search_scite(query: str, num_results: int = 5) -> str:
                     f"{supporting} supporting, {contradicting} contradicting, "
                     f"{mentioning} mentioning citations"
                 )
+            _circuit_record_success(fn_name)
             return "\n".join(lines)
     except Exception as exc:
-        logger.warning("scite.ai search failed for '%s': %s", query[:60], exc)
+        _circuit_record_failure(fn_name)
+        logger.error("scite.ai search FAILED for '%s': %s", query[:60], exc)
         return ""
 
 
@@ -926,6 +1014,108 @@ _QUERY_PATTERNS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Query relevance validator — architectural guardrail
+#
+# Rejects queries that have zero topical overlap with the user's original
+# question.  This prevents the thinker's strategy decomposition from
+# producing generic queries like "research strategy" or "exact match"
+# that pull in Elasticsearch docs, HBR strategy articles, etc.
+#
+# The check is deterministic (no LLM) — it computes token overlap between
+# the extracted query and the user query.  Queries with zero overlap are
+# rejected.  This catches the entire class of "generic strategy noise"
+# that polluted 60% of the Lacan-metabolism corpus.
+# ---------------------------------------------------------------------------
+
+_QUERY_STOPWORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "dare", "ought",
+    "to", "of", "in", "for", "on", "with", "at", "by", "from", "as",
+    "into", "through", "during", "before", "after", "above", "below",
+    "between", "out", "off", "over", "under", "again", "further",
+    "then", "once", "here", "there", "when", "where", "why", "how",
+    "all", "each", "every", "both", "few", "more", "most", "other",
+    "some", "such", "no", "nor", "not", "only", "own", "same", "so",
+    "than", "too", "very", "just", "because", "but", "and", "or",
+    "if", "while", "about", "against", "up", "down", "what", "which",
+    "who", "whom", "this", "that", "these", "those", "it", "its",
+    "research", "strategy", "find", "search", "look", "investigate",
+    "information", "data", "results", "analysis", "evidence", "study",
+    "question", "answer", "topic", "subject", "key", "main", "sub",
+    "explore", "examine", "understand", "determine", "identify",
+}
+
+
+def _query_relevance_score(query: str, user_query: str) -> float:
+    """Compute topical overlap between an extracted query and the user query.
+
+    Returns a score in [0, 1].  Queries with score 0 have zero topical
+    overlap and should be rejected.
+    """
+    def _content_tokens(text: str) -> set[str]:
+        tokens = set(re.findall(r'\w+', text.lower()))
+        return tokens - _QUERY_STOPWORDS
+
+    q_tokens = _content_tokens(query)
+    u_tokens = _content_tokens(user_query)
+
+    if not q_tokens:
+        return 0.0
+    if not u_tokens:
+        # User query reduced to empty after stopword removal — we can't
+        # compute meaningful overlap.  Allow the query through rather
+        # than rejecting everything.
+        return 1.0
+
+    overlap = q_tokens & u_tokens
+    # Jaccard-like: overlap / smaller set
+    return len(overlap) / min(len(q_tokens), len(u_tokens))
+
+
+def _validate_query_relevance(
+    queries: list[str],
+    user_query: str,
+    min_score: float = 0.0,
+) -> tuple[list[str], list[str]]:
+    """Split queries into relevant and rejected based on topical overlap.
+
+    Args:
+        queries: Extracted search queries.
+        user_query: The user's original question.
+        min_score: Minimum relevance score (0 = at least 1 content token overlap).
+
+    Returns:
+        (relevant, rejected) — two lists.
+    """
+    if not user_query:
+        return queries, []
+
+    relevant: list[str] = []
+    rejected: list[str] = []
+
+    for q in queries:
+        score = _query_relevance_score(q, user_query)
+        if score > min_score:
+            relevant.append(q)
+        else:
+            rejected.append(q)
+            logger.warning(
+                "QUERY REJECTED (zero topical overlap with user query): %r",
+                q[:120],
+            )
+
+    if rejected:
+        logger.error(
+            "Query validator rejected %d/%d queries as off-topic "
+            "(zero overlap with user query)",
+            len(rejected), len(queries),
+        )
+
+    return relevant, rejected
+
+
 _DISSOLUTION_PROMPT = """\
 You are a research librarian with deep expertise across every academic field.
 Your task: dissolve a research question and strategy into precise, specific
@@ -1072,7 +1262,14 @@ def _regex_extract_queries(strategy_text: str) -> list[str]:
                 seen.add(normalised)
                 queries.append(q)
 
-    return queries[:10]
+    raw_queries = queries[:10]
+
+    # ── Architectural guardrail: query relevance validation ──
+    if user_query:
+        relevant, rejected = _validate_query_relevance(raw_queries, user_query)
+        return relevant
+
+    return raw_queries
 
 
 def extract_search_queries(
@@ -1102,13 +1299,22 @@ def extract_search_queries(
                 "LLM query dissolution produced %d conceptually rich queries",
                 len(dissolved),
             )
-            return dissolved
+            # Apply relevance validation (architectural guardrail)
+            relevant, rejected = _validate_query_relevance(dissolved, user_query)
+            return relevant if relevant else dissolved
         logger.warning(
             "LLM query dissolution failed or empty -- falling back to regex"
         )
 
     # Fallback: regex extraction
-    return _regex_extract_queries(strategy_text)
+    queries = _regex_extract_queries(strategy_text)
+
+    # Apply relevance validation when user_query is available
+    if user_query and queries:
+        relevant, rejected = _validate_query_relevance(queries, user_query)
+        return relevant if relevant else queries
+
+    return queries
 
 
 def _get_existing_corpus_urls(corpus: Any) -> set[str]:
@@ -1353,7 +1559,30 @@ async def run_search_executor(
         "total_ingested": 0,
         "queries_deduped": 0,
         "urls_deduped": 0,
+        "queries_rejected_noise": 0,
+        "circuit_breakers_tripped": 0,
     }
+
+    # ── Architectural guardrail: heartbeat emitter ──
+    # Emits progress events so the SSE stream stays alive and the stall
+    # detector doesn't kill productive search work.  Each phase boundary
+    # emits a heartbeat with the current stats.
+    try:
+        from dashboard import get_active_collector
+        _heartbeat_collector = get_active_collector()
+    except Exception:
+        _heartbeat_collector = None
+
+    def _emit_heartbeat(phase: str) -> None:
+        """Emit a search-executor heartbeat event for stall prevention."""
+        if _heartbeat_collector:
+            _heartbeat_collector.emit_event(
+                "search_executor_heartbeat",
+                data={"phase": phase, **stats},
+            )
+        logger.info("Search executor heartbeat: %s", phase)
+
+    _emit_heartbeat("init")
 
     # ── P1: Cross-run dedup — collect URLs and query fingerprints ──
     existing_urls = _get_existing_corpus_urls(corpus)
@@ -1394,6 +1623,9 @@ async def run_search_executor(
             stats["expansion_searches"] += 1
 
     # A2. Strategy queries -- fan-out to multiple APIs
+    # Pass user_query for both LLM dissolution and the query relevance
+    # validator (architectural guardrail that rejects off-topic queries
+    # before they hit any API).
     strategy_queries = extract_search_queries(strategy, user_query=user_query)
 
     # ── Serendipity: inject contrarian query variants ──
@@ -1446,6 +1678,24 @@ async def run_search_executor(
             stats["queries_deduped"],
         )
 
+    # Track rejected noise queries in stats BEFORE the early return so
+    # that even when all queries are rejected, stats capture the root cause.
+    # Uses _query_relevance_score directly to avoid double-logging.
+    if user_query:
+        raw_all = extract_search_queries(strategy)
+        rejected_count = sum(
+            1 for q in raw_all
+            if _query_relevance_score(q, user_query) <= 0.0
+        )
+        stats["queries_rejected_noise"] = rejected_count
+        stats["total_raw_queries"] = len(raw_all)
+
+    # Track tripped circuit breakers (also before early return)
+    stats["circuit_breakers_tripped"] = sum(
+        1 for fn_name in _circuit_breaker
+        if _circuit_is_open(fn_name)
+    )
+
     if not search_tasks and not fan_out_tasks:
         logger.info("Search executor: no searches to execute")
         return stats
@@ -1455,6 +1705,7 @@ async def run_search_executor(
         stats["expansion_searches"],
         stats["strategy_searches"],
     )
+    _emit_heartbeat("phase_a_start")
 
     async def _bounded_search(
         tool: str, query: str, source_type: str,
@@ -1552,6 +1803,7 @@ async def run_search_executor(
         "Phase A complete: %d results, %d ingested (%.1fs)",
         stats["total_results"], stats["total_ingested"], elapsed_a,
     )
+    _emit_heartbeat("phase_a_complete")
 
     # -------------------------------------------------------------------
     # Phase B: Content Extraction (Jina Reader + Apify fallback)
@@ -1631,6 +1883,7 @@ async def run_search_executor(
                 "Phase B complete: %d content extractions",
                 stats["content_extractions"],
             )
+            _emit_heartbeat("phase_b_complete")
 
     # -------------------------------------------------------------------
     # Phase C: Academic Search (conditional)
@@ -1683,10 +1936,21 @@ async def run_search_executor(
                     "Failed to ingest academic result", exc_info=True,
                 )
 
+        # Report academic search failures transparently
+        if stats["academic_searches"] == 0:
+            logger.error(
+                "Phase C: ZERO academic results ingested — all academic "
+                "APIs failed or returned empty (tripped breakers: %s)",
+                [
+                    fn for fn in _circuit_breaker
+                    if _circuit_is_open(fn)
+                ],
+            )
         logger.info(
             "Phase C complete: %d academic results ingested",
             stats["academic_searches"],
         )
+        _emit_heartbeat("phase_c_complete")
 
     # -------------------------------------------------------------------
     # Phase D: Citation Following (one hop)
@@ -1774,6 +2038,34 @@ async def run_search_executor(
                 pass
 
     total_elapsed = time.monotonic() - start
+    stats["total_elapsed_s"] = int(total_elapsed)
+
+    # ── Architectural guardrail: transparent failure summary ──
+    # Log ERROR (not warning) for systemic failures so the diagnostic
+    # tool and operators can see what went wrong.
+    failure_lines: list[str] = []
+    if stats.get("queries_rejected_noise", 0) > 0:
+        failure_lines.append(
+            f"  - {stats['queries_rejected_noise']} queries rejected as "
+            f"off-topic noise"
+        )
+    tripped = [
+        fn for fn in _circuit_breaker if _circuit_is_open(fn)
+    ]
+    if tripped:
+        failure_lines.append(
+            f"  - Circuit breakers tripped: {', '.join(tripped)}"
+        )
+    if stats["total_ingested"] == 0 and stats["total_results"] == 0:
+        failure_lines.append(
+            "  - ZERO results from ALL search APIs — complete search failure"
+        )
+    if failure_lines:
+        logger.error(
+            "Search executor FAILURE SUMMARY:\n%s",
+            "\n".join(failure_lines),
+        )
+
     logger.info(
         "Search executor complete: %d surface, %d extractions, "
         "%d academic, %d citations, %d total ingested (%.1fs)",
@@ -1784,4 +2076,5 @@ async def run_search_executor(
         stats["total_ingested"],
         total_elapsed,
     )
+    _emit_heartbeat("complete")
     return stats

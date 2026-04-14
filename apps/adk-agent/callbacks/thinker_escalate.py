@@ -125,6 +125,28 @@ async def thinker_escalate_callback(
         _c = get_active_collector()
         if _c:
             _c.thinker_escalate()
+
+    # ── Pipeline health gate: thinker ─────────────────────────────
+    try:
+        from models.pipeline_health import PipelineHealth, check_thinker
+        health = PipelineHealth.from_state(state)
+        iteration = state.get("_corpus_iteration", 0)
+        phase = health.begin_phase(f"thinker_iter{iteration}")
+        phase.metrics["strategy_length"] = len(strategy)
+        # Count extractable queries for health check
+        try:
+            from tools.search_executor import extract_search_queries
+            user_query = state.get("user_query", "")
+            queries = extract_search_queries(strategy, user_query=user_query)
+            phase.metrics["extractable_queries"] = len(queries)
+        except Exception:
+            phase.metrics["extractable_queries"] = 0
+        check_thinker(phase, state)
+        health.evaluate_gate(phase)
+        health.save(state)
+    except Exception:
+        pass  # health tracking is best-effort
+
     return None
 
 
