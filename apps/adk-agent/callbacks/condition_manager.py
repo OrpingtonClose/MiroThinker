@@ -919,11 +919,13 @@ def cleanup_corpus(state: dict) -> None:
     if swarm_task is not None and not swarm_task.done():
         logger.info("cleanup_corpus: cancelling pending swarm task (key=%s)", corpus_key)
         swarm_task.cancel()
-        # Give the task a moment to honour cancellation.
-        # We cannot await here (sync function), but cancellation
-        # is immediate for asyncio tasks waiting on the lock.
-        import time
-        time.sleep(0.5)
+        # Note: we cannot await here (sync function) and must NOT use
+        # time.sleep() — that would block the event loop, preventing
+        # asyncio from delivering the CancelledError to the task.
+        # Just check done() immediately; cancel() is synchronous and
+        # if the task was waiting on the async lock it will already be
+        # marked done.  If not, we accept the limitation and abandon
+        # the CorpusStore below (connection will GC after task completes).
         task_done = swarm_task.done()
     # Clean up the per-corpus async lock entry
     _corpus_async_locks.pop(corpus_key, None)
