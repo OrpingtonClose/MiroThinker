@@ -88,6 +88,31 @@ class ErrorEscalationAspect(Aspect):
                                    PipelineTransient, PipelineIgnorable)):
             typed_error = classify_error(error, source=block.name)
 
+        # ── Circuit breaker: too many consecutive failures ──
+        # Checked BEFORE typed handlers so it fires regardless of error
+        # category.  Even PipelineDegraded errors (normally absorbed)
+        # contribute to the consecutive counter and can trip this.
+        # PipelineIgnorable is excluded (it decrements the counter below).
+        if (not isinstance(typed_error, PipelineIgnorable)
+                and self._consecutive_failures >= _MAX_CONSECUTIVE_FAILURES):
+            logger.error(
+                "Circuit breaker: %d consecutive failures — aborting",
+                self._consecutive_failures,
+            )
+            return BlockResult(
+                metrics={
+                    "error": str(typed_error),
+                    "block_failed": True,
+                    "escalation": "circuit_breaker",
+                    "consecutive_failures": self._consecutive_failures,
+                },
+                routing=RoutingHint.ABORT,
+                diagnosis=(
+                    f"Circuit breaker tripped after "
+                    f"{self._consecutive_failures} consecutive failures"
+                ),
+            )
+
         # ── PipelineIgnorable: DEBUG log, absorb silently ──
         if isinstance(typed_error, PipelineIgnorable):
             logger.debug(
@@ -177,10 +202,14 @@ class ErrorEscalationAspect(Aspect):
                 routing=RoutingHint.CONTINUE,
             )
 
-        # ── CRITICAL block (by criticality) → ABORT ──
+        # ── Fallback: unclassified error on non-CRITICAL block ──
+        # classify_error() should always return one of the four typed
+        # errors, but if it somehow doesn't, absorb for BEST_EFFORT
+        # blocks and ABORT for CRITICAL blocks.
         if block.criticality == BlockCriticality.CRITICAL:
             logger.error(
-                "CRITICAL block '%s' failed — aborting pipeline", block.name,
+                "CRITICAL block '%s' failed with unclassified error — aborting: %s",
+                block.name, typed_error,
             )
             return BlockResult(
                 metrics={
@@ -192,27 +221,6 @@ class ErrorEscalationAspect(Aspect):
                 diagnosis=f"CRITICAL block '{block.name}' failed: {typed_error}",
             )
 
-        # ── Circuit breaker: too many consecutive failures ──
-        if self._consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
-            logger.error(
-                "Circuit breaker: %d consecutive failures — aborting",
-                self._consecutive_failures,
-            )
-            return BlockResult(
-                metrics={
-                    "error": str(typed_error),
-                    "block_failed": True,
-                    "escalation": "circuit_breaker",
-                    "consecutive_failures": self._consecutive_failures,
-                },
-                routing=RoutingHint.ABORT,
-                diagnosis=(
-                    f"Circuit breaker tripped after "
-                    f"{self._consecutive_failures} consecutive failures"
-                ),
-            )
-
-        # ── BEST_EFFORT: absorb the error, continue pipeline ──
         return BlockResult(
             metrics={
                 "error": str(typed_error),
