@@ -331,6 +331,14 @@ async def _pre_synthesiser_swarm(
     Thin wrapper that delegates to ``SwarmSynthesisBlock`` via the block
     adapter.  All cross-cutting concerns are handled by aspects.
     """
+    # Skip expensive swarm synthesis if the pipeline was aborted
+    if callback_context.state.get("_pipeline_aborted"):
+        logger.warning(
+            "Skipping swarm synthesis — pipeline aborted: %s",
+            callback_context.state.get("_abort_reason", "unknown"),
+        )
+        return None
+
     from callbacks.block_adapter import run_block_from_callback
     await run_block_from_callback("swarm_synthesis", callback_context)
     return None

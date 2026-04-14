@@ -46,10 +46,10 @@ _pending_search_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 # Module-level corpus continuity — survives across AG-UI HTTP requests.
 #
-# Phase 1: The ad-hoc variables below are DEPRECATED.  Corpus continuity
-# is now handled by PipelineStateRegistry (models/pipeline_state.py).
-# These are kept as empty declarations so any stale imports don't crash,
-# but they are no longer read or written.
+# Phase 1: The ad-hoc variables are DEPRECATED and REMOVED.
+# Corpus continuity is now handled by PipelineStateRegistry
+# (models/pipeline_state.py).  If you need corpus continuity,
+# use PipelineStateRegistry.instance().lookup() instead.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -282,7 +282,16 @@ async def search_executor_callback(
     ``base_agent.py``).
     """
     from callbacks.block_adapter import run_block_from_callback
-    await run_block_from_callback("search_executor", callback_context)
+    from models.pipeline_block import RoutingHint
+    result = await run_block_from_callback("search_executor", callback_context)
+
+    # Propagate ABORT routing — store in state so downstream callbacks
+    # (maestro, swarm, synthesiser) can check and skip expensive work.
+    if result.routing == RoutingHint.ABORT:
+        callback_context.state["_pipeline_aborted"] = True
+        callback_context.state["_abort_reason"] = result.diagnosis or "search_executor abort"
+        logger.error("Pipeline ABORT signalled by search_executor: %s", result.diagnosis)
+
     return None
 
 
@@ -304,7 +313,17 @@ async def maestro_condition_callback(
     ``base_agent.py``).
     """
     from callbacks.block_adapter import run_block_from_callback
-    await run_block_from_callback("maestro", callback_context)
+    from models.pipeline_block import RoutingHint
+    result = await run_block_from_callback("maestro", callback_context)
+
+    # Propagate ABORT routing — escalate to break out of the LoopAgent
+    # so the pipeline doesn't continue with corrupted/incomplete data.
+    if result.routing == RoutingHint.ABORT:
+        callback_context.state["_pipeline_aborted"] = True
+        callback_context.state["_abort_reason"] = result.diagnosis or "maestro abort"
+        callback_context.actions.escalate = True
+        logger.error("Pipeline ABORT signalled by maestro — escalating: %s", result.diagnosis)
+
     return None  # preserve maestro output
 # ---------------------------------------------------------------------------
 # Serendipity: Devil's Advocate injection

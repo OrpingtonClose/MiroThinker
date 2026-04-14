@@ -49,15 +49,16 @@ class CorpusRefreshAspect(Aspect):
             # that would hit DuckDB even when the key exists, which is
             # unsafe after MaestroBlock starts its background scoring
             # thread (DuckDB connections are not thread-safe).
+            #
+            # IMPORTANT: Use the CHEAP format_for_thinker() here, NOT
+            # synthesise().  The expensive multi-LLM gossip synthesis
+            # only runs once in SwarmSynthesisBlock before the final
+            # synthesiser.  Running it after every search/maestro
+            # iteration would add minutes of latency per loop.
             if "research_findings" not in result.state_updates:
-                briefing = ""
-                try:
-                    briefing = ctx.corpus.synthesise(user_query) if user_query else ""
-                except Exception:
-                    logger.debug("Swarm briefing failed, falling back to format_for_thinker")
-                if not briefing:
-                    briefing = ctx.corpus.format_for_thinker(current_iteration=iteration)
-                result.state_updates["research_findings"] = briefing
+                result.state_updates["research_findings"] = (
+                    ctx.corpus.format_for_thinker(current_iteration=iteration)
+                )
 
             if "corpus_for_synthesis" not in result.state_updates:
                 result.state_updates["corpus_for_synthesis"] = (
