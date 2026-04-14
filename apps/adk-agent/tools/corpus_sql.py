@@ -46,7 +46,9 @@ _FLOCK_LLM_FUNCTIONS = (
     "llm_complete_json", "llm_extract",
 )
 
-# Maximum rows to return in a single query result
+# Maximum rows to return in a single query result.
+# The maestro can use LIMIT in SQL if it wants fewer rows; this is a
+# safety-net so a bare SELECT * doesn't explode the tool response.
 _MAX_RESULT_ROWS = 200
 
 
@@ -311,7 +313,7 @@ async def execute_flock_sql(query: str, tool_context: ToolContext) -> str:
             )
             lines.append("")
 
-            # Truncate if too many rows
+            # Cap rows (maestro can use LIMIT in SQL for finer control)
             display_rows = rows[:_MAX_RESULT_ROWS]
             if len(rows) > _MAX_RESULT_ROWS:
                 lines.append(

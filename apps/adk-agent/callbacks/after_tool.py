@@ -1,8 +1,7 @@
 # Copyright (c) 2025 MiroMind
 # This source code is licensed under the Apache 2.0 License.
 
-"""
-After-tool callback — dashboard tracking + corpus ingestion.
+"""After-tool callback — dashboard tracking + corpus ingestion.
 
 What this callback does:
 1. **Dashboard tool_end tracking** — records duration and result size.
@@ -16,7 +15,6 @@ What this callback does:
 from __future__ import annotations
 
 import logging
-import os
 import time
 from typing import Any, Dict, Optional
 
@@ -26,10 +24,6 @@ from callbacks.before_tool import _TOOL_TO_PROVIDER, _provider_semaphores
 from dashboard import get_active_collector
 
 logger = logging.getLogger(__name__)
-
-# Legacy constant kept for backward-compat imports — no longer enforced.
-TOOL_RESULT_MAX_CHARS = int(os.environ.get("TOOL_RESULT_MAX_CHARS", "0"))
-DEMO_SCRAPE_MAX_LENGTH = 0
 
 # Search tools whose results should be ingested into the Flock corpus.
 # Each tool maps to its source_type tag for condition tracking.
@@ -73,15 +67,6 @@ _SEARCH_TOOLS: dict[str, str] = {
     "grok_deep_research": "grok_deep",
     "tavily_deep_research": "tavily_deep",
 }
-
-
-def _maybe_truncate_result(tool_name: str, result_text: str) -> str:  # noqa: ARG001
-    """No-op — truncation has been removed.
-
-    Tool results flow through verbatim.  The corpus ingestion path
-    and the thinker both receive the full text.
-    """
-    return result_text
 
 
 # ── callback ─────────────────────────────────────────────────────────────────
@@ -152,8 +137,8 @@ def after_tool_callback(
     # ── Queue search results for corpus ingestion ──────────────────
     # Search tool results are queued for later ingestion via the
     # thread-safe queue in condition_manager.  The actual ingest_raw()
-    # call happens in researcher_condition_callback on the main thread,
-    # avoiding concurrent DuckDB access from parallel tool callbacks.
+    # call happens on the main thread, avoiding concurrent DuckDB
+    # access from parallel tool callbacks.
     source_type = _SEARCH_TOOLS.get(tool_name)
     if source_type and result_text and len(result_text) > 50:
         try:
