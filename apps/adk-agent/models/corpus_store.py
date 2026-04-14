@@ -3094,27 +3094,7 @@ class CorpusStore:
                 f"Budget: {len(by_angle)} angles."
             )
 
-        result = "\n".join(lines)
-
-        # ── Context overflow safeguard ──
-        # gpt-4o-mini has 128K tokens (~512K chars).  The thinker prompt
-        # also includes system instructions + conversation history, so
-        # cap the corpus briefing at ~300K chars (~75K tokens) to leave
-        # headroom.  Prefer keeping the corpus health summary (end) and
-        # the most recent findings (later chunks = higher iteration).
-        _MAX_THINKER_CHARS = 300_000
-        if len(result) > _MAX_THINKER_CHARS:
-            # Keep the last N chars (most recent findings + health summary)
-            truncation_note = (
-                f"[CORPUS TRUNCATED: {len(result)} chars → {_MAX_THINKER_CHARS} chars. "
-                f"Oldest findings omitted to fit context window. "
-                f"Focus on the newest material below.]\n\n"
-            )
-            result = truncation_note + result[-(
-                _MAX_THINKER_CHARS - len(truncation_note)
-            ):]
-
-        return result
+        return "\n".join(lines)
 
     def format_summary_for_maestro(self) -> str:
         """Format a compact structural summary for the maestro.
@@ -3332,20 +3312,7 @@ class CorpusStore:
             f"{contradictions} contradictions to address."
         )
 
-        result = "\n".join(lines)
-
-        # ── Context overflow safeguard (same as format_for_thinker) ──
-        _MAX_SYNTH_CHARS = 300_000
-        if len(result) > _MAX_SYNTH_CHARS:
-            truncation_note = (
-                f"[CORPUS TRUNCATED: {len(result)} chars → {_MAX_SYNTH_CHARS} chars. "
-                f"Oldest findings omitted to fit context window.]\n\n"
-            )
-            result = truncation_note + result[-(
-                _MAX_SYNTH_CHARS - len(truncation_note)
-            ):]
-
-        return result
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Unified ingestion (Flock atomisation)
