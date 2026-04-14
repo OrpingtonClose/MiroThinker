@@ -37,8 +37,6 @@ _GROK_API_BASE = os.environ.get(
     "GROK_RESPONSES_API_BASE", "https://api.x.ai"
 )
 
-# Maximum chars to return per deep search call (cost + context control)
-_MAX_RESPONSE_CHARS = 12_000
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +127,7 @@ async def perplexity_deep_research(
                     "\n\n**Sources cited:**\n" + "\n".join(citation_lines)
                 )
 
-        result = content[:_MAX_RESPONSE_CHARS] + citation_text
+        result = content + citation_text
         return result if result.strip() else (
             f"Perplexity returned empty results for: {query}"
         )
@@ -259,11 +257,6 @@ def _format_grok_output(data: dict, query: str) -> str:
     if not assistant_text:
         return f"Grok produced no text output for: {query}"
 
-    if len(assistant_text) > _MAX_RESPONSE_CHARS:
-        assistant_text = (
-            assistant_text[:_MAX_RESPONSE_CHARS] + "\n[... truncated ...]"
-        )
-
     search_summary = ", ".join(set(search_types_used)) or "unknown"
     header = (
         f"**Grok Deep Search: {query}**\n"
@@ -362,7 +355,7 @@ def _format_tavily_output(data: dict, query: str) -> str:
         for i, r in enumerate(results[:10], 1):
             title = r.get("title", "Untitled")
             url = r.get("url", "")
-            content = r.get("content", "")[:300]
+            content = r.get("content", "")
             score = r.get("score", 0)
             parts.append(f"\n  [{i}] {title}")
             parts.append(f"      URL: {url}")
@@ -371,10 +364,7 @@ def _format_tavily_output(data: dict, query: str) -> str:
             if content:
                 parts.append(f"      {content}")
 
-    output = "\n".join(parts)
-    if len(output) > _MAX_RESPONSE_CHARS:
-        output = output[:_MAX_RESPONSE_CHARS] + "\n[... truncated ...]"
-    return output
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
