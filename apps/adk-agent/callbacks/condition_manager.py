@@ -322,7 +322,9 @@ async def search_executor_callback(
         # thinker_escalate_callback now writes thoughts directly under the
         # async lock.  This fallback handles any residual pending thoughts
         # from before the migration (or if the async write failed).
-        pending_thought = state.pop("_pending_thinker_thought", None)
+        pending_thought = state.get("_pending_thinker_thought", None)
+        if pending_thought is not None:
+            state["_pending_thinker_thought"] = None
         if pending_thought:
             try:
                 await asyncio.to_thread(corpus.admit_thought, **pending_thought)
@@ -851,8 +853,11 @@ def build_corpus_state(db_path: str = "") -> dict:
         # Iteration context for thinker (P1)
         "_prev_thinker_strategies": "(first iteration — no previous strategies)",
         "_last_thinker_strategy": "",
-        # Cumulative cost tracking (P3) — only set if not already present
-        # (preserved across runs by cleanup_corpus)
+        # NOTE: _cumulative_api_cost is NOT included here.  It is
+        # initialised by _init_pipeline_state (pipeline.py) which
+        # uses a conditional guard to preserve accumulated cost on
+        # continuation runs.  For the CLI run_pipeline() path,
+        # it is set explicitly alongside user_query.
     }
 
 
