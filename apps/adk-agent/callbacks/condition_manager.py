@@ -298,47 +298,46 @@ async def search_executor_callback(
     corpus = _get_corpus(state)
     _c = get_active_collector()
 
-    # Acquire the per-corpus async lock before touching DuckDB.
-    # All DuckDB operations (safety-net scoring, swarm cycle, thinker
-    # thought admission) go through this lock.  The async lock yields
-    # to the event loop, so SSE keepalives still fire.
+    # Acquire the per-corpus async lock for pre-search DuckDB operations.
+    # We hold the lock for the drain + deferred thought admission, then
+    # release before the long-running search executor (which can take
+    # minutes).  This protects against concurrent DuckDB access from
+    # fire-and-forget swarm tasks dispatched by the previous iteration's
+    # maestro_condition_callback.
     corpus_key = state.get("_corpus_key", "default")
-    lock = _get_corpus_lock(corpus_key)
-    await lock.acquire()
-    try:
-        pass  # lock acquired — DuckDB is ours
-    finally:
-        lock.release()
-
-    # Set tracing context
     iteration = state.get("_corpus_iteration", 0)
-    if _c:
-        corpus.set_trace_context(
-            session_id=_c.session_id,
-            iteration=iteration,
-        )
 
-    # Drain any queued search results from previous tool callbacks
-    _drain_search_queue(state)
+    async with _get_corpus_lock(corpus_key):
+        # Set tracing context
+        if _c:
+            corpus.set_trace_context(
+                session_id=_c.session_id,
+                iteration=iteration,
+            )
 
-    # ── THOUGHT LINEAGE (legacy fallback) ────────────────────────────
-    # thinker_escalate_callback now writes thoughts directly under the
-    # async lock.  This fallback handles any residual pending thoughts
-    # from before the migration (or if the async write failed).
-    pending_thought = state.pop("_pending_thinker_thought", None)
-    if pending_thought:
-        try:
-            corpus.admit_thought(**pending_thought)
-            logger.info(
-                "Legacy deferred thought admitted: %d chars at iteration %d",
-                len(pending_thought.get("reasoning", "")),
-                pending_thought.get("iteration", 0),
-            )
-        except Exception:
-            logger.warning(
-                "Failed to admit deferred thinker thought (non-fatal)",
-                exc_info=True,
-            )
+        # Drain any queued search results from previous tool callbacks
+        _drain_search_queue(state)
+
+        # ── THOUGHT LINEAGE (legacy fallback) ────────────────────────────
+        # thinker_escalate_callback now writes thoughts directly under the
+        # async lock.  This fallback handles any residual pending thoughts
+        # from before the migration (or if the async write failed).
+        pending_thought = state.pop("_pending_thinker_thought", None)
+        if pending_thought:
+            try:
+                await asyncio.to_thread(corpus.admit_thought, **pending_thought)
+                logger.info(
+                    "Legacy deferred thought admitted: %d chars at iteration %d",
+                    len(pending_thought.get("reasoning", "")),
+                    pending_thought.get("iteration", 0),
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to admit deferred thinker thought (non-fatal)",
+                    exc_info=True,
+                )
+    # Lock released — search executor runs outside the lock (minutes-long
+    # operation; holding the lock would starve swarm tasks and scoring).
 
     # Run the automated search executor
     try:
@@ -827,6 +826,13 @@ def get_corpus_text(state: dict) -> str:
 
     Used to dump partial results when the pipeline stalls before
     the synthesiser can produce its report.
+
+    THREAD-SAFETY: This is a synchronous function that cannot acquire
+    the async lock.  The ``lock.locked()`` check is a best-effort
+    TOCTOU guard.  This is safe because callers run synchronously on
+    the event loop thread, blocking any async task from acquiring the
+    lock between the check and the DuckDB read.  Do NOT call this
+    function from an async context with intervening ``await`` points.
     """
     corpus_key = state.get("_corpus_key", "default")
     lock = _get_corpus_lock(corpus_key)
@@ -848,6 +854,13 @@ def run_swarm_synthesis(state: dict) -> str:
 
     Returns the synthesised report text, or empty string if the corpus
     is empty or Flock is unavailable.
+
+    THREAD-SAFETY: This is a synchronous function that cannot acquire
+    the async lock.  The ``lock.locked()`` check is a best-effort
+    TOCTOU guard.  This is safe because callers run synchronously on
+    the event loop thread, blocking any async task from acquiring the
+    lock between the check and the DuckDB access.  Do NOT call this
+    function from an async context with intervening ``await`` points.
     """
     key = state.get("_corpus_key")
     if not key or key not in _corpus_stores:
