@@ -46,17 +46,11 @@ _pending_search_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 # Module-level corpus continuity — survives across AG-UI HTTP requests.
 #
-# The AG-UI adapter may overwrite session state between requests (the
-# frontend sends ``"state": {}`` which can wipe backend-only keys like
-# ``_prev_corpus_db_path``).  This module-level variable is the robust
-# fallback: it tracks the last closed corpus DB path so that the next
-# pipeline run in the same server process can reopen it.
-#
-# For multi-tenant safety we key by a stable identifier — the user query
-# fingerprint — so different conversations don't cross-contaminate.
+# Phase 1: The ad-hoc variables are DEPRECATED and REMOVED.
+# Corpus continuity is now handled by PipelineStateRegistry
+# (models/pipeline_state.py).  If you need corpus continuity,
+# use PipelineStateRegistry.instance().lookup() instead.
 # ---------------------------------------------------------------------------
-_last_corpus_db_path: str = ""
-_corpus_continuity_map: dict[str, str] = {}  # query_fingerprint → db_path
 
 # ---------------------------------------------------------------------------
 # Per-corpus async locks — serialise all DuckDB writes through an
@@ -279,156 +273,24 @@ async def search_executor_callback(
 ) -> Optional[genai_types.Content]:
     """Before-agent callback: run the automated search executor.
 
-    Reads expansion targets from the corpus table and the thinker's
-    research strategy, programmatically fires search APIs (no LLM),
-    and ingests results into the corpus.
-
-    This replaces the researcher's search responsibility.  Runs as a
-    before_agent_callback on the maestro so searches complete before
-    the maestro starts organising.
+    Thin wrapper that delegates to ``SearchExecutorBlock`` via the block
+    adapter.  All business logic lives in the block; cross-cutting
+    concerns (timing, health, I/O validation, DuckDB safety, error
+    escalation) are handled by aspects.
 
     ASYNC: ADK awaits this callback (``inspect.isawaitable`` check in
-    ``base_agent.py``).  Using ``await`` instead of blocking
-    ``future.result()`` keeps the event loop responsive so SSE
-    keepalive comments can fire during long search operations.
+    ``base_agent.py``).
     """
-    import asyncio
+    from callbacks.block_adapter import run_block_from_callback
+    from models.pipeline_block import RoutingHint
+    result = await run_block_from_callback("search_executor", callback_context)
 
-    state = callback_context.state
-    corpus = _get_corpus(state)
-    _c = get_active_collector()
-
-    # Acquire the per-corpus async lock for pre-search DuckDB operations.
-    # We hold the lock for the drain + deferred thought admission, then
-    # release before the long-running search executor (which can take
-    # minutes).  This protects against concurrent DuckDB access from
-    # fire-and-forget swarm tasks dispatched by the previous iteration's
-    # maestro_condition_callback.
-    corpus_key = state.get("_corpus_key", "default")
-    iteration = state.get("_corpus_iteration", 0)
-
-    async with _get_corpus_lock(corpus_key):
-        # Set tracing context
-        if _c:
-            corpus.set_trace_context(
-                session_id=_c.session_id,
-                iteration=iteration,
-            )
-
-        # Drain any queued search results from previous tool callbacks
-        _drain_search_queue(state)
-
-        # ── THOUGHT LINEAGE (legacy fallback) ────────────────────────────
-        # thinker_escalate_callback now writes thoughts directly under the
-        # async lock.  This fallback handles any residual pending thoughts
-        # from before the migration (or if the async write failed).
-        pending_thought = state.get("_pending_thinker_thought", None)
-        if pending_thought is not None:
-            state["_pending_thinker_thought"] = None
-        if pending_thought:
-            try:
-                await asyncio.to_thread(corpus.admit_thought, **pending_thought)
-                logger.info(
-                    "Legacy deferred thought admitted: %d chars at iteration %d",
-                    len(pending_thought.get("reasoning", "")),
-                    pending_thought.get("iteration", 0),
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to admit deferred thinker thought (non-fatal)",
-                    exc_info=True,
-                )
-    # Lock released — search executor runs outside the lock (minutes-long
-    # operation; holding the lock would starve swarm tasks and scoring).
-
-    # Run the automated search executor
-    try:
-        import threading
-        from tools.search_executor import run_search_executor
-
-        cancel_event = threading.Event()
-
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            timed_out = False
-            try:
-                future = pool.submit(
-                    asyncio.run,
-                    run_search_executor(state, cancel=cancel_event),
-                )
-                # NON-BLOCKING: wrap the concurrent.futures.Future as
-                # an asyncio.Future and await it.  This keeps the event
-                # loop responsive so SSE keepalive comments fire during
-                # long search operations.  Previously future.result()
-                # blocked the event loop for up to 120s.
-                _se_timeout = int(os.environ.get("SEARCH_EXECUTOR_TIMEOUT", "300"))
-                wrapped = asyncio.wrap_future(future)
-                stats = await asyncio.wait_for(wrapped, timeout=_se_timeout)
-            except asyncio.TimeoutError:
-                timed_out = True
-                logger.warning("Search executor timed out after %ds", _se_timeout)
-                # Signal the worker to stop touching DuckDB.
-                cancel_event.set()
-                # Non-blocking wait for the worker to honour the cancel
-                # flag — same pattern as the main await above.
-                try:
-                    await asyncio.wait_for(asyncio.wrap_future(future), timeout=5)
-                except (asyncio.TimeoutError, Exception):
-                    pass
-                stats = {"timed_out": True}
-            finally:
-                if not timed_out:
-                    cancel_event.set()
-                pool.shutdown(wait=False, cancel_futures=True)
-        else:
-            stats = loop.run_until_complete(
-                run_search_executor(state, cancel=cancel_event),
-            )
-
-        logger.info("Search executor stats: %s", stats)
-
-        # Emit search executor stats to dashboard
-        if _c and isinstance(stats, dict):
-            _c.emit_event("search_executor", data=stats)
-
-    except Exception as exc:
-        logger.warning("Search executor failed (non-fatal): %s", exc, exc_info=True)
-        stats = {"error": str(exc)}
-
-    # ── Pipeline health gate: search executor ──────────────────────
-    # Report structured health data and evaluate the phase contract.
-    try:
-        from models.pipeline_health import (
-            PipelineHealth, RoutingDecision, check_search_executor,
-        )
-        health = PipelineHealth.from_state(state)
-        iteration = state.get("_corpus_iteration", 0)
-        phase = health.begin_phase(f"search_executor_iter{iteration}")
-        if isinstance(stats, dict):
-            phase.metrics = dict(stats)
-        check_search_executor(phase, state)
-        decision = health.evaluate_gate(phase)
-        health.save(state)
-        logger.info("Search executor health: %s (decision=%s)", phase.status.value, decision.value)
-
-        if decision == RoutingDecision.ABORT:
-            logger.error(
-                "HEALTH GATE ABORT after search_executor — %s",
-                health.summary(),
-            )
-            # Don't actually abort yet — let the maestro try to salvage.
-            # But the health state is FAILED, so downstream gates can act.
-    except Exception:
-        logger.warning("Pipeline health check failed (non-fatal)", exc_info=True)
-
-    # Update state with views for each downstream consumer.
-    # The maestro gets a compact structural summary (counts, status,
-    # expansion targets) — it has SQL access for full detail.
-    # The thinker gets the full corpus briefing (set by maestro_condition_callback).
-    # The synthesiser gets the chunk-grouped format (also set by maestro_condition_callback).
-    state["corpus_summary_for_maestro"] = corpus.format_summary_for_maestro()
+    # Propagate ABORT routing — store in state so downstream callbacks
+    # (maestro, swarm, synthesiser) can check and skip expensive work.
+    if result.routing == RoutingHint.ABORT:
+        callback_context.state["_pipeline_aborted"] = True
+        callback_context.state["_abort_reason"] = result.diagnosis or "search_executor abort"
+        logger.error("Pipeline ABORT signalled by search_executor: %s", result.diagnosis)
 
     return None
 
@@ -442,276 +304,27 @@ async def maestro_condition_callback(
 ) -> Optional[genai_types.Content]:
     """After-agent callback for the maestro: refresh corpus state.
 
-    The maestro has already modified the corpus directly via
-    ``execute_flock_sql()``.  This callback:
+    Thin wrapper that delegates to ``MaestroBlock`` via the block adapter.
+    All business logic (thought preservation, scoring, state refresh,
+    iteration advance) lives in the block; cross-cutting concerns are
+    handled by aspects.
 
-    1. Drains any remaining search results from tool callbacks
-    2. Runs safety-net scoring under the per-corpus ``asyncio.Lock``
-       (DuckDB work dispatched to thread pool, event loop stays responsive)
-    3. Refreshes state with the current corpus for the thinker
-    4. Advances the iteration counter
-
-    ASYNC: Uses ``_safe_corpus_write()`` for DuckDB operations, replacing
-    the old fire-and-forget background thread pattern.  ADK awaits async
-    callbacks (``inspect.isawaitable`` check in ``base_agent.py``).
+    ASYNC: ADK awaits async callbacks (``inspect.isawaitable`` check in
+    ``base_agent.py``).
     """
-    state = callback_context.state
-    corpus = _get_corpus(state)
-    _c = get_active_collector()
+    from callbacks.block_adapter import run_block_from_callback
+    from models.pipeline_block import RoutingHint
+    result = await run_block_from_callback("maestro", callback_context)
 
-    # Drain any remaining queued search results
-    _drain_search_queue(state)
-
-    # ── THOUGHT LINEAGE: Preserve maestro's reasoning ─────────────────
-    # The maestro's text output (its reasoning about what SQL operations
-    # to perform and why) would otherwise be overwritten when we refresh
-    # state["research_findings"] below.  Store it as an immutable thought
-    # row so the full reasoning chain is preserved in the Flock table.
-    maestro_output = state.get("research_findings", "")
-    corpus_key = state.get("_corpus_key", "default")
-    if maestro_output and maestro_output.strip():
-        iteration = state.get("_corpus_iteration", 0)
-        try:
-            await _safe_corpus_write(
-                corpus_key,
-                lambda: corpus.admit_thought(
-                    reasoning=maestro_output,
-                    angle="maestro_reasoning",
-                    strategy=f"maestro_iteration_{iteration}",
-                    iteration=iteration,
-                ),
-            )
-            logger.info(
-                "Maestro reasoning preserved: %d chars at iteration %d",
-                len(maestro_output), iteration,
-            )
-        except Exception:
-            logger.warning(
-                "Failed to preserve maestro reasoning (non-fatal)",
-                exc_info=True,
-            )
-
-    # Scoring safety net: ensure all conditions ingested during the
-    # search executor + maestro phase are scored and deduped.  The
-    # maestro may have created new rows via execute_flock_sql() that
-    # bypassed the normal ingestion scoring path.
-    user_query = state.get("user_query", "")
-
-    # Snapshot corpus state BEFORE dispatching the scoring work to the
-    # thread pool.  The thinker (next iteration) sees this pre-scoring
-    # snapshot.  Unscored conditions appear with composite_quality=0
-    # ("WEAK FINDINGS" tier).  This is acceptable because:
-    #  1. Safety-net scoring is a backup — the maestro handles most
-    #     scoring itself via execute_flock_sql().
-    #  2. search_executor_callback waits for scoring and refreshes state
-    #     before the maestro runs, so the maestro always sees scored data.
-    iteration = state.get("_corpus_iteration", 0)
-    thinker_briefing = corpus.format_for_thinker(current_iteration=iteration)
-
-    # ── Serendipity: Devil’s Advocate injection ───────────────────────────
-    # When the corpus has been building for 2+ iterations and shows
-    # strong consensus with no contradictions, inject a sceptic’s prompt
-    # to push the thinker toward unexplored territory.  This costs zero
-    # LLM calls — just a conditional string append.
-    thinker_briefing = _maybe_inject_devils_advocate(
-        thinker_briefing, corpus, iteration,
-    )
-
-    state["research_findings"] = thinker_briefing
-    state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
-    state["corpus_summary_for_maestro"] = corpus.format_summary_for_maestro()
-
-    # Emit corpus stats to dashboard (also before thread start)
-    if _c:
-        try:
-            total = corpus.count()
-            iteration = state.get("_corpus_iteration", 0)
-            # Pass 0 for admitted — the maestro organises existing
-            # conditions, it doesn't ingest new ones.
-            _c.corpus_update(0, total, iteration)
-            _c.emit_event("maestro_complete", data={
-                "total_conditions": total,
-                "iteration": iteration,
-            })
-        except Exception:
-            pass
-
-    # ── Snapshot health metrics BEFORE background thread starts ────
-    # DuckDB connections are not thread-safe.  All reads must happen
-    # on the main thread before the scoring thread starts writing.
-    _health_metrics: dict = {}
-    try:
-        _health_metrics["unscored_findings"] = corpus.conn.execute(
-            "SELECT COUNT(*) FROM conditions "
-            "WHERE row_type = 'finding' AND score_version = 0"
-        ).fetchone()[0]
-        _health_metrics["total_findings"] = corpus.conn.execute(
-            "SELECT COUNT(*) FROM conditions "
-            "WHERE row_type = 'finding'"
-        ).fetchone()[0]
-        _health_metrics["total_conditions"] = corpus.count()
-    except Exception:
-        pass
-
-    def _safety_net_scoring() -> None:
-        """Run scoring + dedup (called via asyncio.to_thread under the lock).
-
-        Skips conditions already scored by the maestro via
-        execute_flock_sql().  ``score_new_conditions`` checks
-        ``score_version = 0`` so it naturally skips maestro-scored rows.
-        """
-        try:
-            scored = corpus.score_new_conditions(user_query)
-            if scored:
-                logger.info("Maestro safety-net: scored %d conditions", scored)
-
-            deduped = corpus.compute_duplications()
-            if deduped:
-                logger.info("Maestro safety-net: deduped %d pairs", deduped)
-
-            if scored:
-                corpus.compute_composite_quality()
-        except Exception:
-            logger.warning("Maestro safety-net scoring failed", exc_info=True)
-
-    # Run safety-net scoring under the per-corpus async lock.
-    # This replaces the old fire-and-forget thread pattern that could
-    # skip scoring entirely if the previous thread was still alive.
-    # The async lock yields to the event loop (SSE keepalives fire),
-    # and asyncio.to_thread() dispatches the actual DuckDB work to the
-    # thread pool so the event loop is never blocked.
-    try:
-        await _safe_corpus_write(corpus_key, _safety_net_scoring)
-    except Exception:
-        logger.warning("Async safety-net scoring failed", exc_info=True)
-
-    # Advance iteration at the loop boundary — the maestro is the last
-    # agent in each LoopAgent iteration.
-    iteration = state.get("_corpus_iteration", 0)
-
-    # ── Periodic synthesis ────────────────────────────────────────────
-    # After refreshing corpus state and before advancing the iteration
-    # counter, run a swarm synthesis and persist it as a thought row so
-    # the thinker can integrate cross-angle insights.
-    synthesis_interval = int(os.environ.get("SYNTHESIS_INTERVAL", "1"))
-    if iteration > 0 and iteration % synthesis_interval == 0:
-        try:
-            swarm_report = run_swarm_synthesis(state)
-            if swarm_report and swarm_report.strip():
-                corpus = _get_corpus(state)
-                await _safe_corpus_write(
-                    corpus_key,
-                    lambda: corpus.admit_thought(
-                        reasoning=swarm_report,
-                        angle="periodic_synthesis",
-                        strategy="periodic_synthesis_report",
-                        iteration=iteration,
-                    ),
-                )
-        except Exception:
-            logger.warning("Periodic synthesis failed (non-fatal)", exc_info=True)
-
-    # ── Thought swarm cycle (async offload) ─────────────────────────────
-    # Spawn parallel specialist thinkers for angles identified by the
-    # main thinker, then arbitrate competing conclusions and split broad
-    # thoughts into focused sub-claims.
-    #
-    # Runs as a fire-and-forget ``asyncio.Task`` that acquires the
-    # per-corpus async lock before dispatching ``run_swarm_cycle`` to the
-    # thread pool via ``_safe_corpus_write``.  This replaces the old bare
-    # ``threading.Thread`` pattern which bypassed the async lock protocol
-    # entirely, creating a race between the swarm thread and any
-    # ``asyncio.to_thread()`` work dispatched by ``_safe_corpus_write``
-    # in ``thinker_escalate_callback`` or ``search_executor_callback``.
-    #
-    # The async lock ensures only one coroutine's DuckDB work runs at a
-    # time.  If the swarm is still running when the next iteration's
-    # ``thinker_escalate_callback`` fires, the callback simply waits for
-    # the lock (yields to event loop, SSE keepalives still fire) instead
-    # of racing.  No data loss, no DuckDB connection corruption.
-    #
-    # Results are visible to the thinker on the NEXT iteration (eventual
-    # consistency, not blocking the callback return).
-    try:
-        from tools.swarm_thinkers import run_swarm_cycle
-        corpus = _get_corpus(state)
-
-        # Capture state values the swarm cycle needs (avoid holding a
-        # reference to the full mutable state dict across async tasks).
-        swarm_state_snapshot = {
-            "_corpus_iteration": iteration,
-            "user_query": state.get("user_query", ""),
-            "research_strategy": state.get("research_strategy", ""),
-        }
-
-        async def _async_bg_swarm() -> None:
-            """Background swarm — runs under the per-corpus async lock.
-
-            ``_safe_corpus_write`` acquires the ``asyncio.Lock`` then
-            dispatches the blocking ``run_swarm_cycle`` call to the
-            thread pool via ``asyncio.to_thread()``.  This gives us:
-              - No event loop blocking (async lock yields)
-              - No DuckDB races (lock serialises all corpus access)
-              - Thread safety for internal specialist parallelism
-                (``CorpusStore._write_lock`` still serialises writes
-                within the swarm's own ``ThreadPoolExecutor``)
-            """
-            try:
-                swarm_ids = await _safe_corpus_write(
-                    corpus_key,
-                    lambda: run_swarm_cycle(swarm_state_snapshot, corpus),
-                )
-                if swarm_ids:
-                    logger.info(
-                        "Background swarm produced %d new thoughts at iter %d",
-                        len(swarm_ids), iteration,
-                    )
-            except Exception:
-                logger.warning("Background swarm cycle failed (non-fatal)", exc_info=True)
-
-        # Warn if the previous iteration's swarm task is still running.
-        prev_task = _swarm_tasks.get(corpus_key)
-        if prev_task is not None and not prev_task.done():
-            logger.warning(
-                "Previous swarm task (key=%s) still running — new task "
-                "will queue behind it on the async lock",
-                corpus_key,
-            )
-
-        task = asyncio.create_task(
-            _async_bg_swarm(),
-            name=f"swarm-iter-{iteration}",
-        )
-        _swarm_tasks[corpus_key] = task
-        logger.debug("Swarm cycle dispatched as async task (iter=%d)", iteration)
-    except Exception:
-        logger.warning("Swarm dispatch failed (non-fatal)", exc_info=True)
-
-    # ── Pipeline health gate: maestro ───────────────────────────────
-    # Uses _health_metrics snapshotted BEFORE the background scoring
-    # thread started (no DuckDB access here — thread-safe).
-    try:
-        from models.pipeline_health import (
-            PipelineHealth, check_maestro,
-        )
-        health = PipelineHealth.from_state(state)
-        phase = health.begin_phase(f"maestro_iter{iteration}")
-
-        # Use pre-snapshotted metrics (captured before thread start)
-        phase.metrics.update(_health_metrics)
-        phase.metrics["maestro_produced_output"] = True
-        check_maestro(phase, state)
-        decision = health.evaluate_gate(phase)
-        health.save(state)
-        logger.info("Maestro health: %s (decision=%s)", phase.status.value, decision.value)
-    except Exception:
-        logger.warning("Pipeline health check (maestro) failed (non-fatal)", exc_info=True)
-
-    state["_corpus_iteration"] = iteration + 1
+    # Propagate ABORT routing — escalate to break out of the LoopAgent
+    # so the pipeline doesn't continue with corrupted/incomplete data.
+    if result.routing == RoutingHint.ABORT:
+        callback_context.state["_pipeline_aborted"] = True
+        callback_context.state["_abort_reason"] = result.diagnosis or "maestro abort"
+        callback_context.actions.escalate = True
+        logger.error("Pipeline ABORT signalled by maestro — escalating: %s", result.diagnosis)
 
     return None  # preserve maestro output
-
-
 # ---------------------------------------------------------------------------
 # Serendipity: Devil's Advocate injection
 # ---------------------------------------------------------------------------
@@ -1008,24 +621,25 @@ def cleanup_corpus(state: dict) -> None:
         corpus = _corpus_stores[key]
 
         # ── Corpus continuity: preserve the DB path for the next run ──
-        # Save to BOTH state AND module-level variables.  The AG-UI
-        # adapter may overwrite session state between requests, so the
-        # module-level fallback ensures continuity even when state is lost.
-        global _last_corpus_db_path
+        # Uses the typed PipelineStateRegistry (Phase 1) instead of ad-hoc
+        # module-level variables.  The registry is thread-safe, TTL-aware,
+        # and indexed by query fingerprint.
         try:
+            from models.pipeline_state import PipelineStateRegistry
             db_path_str = str(corpus.db_path)
             state["_prev_corpus_db_path"] = db_path_str
-            _last_corpus_db_path = db_path_str
-
-            # Also save to per-query map for multi-tenant safety
-            query_fp = state.get("user_query", "")[:200].strip().lower()
-            if query_fp:
-                _corpus_continuity_map[query_fp] = db_path_str
-
+            user_query = state.get("user_query", "")
+            iteration = state.get("_corpus_iteration", 0)
+            registry = PipelineStateRegistry.instance()
+            registry.register(
+                query=user_query,
+                db_path=db_path_str,
+                iteration_count=iteration,
+            )
             logger.info(
                 "cleanup_corpus: saved corpus path for continuity: %s "
-                "(module-level + state + query-map)",
-                db_path_str,
+                "(registry + state, iter=%d)",
+                db_path_str, iteration,
             )
         except Exception:
             logger.warning("cleanup_corpus: failed to save continuity path", exc_info=True)

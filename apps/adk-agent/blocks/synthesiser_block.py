@@ -4,8 +4,10 @@
 """SynthesiserBlock -- final report generation phase.
 
 The synthesiser reads the swarm-synthesised corpus and produces the
-polished final report.  This block handles the post-synthesiser
-cleanup: corpus state persistence and resource release.
+polished final report.  This block handles post-synthesiser metrics
+collection.  The QualityManifest (Phase 4) is appended in
+SwarmSynthesisBlock BEFORE the synthesiser runs, so it appears in
+the final report.
 """
 
 from __future__ import annotations
@@ -39,10 +41,11 @@ class SynthesiserBlock(PipelineBlock):
     output_specs = []  # Output goes to conversation history via ADK
 
     async def execute(self, ctx: BlockContext) -> BlockResult:
-        """Post-synthesiser processing: measure and cleanup.
+        """Post-synthesiser processing: measure what the synthesiser had.
 
-        NOTE: The actual LLM call is handled by ADK's Agent.
-        This block runs as the after_agent_callback wrapper.
+        NOTE: The actual LLM call is handled by ADK's Agent.  This block
+        runs as the after_agent_callback wrapper — it collects metrics
+        on the synthesiser's input quality.
         """
         state = ctx.state
 
@@ -62,12 +65,5 @@ class SynthesiserBlock(PipelineBlock):
             "swarm_input_length": len(swarm_input) if swarm_input else 0,
             "corpus_findings": corpus_findings,
         }
-
-        # Cleanup corpus resources
-        try:
-            from callbacks.condition_manager import cleanup_corpus
-            cleanup_corpus(state)
-        except Exception as exc:
-            logger.warning("Corpus cleanup failed: %s", exc)
 
         return BlockResult(metrics=metrics)

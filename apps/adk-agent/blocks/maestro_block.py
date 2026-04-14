@@ -4,8 +4,9 @@
 """MaestroBlock -- free-form Flock conductor phase.
 
 Wraps the maestro's after_agent_callback logic as a fenced block:
+- Preserves maestro reasoning as thought lineage
 - Drains pending search results
-- Kicks off safety-net scoring in a background thread
+- Kicks off safety-net scoring
 - Refreshes state with current corpus for the thinker
 - Runs periodic synthesis and thought swarm cycle
 - Advances the iteration counter
@@ -57,7 +58,7 @@ class MaestroBlock(PipelineBlock):
     ]
 
     async def execute(self, ctx: BlockContext) -> BlockResult:
-        """Post-maestro processing: scoring, swarm, state refresh.
+        """Post-maestro processing: thought preservation, scoring, swarm, state refresh.
 
         NOTE: The actual maestro LLM call is handled by ADK's Agent.
         This block runs as the after_agent_callback wrapper.
@@ -77,12 +78,44 @@ class MaestroBlock(PipelineBlock):
                 diagnosis="Maestro block skipped: no corpus available",
             )
 
+        corpus_key = state.get("_corpus_key", "default")
+        iteration = state.get("_corpus_iteration", 0)
+        user_query = state.get("user_query", "")
+
+        # ── THOUGHT LINEAGE: Preserve maestro's reasoning ─────────────
+        # The maestro's text output would otherwise be overwritten when
+        # we refresh state["research_findings"].  Store it as an immutable
+        # thought row so the full reasoning chain is preserved.
+        # Uses _safe_corpus_write to acquire the per-corpus async lock,
+        # preventing races with background swarm tasks.
+        maestro_output = state.get("research_findings", "")
+        if maestro_output and maestro_output.strip():
+            try:
+                from callbacks.condition_manager import _safe_corpus_write
+                _corpus = corpus
+                _output = maestro_output
+                _iter = iteration
+                await _safe_corpus_write(
+                    corpus_key,
+                    lambda: _corpus.admit_thought(
+                        reasoning=_output,
+                        angle="maestro_reasoning",
+                        strategy=f"maestro_iteration_{_iter}",
+                        iteration=_iter,
+                    ),
+                )
+                logger.info(
+                    "Maestro reasoning preserved: %d chars at iteration %d",
+                    len(maestro_output), iteration,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to preserve maestro reasoning (non-fatal)",
+                    exc_info=True,
+                )
+
         # Drain remaining queued search results
         _drain_search_queue(state)
-
-        # Safety-net scoring in background thread
-        user_query = state.get("user_query", "")
-        iteration = state.get("_corpus_iteration", 0)
 
         # Snapshot corpus state BEFORE background thread starts
         # (DuckDB connections are not thread-safe)
@@ -150,7 +183,6 @@ class MaestroBlock(PipelineBlock):
             except Exception:
                 logger.warning("Maestro safety-net scoring failed", exc_info=True)
 
-        corpus_key = state.get("_corpus_key", "default")
         try:
             await _safe_corpus_write(corpus_key, _background_scoring)
         except Exception:

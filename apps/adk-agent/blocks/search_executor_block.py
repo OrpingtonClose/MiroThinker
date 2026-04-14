@@ -62,6 +62,33 @@ class SearchExecutorBlock(PipelineBlock):
         # Drain any queued search results from previous tool callbacks
         _drain_search_queue(state)
 
+        # ── Deferred thought admission fallback ──
+        # If ThinkerBlock failed to admit a thought (DuckDB contention),
+        # it saves the thought in state for retry here.  SearchExecutorBlock
+        # runs right after the thinker and has corpus access.
+        pending = state.pop("_pending_thinker_thought", None)
+        if pending and ctx.corpus is not None:
+            try:
+                from callbacks.condition_manager import _safe_corpus_write
+                corpus_key = state.get("_corpus_key", "default")
+                _corpus = ctx.corpus
+                _pending = pending
+                await _safe_corpus_write(
+                    corpus_key,
+                    lambda: _corpus.admit_thought(
+                        reasoning=_pending["reasoning"],
+                        angle=_pending.get("angle", "thinker_reasoning"),
+                        strategy=_pending.get("strategy", ""),
+                        iteration=_pending.get("iteration", iteration),
+                    ),
+                )
+                logger.info("Deferred thinker thought admitted in SearchExecutorBlock")
+            except Exception:
+                logger.warning(
+                    "Deferred thinker thought admission failed (non-fatal)",
+                    exc_info=True,
+                )
+
         # Run the automated search executor
         cancel_event = ctx.cancel or threading.Event()
         stats: dict = {}

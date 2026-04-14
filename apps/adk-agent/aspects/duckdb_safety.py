@@ -4,11 +4,11 @@
 """DuckDBSafetyAspect -- ensure DuckDB thread-safety invariant.
 
 Blocks that declare ``needs_corpus = True`` require exclusive DuckDB
-access.  This aspect checks for pending scoring threads before
-execution and injects the corpus into the context.
+access.  This aspect **waits** for the per-corpus async lock to become
+available instead of silently skipping the block.
 
-The block declares ``needs_corpus``.  This aspect enforces the
-thread-safety consequence: wait/skip if DuckDB is contended.
+Phase 2 fix: changed from skip-on-contention to queue-not-skip.
+No blocks are silently dropped; they wait their turn.
 """
 
 from __future__ import annotations
@@ -34,27 +34,24 @@ class DuckDBSafetyAspect(Aspect):
         if not block.needs_corpus:
             return None
 
-        # Check for DuckDB contention via the per-corpus async lock
+        # Wait for DuckDB availability instead of skipping (Phase 2).
+        # acquire() + release() ensures the lock was free at entry.
+        # Individual DuckDB operations within blocks use _safe_corpus_write
+        # for fine-grained locking.
         try:
             from callbacks.condition_manager import _get_corpus_lock
             corpus_key = ctx.state.get("_corpus_key", "default")
             lock = _get_corpus_lock(corpus_key)
             if lock.locked():
-                logger.warning(
-                    "DuckDB safety: async lock held for '%s' "
-                    "— skipping block '%s' to avoid concurrent access",
+                logger.info(
+                    "DuckDB safety: waiting for lock (key=%s, block=%s)",
                     corpus_key, block.name,
                 )
-                return BlockResult(
-                    metrics={
-                        "skipped": True,
-                        "reason": "duckdb_contention",
-                    },
-                    routing=RoutingHint.CONTINUE,
-                    diagnosis=(
-                        f"Block '{block.name}' skipped: DuckDB async "
-                        f"lock held (key={corpus_key})"
-                    ),
+                await lock.acquire()
+                lock.release()
+                logger.info(
+                    "DuckDB safety: lock acquired and released for '%s'",
+                    block.name,
                 )
         except ImportError:
             pass
