@@ -92,7 +92,7 @@ def _extract_angles_via_llm(strategy_text: str) -> list[str]:
         "the actual domain, theory, mechanism, or question to investigate.\n\n"
         "Return 2-5 angles, one per line, prefixed with ANGLE: \n"
         "If the strategy only has one coherent direction, return just one.\n\n"
-        f"STRATEGY:\n{strategy_text[:3000]}"
+        f"STRATEGY:\n{strategy_text}"
     )
 
     body = _json.dumps({
@@ -185,30 +185,19 @@ def extract_angles(strategy_text: str) -> list[str]:
 
 def _build_specialist_prompt(
     angle: str,
-    corpus_summary: str,
-    prior_thoughts: list[dict],
+    corpus_briefing: str,
     user_query: str,
 ) -> str:
     """Build the prompt for a specialist thinker focused on *angle*.
 
-    The specialist sees:
-    - The user's original query
-    - A summary of the corpus (findings relevant to their angle)
-    - Any prior thoughts from this angle (to build on, not repeat)
+    The specialist receives a **full per-angle corpus briefing** from
+    ``CorpusStore.format_for_specialist()`` — no truncation.  The
+    briefing already contains:
+    - All findings for this angle (full verbal prose)
+    - Unassigned findings (potentially relevant)
+    - Prior thoughts (full text, so the specialist can build on them)
+    - Orientation (what other angles exist)
     """
-    prior_section = ""
-    if prior_thoughts:
-        prior_lines = []
-        for t in prior_thoughts[-3:]:  # last 3 thoughts for this angle
-            prior_lines.append(
-                f"  [thought #{t['id']}, depth={t['expansion_depth']}]: "
-                f"{t['fact'][:500]}"
-            )
-        prior_section = (
-            "\n\nPRIOR ANALYSIS FOR THIS ANGLE (build on this, do NOT repeat):\n"
-            + "\n".join(prior_lines)
-        )
-
     return f"""\
 You are a specialist research analyst assigned to a specific angle of \
 investigation. Your job is to provide DEEP, FOCUSED analysis on your \
@@ -218,9 +207,7 @@ USER QUERY: {user_query}
 
 YOUR ASSIGNED ANGLE: {angle}
 
-CORPUS SUMMARY (relevant findings):
-{corpus_summary[:6000]}
-{prior_section}
+{corpus_briefing}
 
 INSTRUCTIONS:
 1. Analyse the corpus findings SPECIFICALLY through the lens of your angle
@@ -231,7 +218,7 @@ INSTRUCTIONS:
 6. If prior analysis exists for this angle, BUILD ON IT — add new insight, \
    don't repeat what's already been said
 
-OUTPUT: A focused analytical report (500-2000 chars) with specific citations \
+OUTPUT: A focused analytical report with specific citations \
 to evidence. Be substantive, not vague. Every claim must be grounded in \
 the corpus findings."""
 
@@ -263,16 +250,15 @@ def spawn_specialist_thinkers(
     # Limit to configured max
     angles = angles[:_MAX_SPECIALISTS]
 
-    # Prepare prompts for each specialist
-    tasks: list[tuple[str, str, list[dict]]] = []
-    corpus_summary = corpus.format_for_thinker()
+    # Prepare prompts for each specialist — per-angle corpus partitioning
+    tasks: list[tuple[str, str]] = []
 
     for angle in angles:
-        prior = corpus.get_thoughts_by_angle(angle)
+        corpus_briefing = corpus.format_for_specialist(angle, user_query)
         prompt = _build_specialist_prompt(
-            angle, corpus_summary, prior, user_query,
+            angle, corpus_briefing, user_query,
         )
-        tasks.append((angle, prompt, prior))
+        tasks.append((angle, prompt))
 
     # Run specialists in parallel via ThreadPoolExecutor
     thought_ids: list[int] = []
@@ -290,13 +276,13 @@ def spawn_specialist_thinkers(
 
     logger.info(
         "Spawning %d specialist thinkers for angles: %s",
-        len(tasks), [a for a, _, _ in tasks],
+        len(tasks), [a for a, _ in tasks],
     )
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(_run_specialist, angle, prompt): angle
-            for angle, prompt, _ in tasks
+            for angle, prompt in tasks
         }
         for fut in as_completed(futures):
             angle = futures[fut]
@@ -385,7 +371,7 @@ def arbitrate_competing_thoughts(
         src = f" (source: {f[4]})" if f[4] else ""
         finding_summaries.append(
             f"  [finding #{f[0]}, conf={f[2]:.2f}, trust={f[3]:.2f}]: "
-            f"{f[1][:300]}{src}"
+            f"{f[1]}{src}"
         )
 
     # Build arbitration prompt
@@ -393,7 +379,7 @@ def arbitrate_competing_thoughts(
     for t in specialist_thoughts[-5:]:  # latest 5 specialist thoughts
         thought_summaries.append(
             f"  [thought #{t['id']}, iteration={t['iteration']}]: "
-            f"{t['fact'][:800]}"
+            f"{t['fact']}"
         )
 
     prompt = f"""\
@@ -548,7 +534,7 @@ analysis that contains multiple distinct sub-claims or angles. Your job \
 is to identify and separate these into focused, independent claims.
 
 ORIGINAL ANALYSIS (thought #{thought_id}):
-{target['fact'][:3000]}
+{target['fact']}
 
 INSTRUCTIONS:
 1. Identify 2-4 distinct sub-claims, hypotheses, or angles in this analysis
@@ -666,8 +652,8 @@ def _estimate_novelty(current: str, previous: str) -> float:
                 "  0.6 = substantial new content mixed with familiar ideas\n"
                 "  1.0 = completely new intellectual territory\n\n"
                 "Return ONLY a decimal number.\n\n"
-                f"THOUGHT A:\n{previous[:1000]}\n\n"
-                f"THOUGHT B:\n{current[:1000]}"
+                f"THOUGHT A:\n{previous}\n\n"
+                f"THOUGHT B:\n{current}"
             )
             body = _json.dumps({
                 "model": "flock-model",
@@ -704,8 +690,8 @@ def _estimate_novelty(current: str, previous: str) -> float:
             return set(words)
         return {" ".join(words[i:i + 3]) for i in range(len(words) - 2)}
 
-    t_cur = _trigrams(current[:2000])
-    t_prev = _trigrams(previous[:2000])
+    t_cur = _trigrams(current)
+    t_prev = _trigrams(previous)
     if not t_cur or not t_prev:
         return 1.0
     intersection = len(t_cur & t_prev)
@@ -755,7 +741,7 @@ class SwarmRouter:
                 # Signal 1: Novelty decay (trigram overlap)
                 novelty = _estimate_novelty(latest_text, state.prev_thought_summary)
                 state.novelty_scores.append(novelty)
-                state.prev_thought_summary = latest_text[:2000]
+                state.prev_thought_summary = latest_text
 
                 # Signal 2: LLM-powered exhaustion detection
                 # Instead of brittle substring matching, ask the LLM
@@ -784,7 +770,7 @@ class SwarmRouter:
                             "True exhaustion = the specialist is explicitly "
                             "saying it has nothing new to add.\n\n"
                             "Return ONLY one word: EXHAUSTED or ACTIVE\n\n"
-                            f"TEXT:\n{latest_text[:1000]}"
+                            f"TEXT:\n{latest_text}"
                         )
                         body = _json.dumps({
                             "model": "flock-model",
@@ -909,7 +895,7 @@ def _detect_cross_angle_surprises(
         if rows:
             lines = [f"ANGLE '{angle}':"]
             for rid, fact in rows:
-                lines.append(f"  [#{rid}] {fact[:300]}")
+                lines.append(f"  [#{rid}] {fact}")
             angle_summaries.append("\n".join(lines))
 
     if len(angle_summaries) < 2:
@@ -921,7 +907,7 @@ def _detect_cross_angle_surprises(
         if thoughts:
             latest = thoughts[0]
             angle_summaries.append(
-                f"SPECIALIST THOUGHT for '{angle}': {latest['fact'][:500]}"
+                f"SPECIALIST THOUGHT for '{angle}': {latest['fact']}"
             )
 
     prompt = f"""\

@@ -139,7 +139,7 @@ async def _llm_complete(prompt: str, max_tokens: int = 2048) -> str:
 
 async def _comprehend_query(query: str) -> QueryComprehension:
     """Step 1: produce a deep semantic understanding of the query."""
-    prompt = _COMPREHENSION_PROMPT.replace("{query}", query[:2000])
+    prompt = _COMPREHENSION_PROMPT.replace("{query}", query)
     content = await _llm_complete(prompt)
 
     if not content:
@@ -173,7 +173,7 @@ async def _comprehend_query(query: str) -> QueryComprehension:
         adjacent_territories=data.get("adjacent_territories", [])[:10],
         sub_questions=data.get("sub_questions", [])[:6],
         semantic_summary=data.get("semantic_summary", ""),
-        core_need=data.get("core_need", "")[:500],
+        core_need=data.get("core_need", ""),
     )
 
 
@@ -221,7 +221,7 @@ async def _probe_brave(query: str) -> dict[str, Any]:
                     {
                         "title": r.get("title", ""),
                         "url": r.get("url", ""),
-                        "snippet": r.get("description", "")[:200],
+                        "snippet": r.get("description", ""),
                     }
                     for r in results[:3]
                 ],
@@ -251,11 +251,11 @@ async def _probe_kagi(query: str) -> dict[str, Any]:
                     {
                         "title": r.get("title", ""),
                         "url": r.get("url", ""),
-                        "snippet": r.get("snippet", "")[:200],
+                        "snippet": r.get("snippet", ""),
                     }
                     for r in refs[:3]
                 ],
-                "summary": output[:500] if output else "",
+                "summary": output if output else "",
                 "error": None,
             }
     except Exception as exc:
@@ -314,7 +314,7 @@ async def _assess_landscape(
 ) -> list[SubQuestionAssessment]:
     """Step 4: use LLM to classify each sub-question's tier."""
     probes_text = json.dumps(probes, indent=2, ensure_ascii=False)
-    prompt = _ASSESS_PROMPT.replace("{probes}", probes_text[:6000])
+    prompt = _ASSESS_PROMPT.replace("{probes}", probes_text)
 
     content = await _llm_complete(prompt)
     if not content:

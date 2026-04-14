@@ -414,7 +414,7 @@ class CorpusStore:
                         "(id, fact, source_type, source_ref, row_type, "
                         "consider_for_use, created_at) "
                         "VALUES (?, ?, ?, ?, 'raw', ?, ?)",
-                            [cid, raw_text[:2000], src_type, src_ref,
+                            [cid, raw_text, src_type, src_ref,
                              False, ingested_at or ""],
                     )
                 logger.info("Migrated %d raw_ingestion rows", len(raw_rows))
@@ -1021,10 +1021,8 @@ class CorpusStore:
         "novel" meant.
         """
         url_text = source_url if source_url else "(no URL)"
-        # Truncate for prompt budget (fact can be long)
-        fact_short = fact[:800]
         query_ctx = (
-            f"Research question: {user_query[:500]}\n" if user_query else ""
+            f"Research question: {user_query}\n" if user_query else ""
         )
 
         # Build all scoring prompts up front — each one is query-aware
@@ -1040,7 +1038,7 @@ class CorpusStore:
                 "0.8 = specific claim citing named studies/data. "
                 "1.0 = verifiable fact with exact citations.\n"
                 "Return ONLY a decimal number.\n"
-                f"Finding: {fact_short}",
+                f"Finding: {fact}",
                 "score_confidence",
             ),
             (
@@ -1066,7 +1064,7 @@ class CorpusStore:
                 "1.0 = contains exact data points, measurements, or "
                 "direct quotes with attribution.\n"
                 "Return ONLY a decimal number.\n"
-                f"Finding: {fact_short}",
+                f"Finding: {fact}",
                 "score_specificity",
             ),
             (
@@ -1079,7 +1077,7 @@ class CorpusStore:
                 "1.0 = likely fabricated — names fake studies, "
                 "impossible statistics, or hallucinates details.\n"
                 "Return ONLY a decimal number.\n"
-                f"Finding: {fact_short}\nSource: {url_text}",
+                f"Finding: {fact}\nSource: {url_text}",
                 "score_fabrication",
             ),
             (
@@ -1095,7 +1093,7 @@ class CorpusStore:
                 "0.8 = unusual connection or rarely cited finding. "
                 "1.0 = genuinely surprising or contrarian.\n"
                 "Return ONLY a decimal number.\n"
-                f"Finding: {fact_short}",
+                f"Finding: {fact}",
                 "score_novelty",
             ),
             (
@@ -1110,7 +1108,7 @@ class CorpusStore:
                 "1.0 = a key finding that could change the direction "
                 "of the research.\n"
                 "Return ONLY a decimal number.\n"
-                f"Finding: {fact_short}",
+                f"Finding: {fact}",
                 "score_actionability",
             ),
         ]
@@ -1131,7 +1129,7 @@ class CorpusStore:
                 "0.7 = directly addresses a sub-question. "
                 "1.0 = core finding that precisely answers the query.\n"
                 "Return ONLY a decimal number.\n"
-                f"Finding: {fact_short}",
+                f"Finding: {fact}",
                 "score_relevance",
             ))
 
@@ -2895,7 +2893,7 @@ class CorpusStore:
                 )[:15]  # Cap at 15 per angle to keep it compact
                 for c in top:
                     q = c.get("composite_quality") or 0
-                    fact = (c.get("fact") or "")[:200]
+                    fact = c.get("fact") or ""
                     lines.append(f"  [{c['id']}] (q={q:.2f}) {fact}")
                 if len(findings) > 15:
                     lines.append(f"  ... and {len(findings) - 15} more findings")
@@ -2936,7 +2934,7 @@ class CorpusStore:
 
             lines.append(f"--- Source Passage (chunk {chunk_id}) ---")
             if chunk_text:
-                lines.append(chunk_text[:2000])
+                lines.append(chunk_text)
             lines.append("")
             lines.append("Extracted findings:")
 
@@ -2964,8 +2962,8 @@ class CorpusStore:
         if edges:
             lines.append("RELATIONSHIPS BETWEEN FINDINGS:")
             for src, tgt, rel in edges:
-                src_preview = cond_by_id[src]["fact"][:80] if src in cond_by_id else f"[{src}]"
-                tgt_preview = cond_by_id[tgt]["fact"][:80] if tgt in cond_by_id else f"[{tgt}]"
+                src_preview = cond_by_id[src]["fact"] if src in cond_by_id else f"[{src}]"
+                tgt_preview = cond_by_id[tgt]["fact"] if tgt in cond_by_id else f"[{tgt}]"
                 lines.append(
                     f"  [{src}] --{rel}--> [{tgt}]"
                 )
@@ -2981,7 +2979,7 @@ class CorpusStore:
                     if mid in cond_by_id:
                         chain_facts.append(
                             f"  {len(chain_facts) + 1}. [{mid}] "
-                            f"{cond_by_id[mid]['fact'][:120]}"
+                            f"{cond_by_id[mid]['fact']}"
                         )
                 if chain_facts:
                     lines.append(f"Thread {i}:")
@@ -3005,8 +3003,8 @@ class CorpusStore:
                 if partner_c:
                     lines.append(
                         f"  [{c['id']}] vs [{partner}]: "
-                        f"{c['fact'][:200]} CONTRADICTS "
-                        f"{partner_c['fact'][:200]}"
+                        f"{c['fact']} CONTRADICTS "
+                        f"{partner_c['fact']}"
                     )
             lines.append("")
 
@@ -3055,7 +3053,7 @@ class CorpusStore:
                 for ins in insights:
                     lines.append(
                         f"  [insight #{ins['id']}, angle={ins['angle']}]: "
-                        f"{ins['fact'][:500]}"
+                        f"{ins['fact']}"
                     )
                 lines.append("")
 
@@ -3074,7 +3072,7 @@ class CorpusStore:
                     for v in verdicts:
                         lines.append(
                             f"    [thought #{v['id']}, iter={v['iteration']}]: "
-                            f"{v['fact'][:400]}"
+                            f"{v['fact']}"
                         )
                 if specialists:
                     lines.append("  SPECIALIST ANALYSIS:")
@@ -3082,7 +3080,7 @@ class CorpusStore:
                         depth_tag = f" depth={s['expansion_depth']}" if s.get("expansion_depth", 0) > 0 else ""
                         lines.append(
                             f"    [thought #{s['id']}, iter={s['iteration']}"
-                            f"{depth_tag}]: {s['fact'][:300]}"
+                            f"{depth_tag}]: {s['fact']}"
                         )
                 lines.append("")
 
@@ -3264,7 +3262,7 @@ class CorpusStore:
 
             lines.append(f"--- Source Passage (chunk {chunk_id}) ---")
             if chunk_text:
-                lines.append(chunk_text[:2000])
+                lines.append(chunk_text)
             lines.append("")
             lines.append("Key findings for synthesis:")
             for c in atoms:
@@ -3289,7 +3287,7 @@ class CorpusStore:
                     if mid in cond_by_id:
                         chain_items.append(
                             f"  {len(chain_items) + 1}. "
-                            f"{cond_by_id[mid]['fact'][:150]}"
+                            f"{cond_by_id[mid]['fact']}"
                         )
                 if chain_items:
                     lines.append(f"Thread {i}:")
@@ -3310,6 +3308,173 @@ class CorpusStore:
             f"{strong} strongly supported. "
             f"{len(chains)} narrative threads to weave. "
             f"{contradictions} contradictions to address."
+        )
+
+        return "\n".join(lines)
+
+    def format_for_specialist(self, angle: str, user_query: str = "") -> str:
+        """Format a FULL per-angle corpus view for a specialist thinker.
+
+        Each specialist in the swarm receives a **complete**, untruncated
+        view of the findings relevant to their assigned angle.  This is
+        the swarm's corpus-partitioning mechanism — inspired by the
+        deep-search-portal pattern of decomposing a query into targeted
+        sub-probes.
+
+        Instead of giving every specialist a truncated copy of the whole
+        corpus, each specialist gets:
+
+        1. **Full findings for their angle** — every finding tagged with
+           this angle, rendered in full verbal prose via ``_describe_finding``.
+        2. **Unassigned findings** — findings with no angle tag that may
+           be relevant to any specialist.
+        3. **Prior thoughts for this angle** — full text of prior
+           specialist analysis, arbitration verdicts, and insights so the
+           specialist can build on previous work.
+        4. **Orientation** — a one-line count of what other angles exist
+           in the corpus (the specialist doesn't need their data, just
+           awareness that parallel investigation is happening).
+
+        Because each specialist is spawned with a **clean context**, the
+        per-angle slice is naturally smaller than the full corpus, making
+        context overflow a non-issue for typical research corpora.
+
+        Args:
+            angle: The specialist's assigned research angle.
+            user_query: The user's original query for context.
+        """
+        lines: list[str] = []
+
+        # ── Query per-angle findings ──
+        cols = [
+            "id", "fact", "source_url", "confidence", "trust_score",
+            "novelty_score", "specificity_score", "duplication_score",
+            "fabrication_risk", "verification_status", "angle",
+            "parent_id", "related_id", "expansion_depth", "iteration",
+            "row_type", "consider_for_use",
+            "composite_quality", "information_density", "cross_ref_boost",
+            "relevance_score", "actionability_score",
+            "cluster_id", "cluster_rank",
+            "expansion_tool", "expansion_hint", "expansion_fulfilled",
+            "contradiction_flag", "contradiction_partner",
+            "staleness_penalty", "processing_status",
+        ]
+        angle_rows = self.conn.execute(
+            """SELECT id, fact, source_url, confidence, trust_score,
+                      novelty_score, specificity_score, duplication_score,
+                      fabrication_risk, verification_status, angle,
+                      parent_id, related_id, expansion_depth, iteration,
+                      row_type, consider_for_use,
+                      composite_quality, information_density, cross_ref_boost,
+                      relevance_score, actionability_score,
+                      cluster_id, cluster_rank,
+                      expansion_tool, expansion_hint, expansion_fulfilled,
+                      contradiction_flag, contradiction_partner,
+                      staleness_penalty, processing_status
+               FROM conditions
+               WHERE consider_for_use = TRUE
+                 AND row_type = 'finding'
+                 AND angle = ?
+               ORDER BY composite_quality DESC, novelty_score DESC""",
+            [angle],
+        ).fetchall()
+        angle_findings = [dict(zip(cols, row)) for row in angle_rows]
+
+        # ── Unassigned findings (no angle — potentially relevant) ──
+        unassigned_rows = self.conn.execute(
+            """SELECT id, fact, source_url, confidence, trust_score,
+                      novelty_score, specificity_score, duplication_score,
+                      fabrication_risk, verification_status, angle,
+                      parent_id, related_id, expansion_depth, iteration,
+                      row_type, consider_for_use,
+                      composite_quality, information_density, cross_ref_boost,
+                      relevance_score, actionability_score,
+                      cluster_id, cluster_rank,
+                      expansion_tool, expansion_hint, expansion_fulfilled,
+                      contradiction_flag, contradiction_partner,
+                      staleness_penalty, processing_status
+               FROM conditions
+               WHERE consider_for_use = TRUE
+                 AND row_type = 'finding'
+                 AND (angle IS NULL OR angle = '')
+               ORDER BY composite_quality DESC""",
+        ).fetchall()
+        unassigned_findings = [dict(zip(cols, row)) for row in unassigned_rows]
+
+        # ── Orientation: other angles ──
+        other_angles = self.conn.execute(
+            """SELECT angle, COUNT(*) FROM conditions
+               WHERE row_type = 'finding' AND consider_for_use = TRUE
+                 AND angle != ? AND angle IS NOT NULL AND angle != ''
+               GROUP BY angle ORDER BY COUNT(*) DESC""",
+            [angle],
+        ).fetchall()
+
+        # ── Prior thoughts for this angle ──
+        prior_thoughts = self.get_thoughts_by_angle(angle)
+
+        # ── Build the briefing ──
+        lines.append(f"SPECIALIST BRIEFING: angle '{angle}'")
+        if user_query:
+            lines.append(f"USER QUERY: {user_query}")
+        lines.append(f"  {len(angle_findings)} findings for your angle")
+        lines.append(f"  {len(unassigned_findings)} unassigned findings")
+        if other_angles:
+            other_summary = ", ".join(f"{a} ({n})" for a, n in other_angles)
+            lines.append(f"  Other angles under investigation: {other_summary}")
+        lines.append("")
+
+        # ── Full findings for this angle ──
+        if angle_findings:
+            lines.append("=" * 60)
+            lines.append(f"FINDINGS FOR '{angle}' (full detail)")
+            lines.append("=" * 60)
+            lines.append("")
+            for c in angle_findings:
+                lines.append(self._describe_finding(c))
+                lines.append("")
+
+        # ── Unassigned findings ──
+        if unassigned_findings:
+            lines.append("=" * 60)
+            lines.append("UNASSIGNED FINDINGS (potentially relevant)")
+            lines.append("=" * 60)
+            lines.append("")
+            for c in unassigned_findings:
+                lines.append(self._describe_finding(c))
+                lines.append("")
+
+        # ── Prior thoughts (full text) ──
+        if prior_thoughts:
+            lines.append("=" * 60)
+            lines.append(f"PRIOR ANALYSIS FOR '{angle}' (build on this)")
+            lines.append("=" * 60)
+            lines.append("")
+            for t in prior_thoughts:
+                depth_tag = (
+                    f", depth={t['expansion_depth']}"
+                    if t.get("expansion_depth", 0) > 0 else ""
+                )
+                lines.append(
+                    f"[thought #{t['id']}, strategy={t['strategy']}, "
+                    f"iter={t['iteration']}{depth_tag}]:"
+                )
+                lines.append(t["fact"])
+                lines.append("")
+
+        # ── Corpus health for this angle ──
+        strong = sum(
+            1 for c in angle_findings
+            if (c.get("composite_quality") or 0) >= 0.6
+        )
+        weak = sum(
+            1 for c in angle_findings
+            if (c.get("composite_quality") or 0) < 0.3
+        )
+        lines.append(
+            f"ANGLE HEALTH: {len(angle_findings)} findings for '{angle}'. "
+            f"{strong} strong, {weak} weak. "
+            f"{len(prior_thoughts)} prior thoughts."
         )
 
         return "\n".join(lines)
@@ -3692,7 +3857,7 @@ class CorpusStore:
                 "voice and nuance. Include ALL facts, names, "
                 "numbers, URLs. This section will be merged "
                 "with other sections. Stay under 6000 chars."
-                "\nSource passage:\n" + (chunk_text[:3000] or "(no source)")
+                "\nSource passage:\n" + (chunk_text or "(no source)")
                 + "\n\nExtracted findings:\n" + facts_text
                 + "\nUser query: " + user_query,
                 caller="gossip_phase1_worker",
@@ -3761,7 +3926,7 @@ class CorpusStore:
                 for mid in chain:
                     if mid in cond_by_id:
                         items.append(
-                            f"  {len(items) + 1}. {cond_by_id[mid]['fact'][:150]}"
+                            f"  {len(items) + 1}. {cond_by_id[mid]['fact']}"
                         )
                 if items:
                     chain_lines.append(f"Thread {i}:")
