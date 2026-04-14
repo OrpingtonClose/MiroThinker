@@ -829,8 +829,9 @@ def get_corpus_text(state: dict) -> str:
     the synthesiser can produce its report.
     """
     corpus_key = state.get("_corpus_key", "default")
-    if not _wait_for_pending_scoring(corpus_key):
-        logger.warning("get_corpus_text: scoring thread still alive — returning cached state")
+    lock = _get_corpus_lock(corpus_key)
+    if lock.locked():
+        logger.warning("get_corpus_text: async lock held — returning cached state")
         return state.get("corpus_for_synthesis", "")
     key = state.get("_corpus_key")
     if key and key in _corpus_stores:
@@ -856,11 +857,12 @@ def run_swarm_synthesis(state: dict) -> str:
     corpus = _corpus_stores[key]
     user_query = state.get("user_query", "")
 
-    # Non-blocking check: is scoring still running?
+    # Non-blocking check: is the async lock held (DuckDB in use)?
     corpus_key = key  # reuse the key we already validated above
-    if not _wait_for_pending_scoring(corpus_key):
+    lock = _get_corpus_lock(corpus_key)
+    if lock.locked():
         logger.warning(
-            "run_swarm_synthesis: scoring thread still alive — "
+            "run_swarm_synthesis: async lock held — "
             "returning cached corpus_for_synthesis to avoid concurrent DuckDB access",
         )
         return state.get("corpus_for_synthesis", "")
@@ -896,19 +898,22 @@ def cleanup_corpus(state: dict) -> None:
     :func:`_init_pipeline_state` properly re-initialises on the next
     pipeline run within the same session.
     """
-    # Best-effort wait for background scoring before closing the DB.
-    # This is the ONE place where a blocking join is acceptable —
-    # the pipeline is finishing and no more SSE events will be sent.
+    # Best-effort wait for background swarm task before closing the DB.
+    # The pipeline is finishing — no more SSE events will be sent.
     corpus_key = state.get("_corpus_key", "default")
-    with _scoring_lock:
-        _cleanup_t = _scoring_threads.get(corpus_key)
-    if _cleanup_t is not None and _cleanup_t.is_alive():
-        logger.info("cleanup_corpus: waiting up to 30s for scoring thread (key=%s)", corpus_key)
-        _cleanup_t.join(timeout=30)
-    scoring_done = _cleanup_t is None or not _cleanup_t.is_alive()
-    with _scoring_lock:
-        if _scoring_threads.get(corpus_key) is _cleanup_t:
-            _scoring_threads.pop(corpus_key, None)
+    swarm_task = _swarm_tasks.pop(corpus_key, None)
+    task_done = True
+    if swarm_task is not None and not swarm_task.done():
+        logger.info("cleanup_corpus: cancelling pending swarm task (key=%s)", corpus_key)
+        swarm_task.cancel()
+        # Give the task a moment to honour cancellation.
+        # We cannot await here (sync function), but cancellation
+        # is immediate for asyncio tasks waiting on the lock.
+        import time
+        time.sleep(0.5)
+        task_done = swarm_task.done()
+    # Clean up the per-corpus async lock entry
+    _corpus_async_locks.pop(corpus_key, None)
     key = state.get("_corpus_key")
     if key and key in _corpus_stores:
         corpus = _corpus_stores[key]
@@ -958,14 +963,14 @@ def cleanup_corpus(state: dict) -> None:
         except Exception:
             pass
 
-        if not scoring_done:
-            # Scoring thread still alive — do NOT close the connection
+        if not task_done:
+            # Swarm task still running — do NOT close the connection
             # while it's mid-query.  Drop our reference and let the
-            # daemon thread finish naturally; the connection will be
-            # garbage-collected once the thread exits.
+            # task finish naturally; the connection will be
+            # garbage-collected once the task completes.
             logger.warning(
-                "cleanup_corpus: scoring thread still alive after 30s — "
-                "abandoning CorpusStore for key=%s (will GC after thread exits)",
+                "cleanup_corpus: swarm task still running — "
+                "abandoning CorpusStore for key=%s (will GC after task completes)",
                 key,
             )
             del _corpus_stores[key]
