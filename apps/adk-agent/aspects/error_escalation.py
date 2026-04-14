@@ -155,6 +155,9 @@ class ErrorEscalationAspect(Aspect):
             )
 
         # ── PipelineDegraded: absorb but track ──
+        # Policy: CONTINUE but track in state for quality manifest.
+        # Does NOT defer to block criticality — degraded errors are
+        # always absorbed.  Only PipelineCritical triggers ABORT.
         if isinstance(typed_error, PipelineDegraded):
             logger.warning(
                 "ErrorEscalation: degraded error in '%s': %s",
@@ -165,6 +168,14 @@ class ErrorEscalationAspect(Aspect):
                 "error": str(typed_error),
                 "category": "degraded",
             })
+            return BlockResult(
+                metrics={
+                    "error": str(typed_error),
+                    "block_failed": True,
+                    "escalation": "degraded_absorbed",
+                },
+                routing=RoutingHint.CONTINUE,
+            )
 
         # ── CRITICAL block (by criticality) → ABORT ──
         if block.criticality == BlockCriticality.CRITICAL:

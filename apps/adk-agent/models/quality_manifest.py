@@ -76,13 +76,23 @@ class QualityManifest:
             if status.get("reachable", True)
         ]
 
-        # Corpus metrics (requires active corpus)
+        # Corpus metrics (requires active corpus + unlocked DuckDB)
         try:
-            from callbacks.condition_manager import _corpus_stores
+            from callbacks.condition_manager import _corpus_stores, _get_corpus_lock
             corpus_key = state.get("_corpus_key")
             if corpus_key and corpus_key in _corpus_stores:
-                corpus = _corpus_stores[corpus_key]
-                _populate_corpus_metrics(manifest, corpus)
+                # Check if the per-corpus async lock is held by a background
+                # task (e.g. swarm scoring).  If locked, skip DuckDB reads
+                # to avoid concurrent access to a non-thread-safe connection.
+                lock = _get_corpus_lock(corpus_key)
+                if lock.locked():
+                    logger.debug(
+                        "QualityManifest: skipping corpus metrics — lock held (key=%s)",
+                        corpus_key,
+                    )
+                else:
+                    corpus = _corpus_stores[corpus_key]
+                    _populate_corpus_metrics(manifest, corpus)
         except Exception:
             logger.debug("QualityManifest: could not read corpus metrics")
 
