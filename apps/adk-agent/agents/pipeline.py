@@ -94,6 +94,49 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _preflight_api_check() -> dict[str, dict]:
+    """Lightweight health check for all configured search APIs.
+
+    Returns a dict of ``{api_name: {"reachable": bool, "error": str}}``.
+    Each check is a simple HEAD/GET request with a short timeout — no
+    actual search queries are fired.  Failed APIs are recorded as
+    degradations, not pipeline aborts (graceful degradation).
+    """
+    import os as _os
+
+    results: dict[str, dict] = {}
+
+    # Map of API name → (env var for key, health-check URL)
+    api_checks = {
+        "exa": ("EXA_API_KEY", "https://api.exa.ai"),
+        "tavily": ("TAVILY_API_KEY", "https://api.tavily.com"),
+        "serper": ("SERPER_API_KEY", "https://google.serper.dev"),
+        "jina": ("JINA_API_KEY", "https://r.jina.ai"),
+        "brave": ("BRAVE_API_KEY", "https://api.search.brave.com"),
+    }
+
+    for name, (env_var, url) in api_checks.items():
+        key = _os.environ.get(env_var, "")
+        if not key:
+            results[name] = {"reachable": False, "error": "API key not configured"}
+            continue
+        try:
+            import urllib.request
+            req = urllib.request.Request(url, method="HEAD")
+            req.add_header("Authorization", f"Bearer {key}")
+            urllib.request.urlopen(req, timeout=5)
+            results[name] = {"reachable": True}
+        except Exception as exc:
+            # A 4xx from HEAD is still "reachable" — the server responded
+            err_str = str(exc)
+            if "HTTP Error 4" in err_str or "HTTP Error 405" in err_str:
+                results[name] = {"reachable": True}
+            else:
+                results[name] = {"reachable": False, "error": err_str[:200]}
+
+    return results
+
+
 def _init_pipeline_state(
     callback_context: CallbackContext,
 ) -> Optional[genai_types.Content]:
@@ -107,31 +150,30 @@ def _init_pipeline_state(
     state = callback_context.state
     if "_corpus_key" not in state:
         # ── Corpus continuity: reopen the previous run's corpus ──
-        # Try state first, then module-level fallbacks (query map, last path).
-        # The AG-UI adapter may overwrite session state between requests,
-        # so the module-level variables are the robust fallback.
-        from callbacks.condition_manager import (
-            _corpus_continuity_map,
-            _last_corpus_db_path,
-        )
-
+        # Try state first, then PipelineStateRegistry (Phase 1).
+        # The registry survives across AG-UI HTTP requests without
+        # relying on fragile module-level mutable state.
         prev_db = state.get("_prev_corpus_db_path", "")
         if not prev_db:
-            # Fallback 1: query-fingerprint map (multi-tenant safe)
-            query_fp = state.get("user_query", "")[:200].strip().lower()
-            if query_fp and query_fp in _corpus_continuity_map:
-                prev_db = _corpus_continuity_map[query_fp]
-                logger.info(
-                    "Corpus continuity (query-map fallback): %s",
-                    prev_db,
-                )
-        if not prev_db and _last_corpus_db_path:
-            # Fallback 2: last corpus in this process (single-tenant)
-            prev_db = _last_corpus_db_path
-            logger.info(
-                "Corpus continuity (module-level fallback): %s",
-                prev_db,
-            )
+            try:
+                from models.pipeline_state import PipelineStateRegistry
+                registry = PipelineStateRegistry.instance()
+                user_query = state.get("user_query", "")
+                # Primary: query-fingerprint lookup
+                prev_db = registry.lookup(user_query) or ""
+                if prev_db:
+                    logger.info(
+                        "Corpus continuity (registry lookup): %s", prev_db,
+                    )
+                else:
+                    # Fallback: last registered path (any query)
+                    prev_db = registry.lookup_fallback() or ""
+                    if prev_db:
+                        logger.info(
+                            "Corpus continuity (registry fallback): %s", prev_db,
+                        )
+            except Exception:
+                prev_db = ""
 
         # Verify the file actually exists before trying to reopen
         import os as _os
@@ -183,6 +225,37 @@ def _init_pipeline_state(
             health.save(state)
         except Exception:
             logger.warning("Failed to initialise PipelineHealth", exc_info=True)
+
+        # ── Phase 5: Pre-flight API validation ──
+        # Validate all configured search APIs are reachable before the
+        # pipeline wastes time on a run that will produce zero results.
+        # Pipeline does NOT abort for API failures (graceful degradation).
+        # Results are stored in state for the QualityManifest (Phase 4).
+        try:
+            _api_health = _preflight_api_check()
+            state["_api_health"] = _api_health
+            failed = [k for k, v in _api_health.items() if not v.get("reachable")]
+            if failed:
+                logger.warning(
+                    "Pre-flight API check: %d/%d APIs unreachable: %s",
+                    len(failed), len(_api_health), ", ".join(failed),
+                )
+                # Store as degradations for the quality manifest
+                degradations = state.get("_pipeline_degradations", [])
+                for name in failed:
+                    degradations.append({
+                        "source": name,
+                        "error": _api_health[name].get("error", "unreachable"),
+                        "category": "api_preflight_failure",
+                    })
+                state["_pipeline_degradations"] = degradations
+            else:
+                logger.info(
+                    "Pre-flight API check: all %d APIs reachable",
+                    len(_api_health),
+                )
+        except Exception:
+            logger.debug("Pre-flight API check failed (non-fatal)", exc_info=True)
 
         # ── P0: Skip scout on corpus re-open ──
         # The scout decomposes the query and probes with cheap searches.
@@ -250,91 +323,37 @@ def _init_pipeline_state(
     return None
 
 
-def _pre_synthesiser_swarm(
+async def _pre_synthesiser_swarm(
     callback_context: CallbackContext,
 ) -> Optional[genai_types.Content]:
     """Run Flock gossip swarm synthesis before the final synthesiser.
 
-    Replaces the raw corpus of atomic conditions in
-    ``state["corpus_for_synthesis"]`` with the swarm-synthesised report.
-    The swarm uses a 3-phase gossip protocol for large corpora:
-    per-angle workers → peer refinement → queen merge.
-
-    The final synthesiser agent then polishes and restructures this
-    swarm output — it works on a pre-synthesised narrative, not terse
-    atomic facts.
+    Thin wrapper that delegates to ``SwarmSynthesisBlock`` via the block
+    adapter.  All cross-cutting concerns are handled by aspects.
     """
-    state = callback_context.state
-    swarm_report = run_swarm_synthesis(state)
-    if swarm_report and swarm_report.strip():
-        state["corpus_for_synthesis"] = swarm_report
-        logger.info(
-            "Swarm synthesis injected into corpus_for_synthesis "
-            "(%d chars)",
-            len(swarm_report),
-        )
-    else:
-        logger.warning(
-            "Swarm synthesis returned empty — final synthesiser "
-            "will read the raw corpus format instead"
-        )
+    from callbacks.block_adapter import run_block_from_callback
+    await run_block_from_callback("swarm_synthesis", callback_context)
     return None
 
 
-def _cleanup_pipeline_state(
+async def _cleanup_pipeline_state(
     callback_context: CallbackContext,
 ) -> Optional[genai_types.Content]:
     """Release the CorpusStore after the pipeline finishes.
 
-    Mirrors :func:`_init_pipeline_state` — closes the DuckDB connection
-    and removes the store from the module-level ``_corpus_stores`` dict
-    so memory and connections are not leaked across runs.
-
-    Also records the final pipeline health verdict.
+    Delegates the synthesiser health check to ``SynthesiserBlock`` via
+    the block adapter (aspects handle health tracking), then performs
+    cleanup of the corpus store.
     """
-    state = callback_context.state
+    from callbacks.block_adapter import run_block_from_callback
 
-    # ── Pipeline health gate: synthesiser (final) ──
-    # The synthesiser just ran — check if it produced a useful report.
+    # Run synthesiser block for health tracking and metrics
     try:
-        from models.pipeline_health import PipelineHealth, check_synthesiser
-        health = PipelineHealth.from_state(state)
-        phase = health.begin_phase("synthesiser")
-        # corpus_for_synthesis is the swarm output (synthesiser's INPUT).
-        # The synthesiser itself has no output_key so its output goes to
-        # conversation history.  We measure whether the swarm provided
-        # content for the synthesiser to work with.
-        swarm_output = state.get("corpus_for_synthesis", "")
-        phase.metrics["swarm_input_length"] = len(swarm_output) if swarm_output else 0
-        # Count corpus findings for the health check.
-        # MUST check that no background scoring thread is alive before
-        # touching DuckDB — connections are not thread-safe.
-        try:
-            from callbacks.condition_manager import (
-                _corpus_stores, _wait_for_pending_scoring,
-            )
-            corpus_key = state.get("_corpus_key")
-            if corpus_key and corpus_key in _corpus_stores:
-                safe = _wait_for_pending_scoring(corpus_key)
-                if safe:
-                    corpus = _corpus_stores[corpus_key]
-                    phase.metrics["corpus_findings"] = corpus.conn.execute(
-                        "SELECT COUNT(*) FROM conditions "
-                        "WHERE row_type = 'finding'"
-                    ).fetchone()[0]
-                else:
-                    # Scoring thread still alive — skip DuckDB query
-                    phase.metrics["corpus_findings"] = -1
-        except Exception:
-            phase.metrics["corpus_findings"] = 0
-        check_synthesiser(phase, state)
-        health.evaluate_gate(phase)
-        health.save(state)
-        logger.info("Final pipeline health: %s", health.summary())
+        await run_block_from_callback("synthesiser", callback_context)
     except Exception:
-        logger.warning("Pipeline health (final) failed (non-fatal)", exc_info=True)
+        logger.warning("Synthesiser block failed (non-fatal)", exc_info=True)
 
-    cleanup_corpus(state)
+    cleanup_corpus(callback_context.state)
     return None
 
 
@@ -401,16 +420,13 @@ pipeline_agent = SequentialAgent(
 
 
 # ---------------------------------------------------------------------------
-# PIPELINE_MODE=blocks — aspect-oriented block pipeline (feature-flagged)
+# Aspect-oriented block pipeline
 # ---------------------------------------------------------------------------
-# When PIPELINE_MODE=blocks, ADK callbacks delegate to PipelineRunner
-# which applies aspects uniformly around each block's execution.
-# The ADK agent graph is unchanged — blocks wrap the same logic that
-# callbacks currently do, but with clean I/O contracts and cross-cutting
-# concerns handled by aspects instead of ad-hoc inline code.
+# ADK callbacks delegate to PipelineRunner which applies aspects
+# uniformly around each block's execution.  The ADK agent graph is
+# unchanged — blocks wrap the same logic, but with clean I/O contracts
+# and cross-cutting concerns handled by aspects.
 # ---------------------------------------------------------------------------
-
-_PIPELINE_MODE = os.environ.get("PIPELINE_MODE", "callbacks")
 
 
 def build_pipeline_runner() -> "PipelineRunner":
