@@ -84,9 +84,15 @@ async def thinker_escalate_callback(
             )
         except Exception:
             logger.warning(
-                "Failed to admit thinker thought (non-fatal)",
+                "Failed to admit thinker thought — deferring to search_executor",
                 exc_info=True,
             )
+            state["_pending_thinker_thought"] = {
+                "reasoning": strategy,
+                "angle": "thinker_reasoning",
+                "strategy": f"thinker_iteration_{iteration}",
+                "iteration": iteration,
+            }
 
         # Keep a condensed version in state for the prompt context
         # (thought rows are in the corpus briefing, but this provides
