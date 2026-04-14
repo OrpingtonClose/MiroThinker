@@ -1,31 +1,35 @@
-"""MiroThinker Pipeline Diagnostic Tool (BAT.AI pattern).
+"""MiroThinker Pipeline Diagnostic Tool — Architectural Guardrail Edition.
 
-Standalone self-corrective RAG diagnostic that analyses pipeline logs and
-DuckDB corpus state to answer:
+Standalone diagnostic that analyses pipeline logs and DuckDB corpus state.
+Unlike the original BAT.AI-pattern diagnostic, this version uses
+**deterministic health checks first** — not LLM vibes — to establish
+severity.  The LLM only runs AFTER deterministic checks have flagged
+the issues.
 
-    1. **Health check** — Did the pipeline work well?  What could improve?
-    2. **Post-failure forensics** — What went wrong and why?
-    3. **Remediation** — What specific code/config change would fix it?
+Architecture:
+    1. Deterministic health checks (SQL queries + log pattern matching)
+       → each check returns a severity (CRITICAL / WARNING / OK)
+    2. Aggregate severity → overall verdict (HEALTHY / DEGRADED / FAILED)
+    3. LLM analysis ONLY if there are findings to explain
+    4. Structured report with transparent failure evidence
+
+The key insight: the original diagnostic reported "2 minor things" for a
+run where academic search was 100% broken, 60% of findings were noise,
+Flock scoring never ran, and the synthesiser never ran.  That happened
+because it delegated all judgment to a permissive LLM.  This version
+makes the *detection* deterministic and only uses the LLM for
+*explanation* of detected issues.
 
 Usage (standalone):
-    python -m tools.pipeline_diagnostic \
-        --log /tmp/mirothinker_pipeline.log \
-        --db  /path/to/corpus.duckdb \
+    python -m tools.pipeline_diagnostic \\
+        --log /tmp/mirothinker_pipeline.log \\
+        --db  /path/to/corpus.duckdb \\
         --question "Why did the pipeline stop after iteration 1?"
 
-    # Or just health-check mode (no question):
-    python -m tools.pipeline_diagnostic \
-        --log /tmp/mirothinker_pipeline.log \
+    # Health-check mode (no question):
+    python -m tools.pipeline_diagnostic \\
+        --log /tmp/mirothinker_pipeline.log \\
         --db  /path/to/corpus.duckdb
-
-Architecture (adapted from NVIDIA BAT.AI):
-    1. Ingest log file + DuckDB corpus → structured chunks
-    2. Hybrid retrieval: keyword search + DuckDB SQL queries
-    3. Relevance grading via LLM
-    4. Generate diagnosis
-    5. Self-correct: if diagnosis isn't grounded or doesn't answer
-       the question, rewrite query and re-retrieve (max 2 transforms)
-    6. Output structured health report
 """
 
 from __future__ import annotations
@@ -34,12 +38,13 @@ import argparse
 import json
 import logging
 import os
-import re
 import sys
 import textwrap
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
+from typing import Any
 
 import duckdb
 from dotenv import load_dotenv
@@ -48,641 +53,1167 @@ load_dotenv(override=True)
 
 logger = logging.getLogger(__name__)
 
-# ── Configuration ─────────────────────────────────────────────────
 
-# Use the same LLM the pipeline uses — no new dependencies.
-def _resolve_model() -> str:
-    """Resolve the LLM model string for direct litellm calls.
+# ---------------------------------------------------------------------------
+# Severity model
+# ---------------------------------------------------------------------------
 
-    ADK_MODEL uses a ``litellm/openai/openai/gpt-4o-mini`` format that only
-    works inside ADK's wrapper.  For raw ``litellm.completion()`` calls we
-    strip the ``litellm/`` prefix and collapse to ``openai/<model>``.
-    """
-    explicit = os.environ.get("DIAGNOSTIC_MODEL")
-    if explicit:
-        return explicit
-    adk_model = os.environ.get("ADK_MODEL", "")
-    if adk_model.startswith("litellm/"):
-        # "litellm/openai/openai/gpt-4o-mini" → "openai/gpt-4o-mini"
-        parts = adk_model.split("/")
-        # Keep provider + model (last two segments)
-        return "/".join(parts[-2:]) if len(parts) >= 3 else adk_model
-    return adk_model or "openai/gpt-4o-mini"
+class Severity(str, Enum):
+    """Diagnostic check severity levels."""
+    OK = "OK"
+    WARNING = "WARNING"
+    CRITICAL = "CRITICAL"
 
-_MODEL = _resolve_model()
-_BASE_URL = os.environ.get("OPENAI_API_BASE", "https://openrouter.ai/api/v1")
-_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+    def __gt__(self, other: object) -> bool:
+        if not isinstance(other, Severity):
+            return NotImplemented
+        order = {Severity.OK: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}
+        return order[self] > order[other]
 
-_MAX_TRANSFORMS = 2          # Self-correction retries
-_CHUNK_SIZE = 8_000           # Characters per log chunk
-_CHUNK_OVERLAP = 2_000        # Overlap between chunks
-_TOP_K = 8                    # Chunks to retrieve per question
-_MAX_CONTEXT_CHARS = 60_000   # Hard cap on context sent to LLM
+    def __ge__(self, other: object) -> bool:
+        if not isinstance(other, Severity):
+            return NotImplemented
+        order = {Severity.OK: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}
+        return order[self] >= order[other]
 
 
-# ── Data models ───────────────────────────────────────────────────
+class Verdict(str, Enum):
+    """Overall pipeline health verdict."""
+    HEALTHY = "HEALTHY"
+    DEGRADED = "DEGRADED"
+    FAILED = "FAILED"
+
 
 @dataclass
-class DiagnosticState:
-    """Tracks the diagnostic workflow state (mirrors BAT.AI GraphState)."""
-    question: str = ""
-    log_path: str = ""
-    db_path: str = ""
-    log_chunks: list[str] = field(default_factory=list)
-    corpus_summary: str = ""
-    retrieved_docs: list[str] = field(default_factory=list)
-    generation: str = ""
-    transform_count: int = 0
-    grounded: bool = False
+class CheckResult:
+    """Result of a single deterministic health check."""
+    name: str
+    severity: Severity
+    message: str
+    evidence: list[str] = field(default_factory=list)
 
 
-# ── Step 1: Ingest ────────────────────────────────────────────────
+@dataclass
+class DiagnosticReport:
+    """Complete diagnostic report."""
+    verdict: Verdict
+    checks: list[CheckResult]
+    corpus_summary: dict[str, Any]
+    log_summary: dict[str, Any]
+    llm_analysis: str = ""
+    elapsed_s: float = 0.0
 
-def _chunk_text(text: str, chunk_size: int = _CHUNK_SIZE,
-                overlap: int = _CHUNK_OVERLAP) -> list[str]:
-    """Split text into overlapping chunks."""
-    chunks: list[str] = []
-    start = 0
-    while start < len(text):
-        end = start + chunk_size
-        chunks.append(text[start:end])
-        start = end - overlap
-    return chunks
+    @property
+    def critical_count(self) -> int:
+        return sum(1 for c in self.checks if c.severity == Severity.CRITICAL)
+
+    @property
+    def warning_count(self) -> int:
+        return sum(1 for c in self.checks if c.severity == Severity.WARNING)
 
 
-def _extract_corpus_summary(db_path: str) -> str:
-    """Query a DuckDB corpus file and produce a structured text summary."""
+# ---------------------------------------------------------------------------
+# Log parser
+# ---------------------------------------------------------------------------
+
+def parse_log_file(log_path: str) -> dict[str, Any]:
+    """Parse a pipeline log file into structured summary.
+
+    Extracts:
+      - Error/warning counts and messages
+      - Phase completion events
+      - Search executor stats
+      - Circuit breaker trips
+      - Stall/timeout events
+      - Heartbeat events
+    """
+    summary: dict[str, Any] = {
+        "errors": [],
+        "warnings": [],
+        "phases_completed": [],
+        "search_executor_stats": {},
+        "circuit_breakers_tripped": [],
+        "stall_events": [],
+        "heartbeats": [],
+        "scoring_events": [],
+        "total_lines": 0,
+        "error_count": 0,
+        "warning_count": 0,
+    }
+
+    if not log_path or not Path(log_path).exists():
+        return summary
+
+    try:
+        text = Path(log_path).read_text(errors="replace")
+    except Exception:
+        return summary
+
+    lines = text.splitlines()
+    summary["total_lines"] = len(lines)
+
+    for line in lines:
+        lower = line.lower()
+
+        # Count errors and warnings
+        if " error " in lower or "error:" in lower or "failed" in lower:
+            summary["error_count"] += 1
+            if len(summary["errors"]) < 50:
+                summary["errors"].append(line.strip()[:300])
+
+        if " warning " in lower or "warning:" in lower:
+            summary["warning_count"] += 1
+            if len(summary["warnings"]) < 30:
+                summary["warnings"].append(line.strip()[:300])
+
+        # Phase completion
+        if "phase" in lower and "complete" in lower:
+            summary["phases_completed"].append(line.strip()[:200])
+
+        # Circuit breaker trips
+        if "circuit breaker tripped" in lower:
+            summary["circuit_breakers_tripped"].append(line.strip()[:200])
+
+        # Stall/timeout events
+        if "timed out" in lower or "stall" in lower or "timeout" in lower:
+            summary["stall_events"].append(line.strip()[:200])
+
+        # Heartbeats
+        if "heartbeat" in lower:
+            summary["heartbeats"].append(line.strip()[:200])
+
+        # Scoring
+        if "scoring" in lower or "scored" in lower:
+            summary["scoring_events"].append(line.strip()[:200])
+
+        # Search executor stats line
+        if "search executor complete" in lower or "search executor stats" in lower:
+            summary["search_executor_stats"]["raw"] = line.strip()[:300]
+
+        # Query rejection
+        if "query rejected" in lower or "queries rejected" in lower:
+            if "query_rejections" not in summary:
+                summary["query_rejections"] = []
+            summary["query_rejections"].append(line.strip()[:200])
+
+        # Academic search failures
+        if ("semantic scholar" in lower or "arxiv" in lower or "scite" in lower) and (
+            "failed" in lower or "error" in lower
+        ):
+            if "academic_failures" not in summary:
+                summary["academic_failures"] = []
+            summary["academic_failures"].append(line.strip()[:200])
+
+        # Mandatory scoring gate
+        if "mandatory scoring gate" in lower:
+            if "mandatory_scoring" not in summary:
+                summary["mandatory_scoring"] = []
+            summary["mandatory_scoring"].append(line.strip()[:200])
+
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Corpus analyser
+# ---------------------------------------------------------------------------
+
+def analyse_corpus(db_path: str) -> dict[str, Any]:
+    """Analyse a DuckDB corpus file and return structured summary.
+
+    All checks are deterministic SQL queries — no LLM involved.
+    """
+    summary: dict[str, Any] = {
+        "exists": False,
+        "total_rows": 0,
+        "total_findings": 0,
+        "total_thoughts": 0,
+        "total_serendipity": 0,
+        "quality_distribution": {"strong": 0, "moderate": 0, "weak": 0},
+        "unscored_count": 0,
+        "unscored_pct": 0.0,
+        "processing_status": {},
+        "source_types": {},
+        "avg_composite_quality": 0.0,
+        "contradiction_count": 0,
+        "iterations_seen": 0,
+        "consider_for_use_count": 0,
+        "excluded_count": 0,
+        "columns": [],
+    }
+
     if not db_path or not Path(db_path).exists():
-        return "(no corpus database provided)"
+        return summary
 
     try:
-        conn = duckdb.connect(db_path, read_only=True)
+        conn = duckdb.connect(str(db_path), read_only=True)
     except Exception as exc:
-        return f"(failed to open corpus DB: {exc})"
+        logger.warning("Cannot open corpus DB %s: %s", db_path, exc)
+        return summary
 
-    sections: list[str] = []
+    summary["exists"] = True
+
     try:
-        # Total counts by row_type
-        try:
-            rows = conn.execute(
-                "SELECT row_type, COUNT(*) as cnt FROM conditions "
-                "GROUP BY row_type ORDER BY cnt DESC"
-            ).fetchall()
-            sections.append("## Row Type Breakdown")
-            for rt, cnt in rows:
-                sections.append(f"  {rt}: {cnt}")
-        except Exception:
-            sections.append("(no conditions table found)")
+        # Get columns
+        cols = conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'conditions'"
+        ).fetchall()
+        summary["columns"] = [c[0] for c in cols]
 
-        # Per-angle breakdown
-        try:
-            rows = conn.execute(
-                "SELECT angle, COUNT(*) as cnt, "
-                "  AVG(CAST(composite_quality AS FLOAT)) as avg_q, "
-                "  SUM(CASE WHEN consider_for_use THEN 1 ELSE 0 END) as active "
-                "FROM conditions WHERE row_type = 'finding' "
-                "GROUP BY angle ORDER BY cnt DESC"
-            ).fetchall()
-            sections.append("\n## Angle Breakdown (findings only)")
-            for angle, cnt, avg_q, active in rows:
-                sections.append(
-                    f"  {angle}: {cnt} total, {active} active, "
-                    f"avg_quality={avg_q:.3f}" if avg_q else
-                    f"  {angle}: {cnt} total, {active} active, avg_quality=N/A"
-                )
-        except Exception:
-            pass
+        # Total rows by type
+        rows = conn.execute(
+            "SELECT row_type, COUNT(*) FROM conditions GROUP BY row_type"
+        ).fetchall()
+        for row_type, count in rows:
+            if row_type == "finding":
+                summary["total_findings"] = count
+            elif row_type == "thought":
+                summary["total_thoughts"] = count
+            elif row_type == "serendipity":
+                summary["total_serendipity"] = count
+            summary["total_rows"] += count
 
-        # Iteration breakdown
-        try:
-            rows = conn.execute(
-                "SELECT iteration, COUNT(*) as cnt FROM conditions "
-                "WHERE row_type = 'finding' "
-                "GROUP BY iteration ORDER BY iteration"
-            ).fetchall()
-            sections.append("\n## Iteration Breakdown (findings)")
-            for it, cnt in rows:
-                sections.append(f"  iteration {it}: {cnt} findings")
-        except Exception:
-            pass
-
-        # Source type breakdown
-        try:
-            rows = conn.execute(
-                "SELECT source_type, COUNT(*) as cnt FROM conditions "
-                "WHERE row_type = 'finding' AND consider_for_use = TRUE "
-                "GROUP BY source_type ORDER BY cnt DESC"
-            ).fetchall()
-            sections.append("\n## Source Type Breakdown (active findings)")
-            for st, cnt in rows:
-                sections.append(f"  {st}: {cnt}")
-        except Exception:
-            pass
-
-        # Quality distribution
-        try:
-            rows = conn.execute(
+        # Quality distribution (findings only)
+        if summary["total_findings"] > 0:
+            qd = conn.execute(
                 "SELECT "
-                "  SUM(CASE WHEN CAST(composite_quality AS FLOAT) >= 0.6 THEN 1 ELSE 0 END) as strong, "
-                "  SUM(CASE WHEN CAST(composite_quality AS FLOAT) >= 0.3 AND CAST(composite_quality AS FLOAT) < 0.6 THEN 1 ELSE 0 END) as moderate, "
-                "  SUM(CASE WHEN CAST(composite_quality AS FLOAT) < 0.3 THEN 1 ELSE 0 END) as weak "
-                "FROM conditions WHERE row_type = 'finding' AND consider_for_use = TRUE"
+                "  SUM(CASE WHEN CAST(composite_quality AS FLOAT) >= 0.6 "
+                "    THEN 1 ELSE 0 END) as strong, "
+                "  SUM(CASE WHEN CAST(composite_quality AS FLOAT) >= 0.3 "
+                "    AND CAST(composite_quality AS FLOAT) < 0.6 "
+                "    THEN 1 ELSE 0 END) as moderate, "
+                "  SUM(CASE WHEN CAST(composite_quality AS FLOAT) < 0.3 "
+                "    THEN 1 ELSE 0 END) as weak "
+                "FROM conditions WHERE row_type = 'finding'"
             ).fetchone()
-            if rows:
-                sections.append(f"\n## Quality Tiers (active findings)")
-                sections.append(f"  strong (>=0.6): {rows[0]}")
-                sections.append(f"  moderate (0.3-0.6): {rows[1]}")
-                sections.append(f"  weak (<0.3): {rows[2]}")
-        except Exception:
-            pass
+            if qd:
+                summary["quality_distribution"] = {
+                    "strong": qd[0] or 0,
+                    "moderate": qd[1] or 0,
+                    "weak": qd[2] or 0,
+                }
+
+        # Unscored findings (score_version = 0 or composite_quality < 0)
+        if "score_version" in summary["columns"]:
+            unscored = conn.execute(
+                "SELECT COUNT(*) FROM conditions "
+                "WHERE row_type = 'finding' AND score_version = 0"
+            ).fetchone()[0]
+        else:
+            unscored = conn.execute(
+                "SELECT COUNT(*) FROM conditions "
+                "WHERE row_type = 'finding' "
+                "AND CAST(composite_quality AS FLOAT) < 0"
+            ).fetchone()[0]
+        summary["unscored_count"] = unscored
+        if summary["total_findings"] > 0:
+            summary["unscored_pct"] = (
+                unscored / summary["total_findings"] * 100
+            )
+
+        # Processing status distribution
+        if "processing_status" in summary["columns"]:
+            ps_rows = conn.execute(
+                "SELECT processing_status, COUNT(*) "
+                "FROM conditions WHERE row_type = 'finding' "
+                "GROUP BY processing_status"
+            ).fetchall()
+            summary["processing_status"] = {
+                row[0]: row[1] for row in ps_rows
+            }
+
+        # Source type distribution
+        if "source_type" in summary["columns"]:
+            st_rows = conn.execute(
+                "SELECT source_type, COUNT(*) "
+                "FROM conditions GROUP BY source_type"
+            ).fetchall()
+            summary["source_types"] = {
+                row[0]: row[1] for row in st_rows
+            }
+
+        # Average composite quality
+        avg = conn.execute(
+            "SELECT AVG(CAST(composite_quality AS FLOAT)) "
+            "FROM conditions WHERE row_type = 'finding' "
+            "AND CAST(composite_quality AS FLOAT) >= 0"
+        ).fetchone()[0]
+        summary["avg_composite_quality"] = round(avg, 3) if avg else 0.0
 
         # Contradictions
-        try:
-            cnt = conn.execute(
+        if "contradiction_flag" in summary["columns"]:
+            summary["contradiction_count"] = conn.execute(
                 "SELECT COUNT(*) FROM conditions "
-                "WHERE contradiction_flag = TRUE AND consider_for_use = TRUE"
+                "WHERE contradiction_flag = TRUE"
             ).fetchone()[0]
-            sections.append(f"\n## Contradictions: {cnt}")
-        except Exception:
-            pass
 
-        # Serendipity markers
-        try:
-            rows = conn.execute(
-                "SELECT strategy, COUNT(*) as cnt FROM conditions "
-                "WHERE strategy LIKE '%serendip%' "
-                "GROUP BY strategy ORDER BY cnt DESC"
-            ).fetchall()
-            if rows:
-                sections.append("\n## Serendipity Rows")
-                for strat, cnt in rows:
-                    sections.append(f"  {strat}: {cnt}")
-            else:
-                sections.append("\n## Serendipity Rows: NONE FOUND")
-        except Exception:
-            pass
-
-        # Thoughts and insights
-        try:
-            thoughts = conn.execute(
-                "SELECT COUNT(*) FROM conditions WHERE row_type = 'thought'"
+        # Iterations
+        if "iteration" in summary["columns"]:
+            max_iter = conn.execute(
+                "SELECT MAX(iteration) FROM conditions"
             ).fetchone()[0]
-            insights = conn.execute(
-                "SELECT COUNT(*) FROM conditions WHERE row_type = 'insight'"
-            ).fetchone()[0]
-            sections.append(f"\n## Thought Swarm: {thoughts} thoughts, {insights} insights")
-        except Exception:
-            pass
+            summary["iterations_seen"] = (max_iter or 0) + 1
 
-        # Sample of top findings (for grounding)
-        try:
-            rows = conn.execute(
-                "SELECT id, angle, SUBSTR(fact, 1, 200) as fact_preview, "
-                "  composite_quality, source_type, strategy "
-                "FROM conditions WHERE row_type = 'finding' "
-                "AND consider_for_use = TRUE "
-                "ORDER BY CAST(composite_quality AS FLOAT) DESC LIMIT 10"
-            ).fetchall()
-            sections.append("\n## Top 10 Findings (by quality)")
-            for r in rows:
-                sections.append(
-                    f"  #{r[0]} [{r[1]}] q={r[3]} src={r[4]} strategy={r[5]}\n"
-                    f"    {r[2]}..."
-                )
-        except Exception:
-            pass
-
-        # Sample of lowest findings
-        try:
-            rows = conn.execute(
-                "SELECT id, angle, SUBSTR(fact, 1, 200) as fact_preview, "
-                "  composite_quality, source_type "
-                "FROM conditions WHERE row_type = 'finding' "
-                "AND consider_for_use = TRUE "
-                "ORDER BY CAST(composite_quality AS FLOAT) ASC LIMIT 5"
-            ).fetchall()
-            sections.append("\n## Bottom 5 Findings (lowest quality)")
-            for r in rows:
-                sections.append(f"  #{r[0]} [{r[1]}] q={r[3]} src={r[4]}\n    {r[2]}...")
-        except Exception:
-            pass
-
-        # Error/warning patterns in any text fields
-        try:
-            rows = conn.execute(
+        # Consider for use
+        if "consider_for_use" in summary["columns"]:
+            summary["consider_for_use_count"] = conn.execute(
                 "SELECT COUNT(*) FROM conditions "
-                "WHERE fact ILIKE '%error%' OR fact ILIKE '%fail%' "
-                "OR fact ILIKE '%exception%'"
+                "WHERE consider_for_use = TRUE"
             ).fetchone()[0]
-            sections.append(f"\n## Rows containing error/fail/exception keywords: {rows}")
-        except Exception:
-            pass
+            summary["excluded_count"] = conn.execute(
+                "SELECT COUNT(*) FROM conditions "
+                "WHERE consider_for_use = FALSE"
+            ).fetchone()[0]
 
+    except Exception as exc:
+        logger.warning("Error analysing corpus: %s", exc, exc_info=True)
     finally:
-        conn.close()
-
-    return "\n".join(sections)
-
-
-def ingest(state: DiagnosticState) -> DiagnosticState:
-    """Load logs and corpus, produce chunks."""
-    # Log file
-    log_text = ""
-    if state.log_path and Path(state.log_path).exists():
-        log_text = Path(state.log_path).read_text(errors="replace")
-        logger.info("Loaded log file: %d chars", len(log_text))
-    else:
-        logger.warning("No log file at %s", state.log_path)
-
-    state.log_chunks = _chunk_text(log_text) if log_text else []
-    logger.info("Split into %d chunks", len(state.log_chunks))
-
-    # Corpus DB
-    state.corpus_summary = _extract_corpus_summary(state.db_path)
-    logger.info("Corpus summary: %d chars", len(state.corpus_summary))
-
-    return state
-
-
-# ── Step 2: Retrieve ──────────────────────────────────────────────
-
-def _keyword_score(chunk: str, question: str) -> float:
-    """Simple keyword-overlap retrieval score (BM25-lite)."""
-    # Tokenize
-    q_tokens = set(re.findall(r'\w+', question.lower()))
-    c_tokens = re.findall(r'\w+', chunk.lower())
-    if not c_tokens or not q_tokens:
-        return 0.0
-
-    c_token_set = set(c_tokens)
-    overlap = q_tokens & c_token_set
-
-    # Term frequency component
-    tf_sum = sum(c_tokens.count(t) for t in overlap)
-    # Normalize by chunk length
-    score = tf_sum / (len(c_tokens) + 1)
-    # Bonus for fraction of query terms matched
-    coverage = len(overlap) / len(q_tokens) if q_tokens else 0
-    return score + coverage
-
-
-def retrieve(state: DiagnosticState) -> DiagnosticState:
-    """Retrieve the most relevant log chunks for the question."""
-    question = state.question
-
-    # Always include corpus summary as a "document"
-    docs = []
-    if state.corpus_summary and state.corpus_summary != "(no corpus database provided)":
-        docs.append(f"[CORPUS STATE]\n{state.corpus_summary}")
-
-    # Score and rank log chunks
-    scored = [(i, _keyword_score(chunk, question), chunk)
-              for i, chunk in enumerate(state.log_chunks)]
-    scored.sort(key=lambda x: x[1], reverse=True)
-
-    # Also prioritize chunks with ERROR/WARNING/EXCEPTION
-    error_chunks = [
-        (i, s + 0.5, c) for i, s, c in scored
-        if re.search(r'(?i)(error|exception|traceback|fail|warning)', c)
-    ]
-
-    # Merge: error chunks first (deduped), then top-k by score
-    seen = set()
-    for i, s, c in error_chunks[:3]:
-        if i not in seen:
-            docs.append(f"[LOG CHUNK {i} (error-priority, score={s:.3f})]\n{c}")
-            seen.add(i)
-
-    for i, s, c in scored:
-        if len(docs) >= _TOP_K + 1:  # +1 for corpus summary
-            break
-        if i not in seen:
-            docs.append(f"[LOG CHUNK {i} (score={s:.3f})]\n{c}")
-            seen.add(i)
-
-    state.retrieved_docs = docs
-    logger.info("Retrieved %d documents (including corpus summary)", len(docs))
-    return state
-
-
-# ── Step 3: Grade relevance ───────────────────────────────────────
-
-def _llm_call(system: str, user: str) -> str:
-    """Make an LLM call via litellm.
-
-    Uses the OpenRouter base URL directly rather than going through litellm's
-    provider routing, to avoid model-string parsing issues.
-    """
-    import openai as _openai
-
-    client = _openai.OpenAI(
-        api_key=_API_KEY,
-        base_url=_BASE_URL,
-    )
-    response = client.chat.completions.create(
-        model=_MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        temperature=0.2,
-        max_tokens=4096,
-    )
-    return response.choices[0].message.content or ""
-
-
-def grade_documents(state: DiagnosticState) -> DiagnosticState:
-    """Grade each retrieved document for relevance, keep only relevant ones."""
-    if not state.retrieved_docs:
-        return state
-
-    graded: list[str] = []
-    for doc in state.retrieved_docs:
-        # Always keep corpus summary
-        if doc.startswith("[CORPUS STATE]"):
-            graded.append(doc)
-            continue
-
         try:
-            result = _llm_call(
-                system=(
-                    "You are a document relevance evaluator for a pipeline diagnostic system. "
-                    "Determine if this document contains information relevant to diagnosing "
-                    "the pipeline's behavior, errors, or performance.\n\n"
-                    "Respond with ONLY 'yes' or 'no'."
-                ),
-                user=(
-                    f"QUESTION: {state.question}\n\n"
-                    f"DOCUMENT:\n{doc[:3000]}\n\n"
-                    "Is this document relevant to answering the diagnostic question?"
-                ),
-            )
-            if "yes" in result.lower():
-                graded.append(doc)
-                logger.debug("GRADE: RELEVANT — %s", doc[:80])
-            else:
-                logger.debug("GRADE: NOT RELEVANT — %s", doc[:80])
-        except Exception as exc:
-            # On grading failure, keep the document (permissive)
-            logger.warning("Grading failed for chunk, keeping it: %s", exc)
-            graded.append(doc)
+            conn.close()
+        except Exception:
+            pass
 
-    state.retrieved_docs = graded
-    logger.info("After grading: %d relevant documents", len(graded))
-    return state
+    return summary
 
 
-# ── Step 4: Generate diagnosis ────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Deterministic health checks
+# ---------------------------------------------------------------------------
 
-_DIAGNOSIS_SYSTEM = textwrap.dedent("""\
-    You are an expert MiroThinker pipeline diagnostician.  You analyse
-    pipeline logs and DuckDB corpus state to produce structured health
-    reports.
+def check_unscored_findings(corpus: dict[str, Any]) -> CheckResult:
+    """CRITICAL if >50% of findings are unscored (score_version=0)."""
+    unscored = corpus.get("unscored_count", 0)
+    total = corpus.get("total_findings", 0)
+    pct = corpus.get("unscored_pct", 0.0)
 
-    The MiroThinker pipeline architecture:
-      SequentialAgent → LoopAgent(Thinker → SearchExecutor → Maestro) → Synthesiser
-
-    Key components:
-    - Thinker: decomposes query into angles, assigns specialists
-    - Search Executor: multi-API fan-out (Exa, Firecrawl, Perplexity, etc.)
-    - Maestro: Flock SQL conductor — scores, clusters, deduplicates,
-      runs serendipity templates (contrarian, cross-angle, diversity boost)
-    - Thought Swarm: parallel specialists per angle, cross-angle surprise detection
-    - Condition Manager: iteration gating, devil's advocate injection
-    - Corpus Store: single DuckDB table with gradient-flag columns
-    - Synthesiser: produces final research document from 'ready' findings
-
-    Serendipity mechanisms:
-    - Contrarian query injection in search fan-out
-    - Cross-angle surprise detection after specialists run
-    - Angle diversity boost (pure SQL)
-    - Devil's advocate injection after 2+ iterations with no contradictions
-    - 5 maestro SQL templates (9-13): contrarian challenge, cross-angle bridge,
-      surprise scoring, consensus detector, angle diversity boost
-
-    INSTRUCTIONS:
-    1. Base your analysis STRICTLY on the provided log/corpus data
-    2. Structure your response with these sections:
-       ## Pipeline Health Summary
-       ## Iteration Analysis
-       ## Tool & API Usage
-       ## Corpus Quality Assessment
-       ## Serendipity Effectiveness
-       ## Errors & Warnings
-       ## Specific Recommendations
-    3. Be specific — cite log lines, row counts, quality scores
-    4. If information is missing, say so explicitly
-    5. Focus on actionable improvements
-""")
-
-
-def generate(state: DiagnosticState) -> DiagnosticState:
-    """Generate the diagnostic report from retrieved documents."""
-    context = "\n\n---\n\n".join(state.retrieved_docs)
-    # Truncate context if too long
-    if len(context) > _MAX_CONTEXT_CHARS:
-        context = context[:_MAX_CONTEXT_CHARS] + "\n\n[... context truncated ...]"
-
-    result = _llm_call(
-        system=_DIAGNOSIS_SYSTEM,
-        user=(
-            f"DIAGNOSTIC QUESTION: {state.question}\n\n"
-            f"EVIDENCE:\n{context}\n\n"
-            "Produce a comprehensive diagnostic report based solely on the above evidence."
-        ),
-    )
-    state.generation = result
-    logger.info("Generated diagnosis: %d chars", len(result))
-    return state
-
-
-# ── Step 5: Self-correct ──────────────────────────────────────────
-
-def grade_generation(state: DiagnosticState) -> str:
-    """Grade whether the generation is grounded and answers the question.
-
-    Returns: 'useful', 'not useful', or 'not supported'
-    """
-    try:
-        # Check if generation addresses the question
-        result = _llm_call(
-            system=(
-                "You are a response quality evaluator for a pipeline diagnostic tool. "
-                "Determine if the diagnostic report adequately addresses the question "
-                "with specific, actionable findings grounded in the provided evidence.\n\n"
-                "Respond with ONLY 'yes' or 'no'."
-            ),
-            user=(
-                f"QUESTION: {state.question}\n\n"
-                f"DIAGNOSTIC REPORT:\n{state.generation[:3000]}\n\n"
-                "Does this report adequately address the diagnostic question with "
-                "specific, evidence-grounded findings?"
-            ),
+    if total == 0:
+        return CheckResult(
+            name="unscored_findings",
+            severity=Severity.CRITICAL,
+            message="No findings in corpus at all",
+            evidence=["total_findings=0"],
         )
-        if "yes" in result.lower():
-            state.grounded = True
-            return "useful"
-        else:
-            return "not useful"
-    except Exception:
-        # On failure, accept the generation
-        return "useful"
 
+    if pct >= 50:
+        return CheckResult(
+            name="unscored_findings",
+            severity=Severity.CRITICAL,
+            message=(
+                f"{unscored}/{total} findings ({pct:.0f}%) are unscored "
+                f"— Flock scoring never ran or failed"
+            ),
+            evidence=[
+                f"unscored_count={unscored}",
+                f"total_findings={total}",
+                f"unscored_pct={pct:.1f}%",
+            ],
+        )
 
-def transform_query(state: DiagnosticState) -> DiagnosticState:
-    """Rewrite the diagnostic question to improve retrieval."""
-    state.transform_count += 1
-    logger.info("Transform attempt %d/%d", state.transform_count, _MAX_TRANSFORMS)
+    if pct >= 10:
+        return CheckResult(
+            name="unscored_findings",
+            severity=Severity.WARNING,
+            message=f"{unscored}/{total} findings ({pct:.0f}%) are unscored",
+            evidence=[f"unscored_pct={pct:.1f}%"],
+        )
 
-    result = _llm_call(
-        system=(
-            "You are a prompt optimization specialist for a pipeline diagnostic "
-            "RAG system. Rewrite the query to improve log/corpus retrieval.\n\n"
-            "Add relevant MiroThinker terms: iteration, angle, composite_quality, "
-            "consider_for_use, Flock SQL, maestro, thinker, search executor, "
-            "serendipity, thought swarm, corpus store.\n\n"
-            "Output ONLY the rewritten query, nothing else."
-        ),
-        user=f"Original query: {state.question}\n\nRewritten query:",
+    return CheckResult(
+        name="unscored_findings",
+        severity=Severity.OK,
+        message=f"All findings scored ({total} total, {unscored} unscored)",
     )
-    old_q = state.question
-    state.question = result.strip()
-    logger.info("Query rewritten: %r → %r", old_q[:80], state.question[:80])
-    return state
 
 
-# ── Main workflow (BAT.AI graph, flattened) ───────────────────────
+def check_processing_status(corpus: dict[str, Any]) -> CheckResult:
+    """CRITICAL if all findings are stuck at 'raw' processing status."""
+    status_dist = corpus.get("processing_status", {})
+    total = corpus.get("total_findings", 0)
+
+    if not status_dist or total == 0:
+        return CheckResult(
+            name="processing_status",
+            severity=Severity.OK,
+            message="No processing status data available",
+        )
+
+    raw_count = status_dist.get("raw", 0)
+    if raw_count == total and total > 0:
+        return CheckResult(
+            name="processing_status",
+            severity=Severity.CRITICAL,
+            message=(
+                f"ALL {total} findings stuck at processing_status='raw' "
+                f"— algorithm battery never ran"
+            ),
+            evidence=[
+                f"processing_status distribution: {status_dist}",
+            ],
+        )
+
+    raw_pct = raw_count / total * 100 if total > 0 else 0
+    if raw_pct >= 50:
+        return CheckResult(
+            name="processing_status",
+            severity=Severity.WARNING,
+            message=f"{raw_count}/{total} ({raw_pct:.0f}%) still at 'raw'",
+            evidence=[f"processing_status: {status_dist}"],
+        )
+
+    return CheckResult(
+        name="processing_status",
+        severity=Severity.OK,
+        message=f"Processing status healthy: {status_dist}",
+    )
+
+
+def check_quality_distribution(corpus: dict[str, Any]) -> CheckResult:
+    """CRITICAL if >60% of findings are weak quality (noise)."""
+    qd = corpus.get("quality_distribution", {})
+    strong = qd.get("strong", 0)
+    moderate = qd.get("moderate", 0)
+    weak = qd.get("weak", 0)
+    total = strong + moderate + weak
+
+    if total == 0:
+        return CheckResult(
+            name="quality_distribution",
+            severity=Severity.WARNING,
+            message="No quality distribution data",
+        )
+
+    weak_pct = weak / total * 100
+
+    if weak_pct >= 60:
+        return CheckResult(
+            name="quality_distribution",
+            severity=Severity.CRITICAL,
+            message=(
+                f"{weak}/{total} findings ({weak_pct:.0f}%) are weak quality "
+                f"— likely noise from off-topic queries"
+            ),
+            evidence=[
+                f"strong={strong}, moderate={moderate}, weak={weak}",
+                f"weak_pct={weak_pct:.1f}%",
+            ],
+        )
+
+    if weak_pct >= 40:
+        return CheckResult(
+            name="quality_distribution",
+            severity=Severity.WARNING,
+            message=f"{weak_pct:.0f}% weak findings (borderline noise)",
+            evidence=[f"strong={strong}, moderate={moderate}, weak={weak}"],
+        )
+
+    return CheckResult(
+        name="quality_distribution",
+        severity=Severity.OK,
+        message=(
+            f"Quality healthy: {strong} strong, {moderate} moderate, "
+            f"{weak} weak"
+        ),
+    )
+
+
+def check_academic_search(log: dict[str, Any]) -> CheckResult:
+    """CRITICAL if academic search was attempted but returned 0 results."""
+    academic_failures = log.get("academic_failures", [])
+    circuit_trips = log.get("circuit_breakers_tripped", [])
+
+    # Check if Phase C ran and got zero results
+    phase_c_zero = any(
+        "zero academic results" in line.lower()
+        for line in log.get("errors", [])
+    )
+
+    if phase_c_zero:
+        return CheckResult(
+            name="academic_search",
+            severity=Severity.CRITICAL,
+            message=(
+                "Academic search (Phase C) returned ZERO results — "
+                "all academic APIs failed"
+            ),
+            evidence=academic_failures[:5] + circuit_trips[:3],
+        )
+
+    if len(academic_failures) >= 3:
+        return CheckResult(
+            name="academic_search",
+            severity=Severity.WARNING,
+            message=f"{len(academic_failures)} academic search failures",
+            evidence=academic_failures[:5],
+        )
+
+    if circuit_trips:
+        return CheckResult(
+            name="academic_search",
+            severity=Severity.WARNING,
+            message=f"Circuit breakers tripped: {len(circuit_trips)}",
+            evidence=circuit_trips[:3],
+        )
+
+    return CheckResult(
+        name="academic_search",
+        severity=Severity.OK,
+        message="Academic search healthy (no failures detected)",
+    )
+
+
+def check_pipeline_stall(log: dict[str, Any]) -> CheckResult:
+    """CRITICAL if the pipeline stalled/timed out."""
+    stall_events = log.get("stall_events", [])
+
+    if any("timed out" in e.lower() for e in stall_events):
+        return CheckResult(
+            name="pipeline_stall",
+            severity=Severity.CRITICAL,
+            message="Pipeline timed out — search executor exceeded deadline",
+            evidence=stall_events[:5],
+        )
+
+    if stall_events:
+        return CheckResult(
+            name="pipeline_stall",
+            severity=Severity.WARNING,
+            message=f"{len(stall_events)} stall-related events",
+            evidence=stall_events[:5],
+        )
+
+    return CheckResult(
+        name="pipeline_stall",
+        severity=Severity.OK,
+        message="No stall or timeout events detected",
+    )
+
+
+def check_synthesiser_ran(log: dict[str, Any], corpus: dict[str, Any]) -> CheckResult:
+    """CRITICAL if the synthesiser never ran (pipeline died before it)."""
+    phases = log.get("phases_completed", [])
+    # Check if swarm synthesis or synthesiser appears in log
+    synth_ran = any(
+        "synth" in p.lower() or "swarm" in p.lower()
+        for p in phases
+    )
+
+    # Also check log errors for evidence
+    log_lines = log.get("errors", []) + log.get("warnings", [])
+    synth_in_log = any(
+        "synthesiser" in line.lower() or "swarm synthesis" in line.lower()
+        for line in log_lines
+    )
+
+    iterations = corpus.get("iterations_seen", 0)
+
+    if not synth_ran and not synth_in_log and iterations > 0:
+        return CheckResult(
+            name="synthesiser_ran",
+            severity=Severity.CRITICAL,
+            message=(
+                "Synthesiser never ran — pipeline stalled before "
+                "reaching the synthesis phase"
+            ),
+            evidence=[
+                f"iterations_seen={iterations}",
+                f"phases_completed: {[p[:60] for p in phases]}",
+            ],
+        )
+
+    return CheckResult(
+        name="synthesiser_ran",
+        severity=Severity.OK,
+        message="Synthesiser ran successfully",
+    )
+
+
+def check_serendipity(corpus: dict[str, Any]) -> CheckResult:
+    """WARNING if serendipity/contrarian queries produced no results."""
+    serendipity = corpus.get("total_serendipity", 0)
+    total = corpus.get("total_findings", 0)
+
+    if total > 10 and serendipity == 0:
+        return CheckResult(
+            name="serendipity",
+            severity=Severity.WARNING,
+            message=(
+                "Zero serendipity findings despite having "
+                f"{total} findings — contrarian search may not be working"
+            ),
+            evidence=[f"total_serendipity=0, total_findings={total}"],
+        )
+
+    return CheckResult(
+        name="serendipity",
+        severity=Severity.OK,
+        message=f"Serendipity: {serendipity} rows",
+    )
+
+
+def check_query_noise(log: dict[str, Any]) -> CheckResult:
+    """WARNING/CRITICAL if many queries were rejected as noise."""
+    rejections = log.get("query_rejections", [])
+
+    if len(rejections) >= 5:
+        return CheckResult(
+            name="query_noise",
+            severity=Severity.CRITICAL,
+            message=(
+                f"{len(rejections)} queries rejected as off-topic noise "
+                f"— thinker is producing generic queries"
+            ),
+            evidence=rejections[:5],
+        )
+
+    if rejections:
+        return CheckResult(
+            name="query_noise",
+            severity=Severity.WARNING,
+            message=f"{len(rejections)} queries rejected as noise",
+            evidence=rejections[:3],
+        )
+
+    return CheckResult(
+        name="query_noise",
+        severity=Severity.OK,
+        message="No query noise detected",
+    )
+
+
+def check_error_rate(log: dict[str, Any]) -> CheckResult:
+    """CRITICAL if error rate is unusually high."""
+    error_count = log.get("error_count", 0)
+    total_lines = log.get("total_lines", 1)
+    error_rate = error_count / max(total_lines, 1) * 100
+
+    if error_count >= 20 or error_rate >= 5:
+        return CheckResult(
+            name="error_rate",
+            severity=Severity.CRITICAL,
+            message=(
+                f"{error_count} errors in {total_lines} log lines "
+                f"({error_rate:.1f}% error rate)"
+            ),
+            evidence=log.get("errors", [])[:10],
+        )
+
+    if error_count >= 5:
+        return CheckResult(
+            name="error_rate",
+            severity=Severity.WARNING,
+            message=f"{error_count} errors in log",
+            evidence=log.get("errors", [])[:5],
+        )
+
+    return CheckResult(
+        name="error_rate",
+        severity=Severity.OK,
+        message=f"{error_count} errors — within normal range",
+    )
+
+
+def check_mandatory_scoring(log: dict[str, Any]) -> CheckResult:
+    """WARNING if the mandatory scoring gate had to fire."""
+    mandatory = log.get("mandatory_scoring", [])
+
+    if mandatory:
+        return CheckResult(
+            name="mandatory_scoring_gate",
+            severity=Severity.WARNING,
+            message=(
+                "Mandatory scoring gate fired during cleanup — "
+                "findings were left unscored by the normal pipeline path"
+            ),
+            evidence=mandatory[:3],
+        )
+
+    return CheckResult(
+        name="mandatory_scoring_gate",
+        severity=Severity.OK,
+        message="Mandatory scoring gate did not need to fire",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Aggregate diagnosis
+# ---------------------------------------------------------------------------
+
+ALL_CHECKS = [
+    check_unscored_findings,
+    check_processing_status,
+    check_quality_distribution,
+    check_academic_search,
+    check_pipeline_stall,
+    check_query_noise,
+    check_error_rate,
+    check_mandatory_scoring,
+]
+
+# These checks need both log and corpus
+DUAL_CHECKS = [
+    check_synthesiser_ran,
+]
+
+# These only need corpus
+CORPUS_ONLY_CHECKS = [
+    check_serendipity,
+]
+
+
+def run_deterministic_checks(
+    log: dict[str, Any],
+    corpus: dict[str, Any],
+) -> list[CheckResult]:
+    """Run all deterministic health checks."""
+    results: list[CheckResult] = []
+
+    for check_fn in ALL_CHECKS:
+        # Some checks need log, some need corpus — try both
+        try:
+            sig = check_fn.__code__.co_varnames[:check_fn.__code__.co_argcount]
+            if "log" in sig and "corpus" in sig:
+                results.append(check_fn(log, corpus))
+            elif "log" in sig:
+                results.append(check_fn(log))
+            elif "corpus" in sig:
+                results.append(check_fn(corpus))
+        except Exception as exc:
+            logger.warning("Health check %s failed: %s", check_fn.__name__, exc)
+
+    for check_fn in DUAL_CHECKS:
+        try:
+            results.append(check_fn(log, corpus))
+        except Exception as exc:
+            logger.warning("Health check %s failed: %s", check_fn.__name__, exc)
+
+    for check_fn in CORPUS_ONLY_CHECKS:
+        try:
+            results.append(check_fn(corpus))
+        except Exception as exc:
+            logger.warning("Health check %s failed: %s", check_fn.__name__, exc)
+
+    return results
+
+
+def compute_verdict(checks: list[CheckResult]) -> Verdict:
+    """Compute overall verdict from check results.
+
+    - FAILED: any CRITICAL check
+    - DEGRADED: any WARNING check
+    - HEALTHY: all OK
+    """
+    if any(c.severity == Severity.CRITICAL for c in checks):
+        return Verdict.FAILED
+    if any(c.severity == Severity.WARNING for c in checks):
+        return Verdict.DEGRADED
+    return Verdict.HEALTHY
+
+
+# ---------------------------------------------------------------------------
+# LLM analysis (optional, runs AFTER deterministic checks)
+# ---------------------------------------------------------------------------
+
+def _call_llm(prompt: str) -> str:
+    """Call the LLM for analysis — only used for explaining detected issues."""
+    try:
+        import httpx
+    except ImportError:
+        return "(httpx not available — skipping LLM analysis)"
+
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        return "(no OPENROUTER_API_KEY — skipping LLM analysis)"
+
+    model = os.environ.get("DIAGNOSTIC_MODEL", "openai/gpt-4o-mini")
+    base = os.environ.get(
+        "OPENAI_API_BASE",
+        os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+    )
+
+    try:
+        resp = httpx.post(
+            f"{base}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 2000,
+                "temperature": 0.2,
+            },
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+    except Exception as exc:
+        return f"(LLM analysis failed: {exc})"
+
+
+def generate_llm_analysis(
+    checks: list[CheckResult],
+    corpus: dict[str, Any],
+    log: dict[str, Any],
+    question: str = "",
+) -> str:
+    """Generate LLM explanation of detected issues.
+
+    Only called when deterministic checks found CRITICAL or WARNING issues.
+    The LLM doesn't decide severity — it explains what the deterministic
+    checks already found.
+    """
+    critical = [c for c in checks if c.severity == Severity.CRITICAL]
+    warnings = [c for c in checks if c.severity == Severity.WARNING]
+
+    if not critical and not warnings:
+        return "All deterministic health checks passed — no issues to explain."
+
+    findings_section = ""
+    for c in critical:
+        findings_section += (
+            f"\n[CRITICAL] {c.name}: {c.message}\n"
+            f"  Evidence: {'; '.join(c.evidence[:3])}\n"
+        )
+    for c in warnings:
+        findings_section += (
+            f"\n[WARNING] {c.name}: {c.message}\n"
+            f"  Evidence: {'; '.join(c.evidence[:3])}\n"
+        )
+
+    corpus_section = (
+        f"Corpus: {corpus.get('total_findings', 0)} findings, "
+        f"{corpus.get('total_thoughts', 0)} thoughts, "
+        f"{corpus.get('unscored_count', 0)} unscored, "
+        f"avg quality={corpus.get('avg_composite_quality', 0):.2f}, "
+        f"contradictions={corpus.get('contradiction_count', 0)}, "
+        f"iterations={corpus.get('iterations_seen', 0)}"
+    )
+
+    log_section = (
+        f"Log: {log.get('total_lines', 0)} lines, "
+        f"{log.get('error_count', 0)} errors, "
+        f"{log.get('warning_count', 0)} warnings"
+    )
+
+    question_section = ""
+    if question:
+        question_section = f"\n\nUser question: {question}"
+
+    prompt = textwrap.dedent(f"""\
+        You are a pipeline diagnostic analyst. The deterministic health
+        checks have already identified the issues below.  Your job is to
+        EXPLAIN the root causes and suggest fixes.  Do NOT downgrade
+        severity — the checks are authoritative.
+
+        == DETECTED ISSUES ==
+        {findings_section}
+
+        == CORPUS STATE ==
+        {corpus_section}
+
+        == LOG SUMMARY ==
+        {log_section}
+        {question_section}
+
+        Provide:
+        1. Root cause analysis (what went wrong and why)
+        2. Impact assessment (what was lost/degraded)
+        3. Specific fix recommendations (code/config changes)
+
+        Be direct and technical.  No hedging.
+    """)
+
+    return _call_llm(prompt)
+
+
+# ---------------------------------------------------------------------------
+# Format report
+# ---------------------------------------------------------------------------
+
+def format_report(report: DiagnosticReport) -> str:
+    """Format the diagnostic report as readable text."""
+    lines: list[str] = []
+
+    # Header
+    verdict_emoji = {
+        Verdict.HEALTHY: "HEALTHY",
+        Verdict.DEGRADED: "DEGRADED",
+        Verdict.FAILED: "FAILED",
+    }
+    lines.append(f"=== PIPELINE DIAGNOSTIC: {verdict_emoji[report.verdict]} ===")
+    lines.append(
+        f"Critical: {report.critical_count}  "
+        f"Warning: {report.warning_count}  "
+        f"Elapsed: {report.elapsed_s:.1f}s"
+    )
+    lines.append("")
+
+    # Check results
+    lines.append("--- HEALTH CHECKS ---")
+    for check in report.checks:
+        prefix = {
+            Severity.CRITICAL: "[CRITICAL]",
+            Severity.WARNING: "[WARNING] ",
+            Severity.OK: "[OK]      ",
+        }[check.severity]
+        lines.append(f"{prefix} {check.name}: {check.message}")
+        for ev in check.evidence[:3]:
+            lines.append(f"           {ev}")
+    lines.append("")
+
+    # Corpus summary
+    lines.append("--- CORPUS SUMMARY ---")
+    cs = report.corpus_summary
+    lines.append(
+        f"Findings: {cs.get('total_findings', 0)}  "
+        f"Thoughts: {cs.get('total_thoughts', 0)}  "
+        f"Serendipity: {cs.get('total_serendipity', 0)}"
+    )
+    lines.append(
+        f"Unscored: {cs.get('unscored_count', 0)} "
+        f"({cs.get('unscored_pct', 0):.0f}%)  "
+        f"Avg quality: {cs.get('avg_composite_quality', 0):.3f}"
+    )
+    qd = cs.get("quality_distribution", {})
+    lines.append(
+        f"Quality: strong={qd.get('strong', 0)}  "
+        f"moderate={qd.get('moderate', 0)}  "
+        f"weak={qd.get('weak', 0)}"
+    )
+    lines.append(
+        f"Contradictions: {cs.get('contradiction_count', 0)}  "
+        f"Iterations: {cs.get('iterations_seen', 0)}"
+    )
+    lines.append("")
+
+    # LLM analysis
+    if report.llm_analysis:
+        lines.append("--- ROOT CAUSE ANALYSIS ---")
+        lines.append(report.llm_analysis)
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def run_diagnostic(
     log_path: str = "",
     db_path: str = "",
     question: str = "",
-) -> str:
-    """Run the full self-corrective diagnostic pipeline.
+    skip_llm: bool = False,
+    pipeline_health: dict[str, Any] | None = None,
+) -> DiagnosticReport:
+    """Run the full diagnostic pipeline.
 
-    Args:
-        log_path: Path to pipeline log file (server stdout/stderr).
-        db_path:  Path to DuckDB corpus file.
-        question: Specific diagnostic question.  If empty, runs a
-                  general health check.
+    1. Read PipelineHealth from session state (if available)
+    2. Parse log file (deterministic)
+    3. Analyse corpus (deterministic SQL)
+    4. Run health checks (deterministic)
+    5. Compute verdict (deterministic)
+    6. LLM analysis (optional — only if issues found)
 
-    Returns:
-        The diagnostic report as a markdown string.
+    If ``pipeline_health`` is provided (from ``state["_pipeline_health"]``),
+    the diagnostic uses the pipeline's own structured health data instead
+    of detective-working through logs.  This is the systemic path — the
+    pipeline PRODUCES its own health data, the diagnostic just reads it.
+
+    Returns a structured DiagnosticReport.
     """
-    if not question:
-        question = (
-            "Perform a comprehensive health check of this MiroThinker pipeline run. "
-            "Assess: Did all tools fire? Did serendipity activate? Was the thought "
-            "swarm productive? Are there quality issues in the corpus? What "
-            "specific improvements would make the next run better?"
+    start = time.monotonic()
+
+    # Step 1: If PipelineHealth is available, convert it to check results
+    health_checks: list[CheckResult] = []
+    if pipeline_health and isinstance(pipeline_health, dict):
+        health_checks = _checks_from_pipeline_health(pipeline_health)
+
+    # Step 2 & 3: Parse inputs (still useful for standalone / deeper analysis)
+    log_summary = parse_log_file(log_path)
+    corpus_summary = analyse_corpus(db_path)
+
+    # Step 4: Deterministic health checks (from log+corpus parsing)
+    parsed_checks = run_deterministic_checks(log_summary, corpus_summary)
+
+    # Step 5: Merge — PipelineHealth checks take precedence (they're
+    # real-time structured data), parsed checks fill gaps
+    checks = _merge_checks(health_checks, parsed_checks)
+
+    # Step 6: Compute verdict
+    verdict = compute_verdict(checks)
+
+    # Also honour the PipelineHealth verdict if it's worse
+    if pipeline_health and isinstance(pipeline_health, dict):
+        ph_verdict = pipeline_health.get("verdict", "HEALTHY")
+        if ph_verdict == "FAILED" and verdict != Verdict.FAILED:
+            verdict = Verdict.FAILED
+        elif ph_verdict == "DEGRADED" and verdict == Verdict.HEALTHY:
+            verdict = Verdict.DEGRADED
+
+    # Step 7: LLM analysis (only if issues found and not skipped)
+    llm_analysis = ""
+    if not skip_llm and verdict != Verdict.HEALTHY:
+        llm_analysis = generate_llm_analysis(
+            checks, corpus_summary, log_summary, question,
         )
 
-    state = DiagnosticState(
-        question=question,
-        log_path=log_path,
-        db_path=db_path,
+    elapsed = time.monotonic() - start
+
+    return DiagnosticReport(
+        verdict=verdict,
+        checks=checks,
+        corpus_summary=corpus_summary,
+        log_summary=log_summary,
+        llm_analysis=llm_analysis,
+        elapsed_s=elapsed,
     )
 
-    # 1. Ingest
-    logger.info("=== INGEST ===")
-    state = ingest(state)
 
-    for attempt in range(1 + _MAX_TRANSFORMS):
-        # 2. Retrieve
-        logger.info("=== RETRIEVE (attempt %d) ===", attempt + 1)
-        state = retrieve(state)
+def _checks_from_pipeline_health(
+    health: dict[str, Any],
+) -> list[CheckResult]:
+    """Convert PipelineHealth session-state data into CheckResult list.
 
-        # 3. Grade documents
-        logger.info("=== GRADE DOCUMENTS ===")
-        state = grade_documents(state)
+    This is the key integration: the pipeline PRODUCES structured health
+    data at each phase boundary, and the diagnostic tool just reads it.
+    No log parsing needed for these checks.
+    """
+    results: list[CheckResult] = []
 
-        if not state.retrieved_docs:
-            logger.warning("No relevant documents found — transforming query")
-            if state.transform_count < _MAX_TRANSFORMS:
-                state = transform_query(state)
-                continue
-            else:
-                state.generation = (
-                    "## Diagnostic Failed\n\n"
-                    "No relevant log data or corpus state could be retrieved "
-                    "after query transformation.  Check that the log file and "
-                    "corpus database paths are correct."
-                )
-                return state.generation
+    # Convert each phase's checks into diagnostic CheckResults
+    for phase in health.get("phases", []):
+        phase_name = phase.get("name", "unknown")
+        for check in phase.get("checks", []):
+            sev_str = check.get("severity", "OK")
+            try:
+                sev = Severity(sev_str)
+            except ValueError:
+                sev = Severity.OK
+            results.append(CheckResult(
+                name=f"health:{phase_name}:{check.get('name', 'unnamed')}",
+                severity=sev,
+                message=check.get("message", ""),
+                evidence=[
+                    f"{k}={v}" for k, v in check.get("evidence", {}).items()
+                ],
+            ))
 
-        # 4. Generate
-        logger.info("=== GENERATE ===")
-        state = generate(state)
+    # Also add top-level errors/warnings from PipelineHealth
+    for error in health.get("errors", []):
+        results.append(CheckResult(
+            name="pipeline_health_error",
+            severity=Severity.CRITICAL,
+            message=error,
+        ))
 
-        # 5. Grade generation
-        logger.info("=== GRADE GENERATION ===")
-        verdict = grade_generation(state)
-
-        if verdict == "useful":
-            logger.info("Diagnostic complete — grounded and useful")
-            return state.generation
-        elif state.transform_count >= _MAX_TRANSFORMS:
-            logger.info("Max transforms reached — accepting generation")
-            return state.generation
-        else:
-            logger.info("Generation not useful — transforming query")
-            state = transform_query(state)
-
-    return state.generation
+    return results
 
 
-# ── CLI entry point ───────────────────────────────────────────────
+def _merge_checks(
+    health_checks: list[CheckResult],
+    parsed_checks: list[CheckResult],
+) -> list[CheckResult]:
+    """Merge PipelineHealth checks with log/corpus-parsed checks.
+
+    PipelineHealth checks take precedence because they're real-time
+    structured data from the pipeline itself.  Parsed checks fill
+    gaps for areas PipelineHealth doesn't cover (e.g. serendipity,
+    academic search patterns from logs).
+    """
+    if not health_checks:
+        return parsed_checks
+
+    # Names covered by PipelineHealth (strip the "health:" prefix for matching)
+    covered_topics: set[str] = set()
+    for c in health_checks:
+        # Extract the topic from "health:phase:topic"
+        parts = c.name.split(":")
+        if len(parts) >= 3:
+            covered_topics.add(parts[2])
+
+    # Keep parsed checks that aren't already covered
+    merged = list(health_checks)
+    for c in parsed_checks:
+        # Don't duplicate checks that PipelineHealth already covers
+        if c.name not in covered_topics:
+            merged.append(c)
+
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
 
 def main() -> None:
+    """CLI entry point for standalone diagnostic runs."""
     parser = argparse.ArgumentParser(
-        description="MiroThinker Pipeline Diagnostic Tool (BAT.AI pattern)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=textwrap.dedent("""\
-            Examples:
-              # General health check
-              python -m tools.pipeline_diagnostic --log /tmp/pipeline.log --db corpus.duckdb
-
-              # Specific failure forensics
-              python -m tools.pipeline_diagnostic --log /tmp/pipeline.log \\
-                  --question "Why did the search executor fail after iteration 2?"
-
-              # Post-error remediation
-              python -m tools.pipeline_diagnostic --log /tmp/pipeline.log \\
-                  --db corpus.duckdb \\
-                  --question "The maestro crashed with a Flock SQL error — what fix is needed?"
-        """),
+        description="MiroThinker Pipeline Diagnostic Tool",
     )
-    parser.add_argument("--log", default="", help="Path to pipeline log file")
-    parser.add_argument("--db", default="", help="Path to DuckDB corpus file")
-    parser.add_argument("--question", "-q", default="",
-                        help="Diagnostic question (empty = general health check)")
-    parser.add_argument("--output", "-o", default="",
-                        help="Write report to file (default: stdout)")
-    parser.add_argument("--verbose", "-v", action="store_true",
-                        help="Enable debug logging")
+    parser.add_argument(
+        "--log", default="",
+        help="Path to pipeline log file",
+    )
+    parser.add_argument(
+        "--db", default="",
+        help="Path to DuckDB corpus file",
+    )
+    parser.add_argument(
+        "--question", default="",
+        help="Optional question about the pipeline run",
+    )
+    parser.add_argument(
+        "--skip-llm", action="store_true",
+        help="Skip LLM analysis (deterministic checks only)",
+    )
+    parser.add_argument(
+        "--json", action="store_true", dest="json_output",
+        help="Output as JSON instead of text",
+    )
 
     args = parser.parse_args()
 
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
-        datefmt="%H:%M:%S",
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
     report = run_diagnostic(
         log_path=args.log,
         db_path=args.db,
         question=args.question,
+        skip_llm=args.skip_llm,
     )
 
-    if args.output:
-        Path(args.output).write_text(report)
-        logger.info("Report written to %s", args.output)
+    if args.json_output:
+        output = {
+            "verdict": report.verdict.value,
+            "critical_count": report.critical_count,
+            "warning_count": report.warning_count,
+            "checks": [
+                {
+                    "name": c.name,
+                    "severity": c.severity.value,
+                    "message": c.message,
+                    "evidence": c.evidence,
+                }
+                for c in report.checks
+            ],
+            "corpus_summary": report.corpus_summary,
+            "llm_analysis": report.llm_analysis,
+            "elapsed_s": report.elapsed_s,
+        }
+        print(json.dumps(output, indent=2))
     else:
-        print("\n" + "=" * 60)
-        print("MIROTHINKER PIPELINE DIAGNOSTIC REPORT")
-        print("=" * 60 + "\n")
-        print(report)
+        print(format_report(report))
+
+    # Exit with non-zero code if pipeline failed
+    if report.verdict == Verdict.FAILED:
+        sys.exit(2)
+    elif report.verdict == Verdict.DEGRADED:
+        sys.exit(1)
+    sys.exit(0)
 
 
 if __name__ == "__main__":

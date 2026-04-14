@@ -60,6 +60,44 @@ _SEMANTIC_SCHOLAR_API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
 # Maximum concurrent searches to prevent API rate limiting
 _MAX_CONCURRENT = int(os.environ.get("SEARCH_EXECUTOR_CONCURRENCY", "4"))
 
+# ---------------------------------------------------------------------------
+# Circuit breaker: track consecutive failures per API.  After
+# _CIRCUIT_BREAKER_THRESHOLD consecutive failures, the API is "tripped"
+# and skipped for the rest of the pipeline run.  This prevents the
+# pipeline from wasting time retrying broken APIs (e.g. arXiv returning
+# 301, Semantic Scholar choking on Unicode, scite.ai 404 on OAuth).
+# ---------------------------------------------------------------------------
+_CIRCUIT_BREAKER_THRESHOLD = int(
+    os.environ.get("CIRCUIT_BREAKER_THRESHOLD", "2"),
+)
+_circuit_breaker: dict[str, int] = {}  # fn_name → consecutive failures
+
+
+def _circuit_is_open(fn_name: str) -> bool:
+    """Return True if the circuit breaker is tripped for this API."""
+    return _circuit_breaker.get(fn_name, 0) >= _CIRCUIT_BREAKER_THRESHOLD
+
+
+def _circuit_record_success(fn_name: str) -> None:
+    """Reset the circuit breaker on success."""
+    _circuit_breaker.pop(fn_name, None)
+
+
+def _circuit_record_failure(fn_name: str) -> None:
+    """Increment the consecutive failure count."""
+    _circuit_breaker[fn_name] = _circuit_breaker.get(fn_name, 0) + 1
+    if _circuit_is_open(fn_name):
+        logger.error(
+            "CIRCUIT BREAKER TRIPPED for %s after %d consecutive failures "
+            "— API will be skipped for the rest of this run",
+            fn_name, _circuit_breaker[fn_name],
+        )
+
+
+def reset_circuit_breakers() -> None:
+    """Reset all circuit breakers (call between pipeline runs)."""
+    _circuit_breaker.clear()
+
 # Serendipity: fraction of strategy queries that get contrarian variants
 _SERENDIPITY_RATE = float(os.environ.get("SERENDIPITY_QUERY_RATE", "0.3"))
 _SERENDIPITY_ENABLED = os.environ.get("SERENDIPITY_ENABLED", "1") == "1"
@@ -143,8 +181,8 @@ async def _search_exa(query: str, num_results: int = 5) -> str:
             for r in results[:num_results]:
                 title = r.get("title", "")
                 url = r.get("url", "")
-                text = r.get("text", "")[:500]
-                highlights = " ".join(r.get("highlights", []))[:300]
+                text = r.get("text", "")
+                highlights = " ".join(r.get("highlights", []))
                 content = highlights or text
                 lines.append(f"- {title} [{url}]: {content}")
             return "\n".join(lines)
@@ -175,11 +213,11 @@ async def _search_kagi(query: str) -> str:
                 return ""
             lines = [f"Kagi search: {query}"]
             if output:
-                lines.append(output[:2000])
+                lines.append(output)
             for r in refs[:5]:
                 title = r.get("title", "")
                 url = r.get("url", "")
-                snippet = r.get("snippet", "")[:200]
+                snippet = r.get("snippet", "")
                 lines.append(f"- {title} [{url}]: {snippet}")
             return "\n".join(lines)
     except Exception as exc:
@@ -212,11 +250,11 @@ async def _search_tavily(query: str, num_results: int = 5) -> str:
                 return ""
             lines = [f"Tavily search: {query}"]
             if answer:
-                lines.append(answer[:2000])
+                lines.append(answer)
             for r in results[:num_results]:
                 title = r.get("title", "")
                 url = r.get("url", "")
-                content = r.get("content", "")[:300]
+                content = r.get("content", "")
                 lines.append(f"- {title} [{url}]: {content}")
             return "\n".join(lines)
     except Exception as exc:
@@ -260,7 +298,7 @@ async def _search_perplexity(query: str) -> str:
             citations = data.get("citations", [])
             if not content:
                 return ""
-            lines = [f"Perplexity search: {query}", content[:3000]]
+            lines = [f"Perplexity search: {query}", content]
             for i, url in enumerate(citations[:10], 1):
                 if isinstance(url, str):
                     lines.append(f"  [{i}] {url}")
@@ -293,7 +331,7 @@ async def _search_jina(query: str, num_results: int = 5) -> str:
             for r in results[:num_results]:
                 title = r.get("title", "")
                 url = r.get("url", "")
-                content = r.get("content", "")[:500]
+                content = r.get("content", "")
                 lines.append(f"- {title} [{url}]: {content}")
             return "\n".join(lines)
     except Exception as exc:
@@ -325,7 +363,7 @@ async def _search_mojeek(query: str, num_results: int = 5) -> str:
             for r in results[:num_results]:
                 title = r.get("title", "")
                 url = r.get("url", "")
-                desc = r.get("desc", "")[:200]
+                desc = r.get("desc", "")
                 lines.append(f"- {title} [{url}]: {desc}")
             return "\n".join(lines)
     except Exception as exc:
@@ -354,7 +392,7 @@ async def _search_marginalia(query: str, num_results: int = 5) -> str:
             for r in results[:num_results]:
                 title = r.get("title", "")
                 url = r.get("url", "")
-                desc = r.get("description", "")[:200]
+                desc = r.get("description", "")
                 lines.append(f"- {title} [{url}]: {desc}")
             return "\n".join(lines)
     except Exception as exc:
@@ -369,7 +407,8 @@ async def _search_marginalia(query: str, num_results: int = 5) -> str:
 async def _jina_reader(url: str) -> str:
     """Extract full markdown content from a URL via Jina Reader.
 
-    Returns clean markdown text (up to 5000 chars) or empty string.
+    Returns the COMPLETE markdown text — no truncation.  The full content
+    flows into ``ingest_raw()`` which stores it verbatim before chunking.
     """
     if not _JINA_API_KEY:
         return ""
@@ -390,7 +429,7 @@ async def _jina_reader(url: str) -> str:
             if not content:
                 return ""
             lines = [f"Content extracted from: {title} [{url}]"]
-            lines.append(content[:5000])
+            lines.append(content)
             return "\n".join(lines)
     except Exception as exc:
         logger.warning("Jina reader failed for '%s': %s", url[:80], exc)
@@ -431,7 +470,7 @@ async def _apify_extract(url: str) -> str:
             if not text:
                 return ""
             lines = [f"Content extracted (Apify) from: {title} [{url}]"]
-            lines.append(text[:5000])
+            lines.append(text)
             return "\n".join(lines)
     except Exception as exc:
         logger.warning("Apify extract failed for '%s': %s", url[:80], exc)
@@ -442,10 +481,44 @@ async def _apify_extract(url: str) -> str:
 # Academic search APIs (Phase C)
 # ---------------------------------------------------------------------------
 
+def _sanitise_query_for_api(query: str) -> str:
+    """Sanitise a query string for ASCII-only APIs.
+
+    Replaces Unicode characters that break APIs like Semantic Scholar
+    (which choke on em-dashes, curly quotes, etc.) with ASCII equivalents.
+    This is an architectural guardrail — not a one-off fix for a single
+    character, but a systematic defence against the entire class of
+    encoding failures.
+    """
+    replacements = {
+        "\u2014": "--",   # em-dash
+        "\u2013": "-",    # en-dash
+        "\u2018": "'",    # left single quote
+        "\u2019": "'",    # right single quote
+        "\u201c": '"',    # left double quote
+        "\u201d": '"',    # right double quote
+        "\u2026": "...",  # ellipsis
+        "\u00e9": "e",    # e-acute
+        "\u00e8": "e",    # e-grave
+        "\u00fc": "u",    # u-umlaut
+        "\u00f6": "o",    # o-umlaut
+        "\u00e4": "a",    # a-umlaut
+    }
+    for char, replacement in replacements.items():
+        query = query.replace(char, replacement)
+    # Final safety net: strip any remaining non-ASCII
+    return query.encode("ascii", errors="replace").decode("ascii")
+
+
 async def _search_semantic_scholar(
     query: str, num_results: int = 5,
 ) -> str:
     """Search Semantic Scholar for academic papers."""
+    fn_name = "_search_semantic_scholar"
+    if _circuit_is_open(fn_name):
+        return ""
+    # Sanitise query to prevent ASCII encoding failures
+    query = _sanitise_query_for_api(query)
     try:
         headers: dict[str, str] = {}
         if _SEMANTIC_SCHOLAR_API_KEY:
@@ -468,12 +541,13 @@ async def _search_semantic_scholar(
             papers = data.get("data", [])
             if not papers:
                 return ""
+            _circuit_record_success(fn_name)
             lines = [f"Semantic Scholar: {query}"]
             for p in papers[:num_results]:
                 title = p.get("title", "")
                 year = p.get("year", "")
                 citations = p.get("citationCount", 0)
-                abstract = (p.get("abstract") or "")[:400]
+                abstract = p.get("abstract") or ""
                 url = p.get("url", "")
                 authors = ", ".join(
                     a.get("name", "")
@@ -489,18 +563,26 @@ async def _search_semantic_scholar(
                 )
             return "\n".join(lines)
     except Exception as exc:
-        logger.warning(
-            "Semantic Scholar search failed for '%s': %s", query[:60], exc,
+        _circuit_record_failure(fn_name)
+        logger.error(
+            "Semantic Scholar search FAILED for '%s': %s", query[:60], exc,
         )
         return ""
 
 
 async def _search_arxiv(query: str, num_results: int = 3) -> str:
     """Search arXiv for preprints via the Atom feed API."""
+    fn_name = "_search_arxiv"
+    if _circuit_is_open(fn_name):
+        return ""
+    # Sanitise query for ASCII safety
+    query = _sanitise_query_for_api(query)
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with httpx.AsyncClient(
+            timeout=20.0, follow_redirects=True,
+        ) as client:
             resp = await client.get(
-                "http://export.arxiv.org/api/query",
+                "https://export.arxiv.org/api/query",
                 params={
                     "search_query": f"all:{query}",
                     "start": 0,
@@ -515,6 +597,7 @@ async def _search_arxiv(query: str, num_results: int = 3) -> str:
             )
             if not entries:
                 return ""
+            _circuit_record_success(fn_name)
             lines = [f"arXiv search: {query}"]
             for entry in entries[:num_results]:
                 title_m = re.search(
@@ -526,7 +609,7 @@ async def _search_arxiv(query: str, num_results: int = 3) -> str:
                     r"<summary>(.*?)</summary>", entry, re.DOTALL,
                 )
                 summary = (
-                    summary_m.group(1).strip()[:400] if summary_m else ""
+                    summary_m.group(1).strip() if summary_m else ""
                 )
                 summary = re.sub(r"\s+", " ", summary)
                 id_m = re.search(r"<id>(.*?)</id>", entry)
@@ -538,12 +621,16 @@ async def _search_arxiv(query: str, num_results: int = 3) -> str:
                 )
             return "\n".join(lines)
     except Exception as exc:
-        logger.warning("arXiv search failed for '%s': %s", query[:60], exc)
+        _circuit_record_failure(fn_name)
+        logger.error("arXiv search FAILED for '%s': %s", query[:60], exc)
         return ""
 
 
 async def _search_scite(query: str, num_results: int = 5) -> str:
     """Search scite.ai for smart citations (support/contradict analysis)."""
+    fn_name = "_search_scite"
+    if _circuit_is_open(fn_name):
+        return ""
     if not _SCITE_REFRESH_TOKEN or not _SCITE_CLIENT_ID:
         return ""
     try:
@@ -584,9 +671,11 @@ async def _search_scite(query: str, num_results: int = 5) -> str:
                     f"{supporting} supporting, {contradicting} contradicting, "
                     f"{mentioning} mentioning citations"
                 )
+            _circuit_record_success(fn_name)
             return "\n".join(lines)
     except Exception as exc:
-        logger.warning("scite.ai search failed for '%s': %s", query[:60], exc)
+        _circuit_record_failure(fn_name)
+        logger.error("scite.ai search FAILED for '%s': %s", query[:60], exc)
         return ""
 
 
@@ -868,9 +957,49 @@ def _select_diverse_urls(
 
 
 # ---------------------------------------------------------------------------
-# Strategy query extraction
+# Unicode sanitisation for ASCII-sensitive APIs
 # ---------------------------------------------------------------------------
 
+def _sanitise_query_for_api(query: str) -> str:
+    """Replace Unicode characters that break search APIs with ASCII equivalents.
+
+    Smart quotes, em-dashes, and other typographic characters cause 422
+    errors on Jina, Semantic Scholar, and arXiv.  This is an architectural
+    guardrail — not a one-off fix for a single character.
+    """
+    replacements = {
+        "\u2014": "--",   # em-dash
+        "\u2013": "-",    # en-dash
+        "\u2018": "'",    # left single quote
+        "\u2019": "'",    # right single quote
+        "\u201c": '"',    # left double quote
+        "\u201d": '"',    # right double quote
+        "\u2026": "...",  # ellipsis
+        "\u00e9": "e",    # e-acute
+        "\u00e8": "e",    # e-grave
+        "\u00fc": "u",    # u-umlaut
+        "\u00f6": "o",    # o-umlaut
+        "\u00e4": "a",    # a-umlaut
+    }
+    for char, replacement in replacements.items():
+        query = query.replace(char, replacement)
+    return query.encode("ascii", errors="replace").decode("ascii")
+
+
+# ---------------------------------------------------------------------------
+# Strategy query extraction — LLM-powered deep dissolution
+#
+# The old approach used 7 regex patterns to shred the thinker's prose
+# into fragments.  This produced shallow, generic search terms like
+# "research strategy" or "exact match" that pulled in Elasticsearch
+# docs and HBR strategy articles instead of neuropsychoanalysis papers.
+#
+# The new approach uses an LLM call to deeply deconstruct the user's
+# query AND the thinker's strategy into conceptually rich, specific
+# search queries that encode the full interdisciplinary depth.
+# ---------------------------------------------------------------------------
+
+# Regex fallback patterns (used ONLY when LLM dissolution fails)
 _QUERY_PATTERNS = [
     re.compile(r"(?:SEARCH_)?QUERY:\s*['\"]?(.+?)['\"]?\s*$", re.M),
     re.compile(r"[Ss]earch\s+(?:for\s+)?['\"]?(.+?)['\"]?\s*(?:\.|$)", re.M),
@@ -885,10 +1014,223 @@ _QUERY_PATTERNS = [
 ]
 
 
-def extract_search_queries(strategy_text: str) -> list[str]:
-    """Extract search queries from the thinker's research strategy.
+# ---------------------------------------------------------------------------
+# Query relevance validator — architectural guardrail
+#
+# Rejects queries that have zero topical overlap with the user's original
+# question.  This prevents the thinker's strategy decomposition from
+# producing generic queries like "research strategy" or "exact match"
+# that pull in Elasticsearch docs, HBR strategy articles, etc.
+#
+# The check is deterministic (no LLM) — it computes token overlap between
+# the extracted query and the user query.  Queries with zero overlap are
+# rejected.  This catches the entire class of "generic strategy noise"
+# that polluted 60% of the Lacan-metabolism corpus.
+# ---------------------------------------------------------------------------
 
-    Returns deduplicated queries, capped at 10.
+_QUERY_STOPWORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "dare", "ought",
+    "to", "of", "in", "for", "on", "with", "at", "by", "from", "as",
+    "into", "through", "during", "before", "after", "above", "below",
+    "between", "out", "off", "over", "under", "again", "further",
+    "then", "once", "here", "there", "when", "where", "why", "how",
+    "all", "each", "every", "both", "few", "more", "most", "other",
+    "some", "such", "no", "nor", "not", "only", "own", "same", "so",
+    "than", "too", "very", "just", "because", "but", "and", "or",
+    "if", "while", "about", "against", "up", "down", "what", "which",
+    "who", "whom", "this", "that", "these", "those", "it", "its",
+    "research", "strategy", "find", "search", "look", "investigate",
+    "information", "data", "results", "analysis", "evidence", "study",
+    "question", "answer", "topic", "subject", "key", "main", "sub",
+    "explore", "examine", "understand", "determine", "identify",
+}
+
+
+def _query_relevance_score(query: str, user_query: str) -> float:
+    """Compute topical overlap between an extracted query and the user query.
+
+    Returns a score in [0, 1].  Queries with score 0 have zero topical
+    overlap and should be rejected.
+    """
+    def _content_tokens(text: str) -> set[str]:
+        tokens = set(re.findall(r'\w+', text.lower()))
+        return tokens - _QUERY_STOPWORDS
+
+    q_tokens = _content_tokens(query)
+    u_tokens = _content_tokens(user_query)
+
+    if not q_tokens:
+        return 0.0
+    if not u_tokens:
+        # User query reduced to empty after stopword removal — we can't
+        # compute meaningful overlap.  Allow the query through rather
+        # than rejecting everything.
+        return 1.0
+
+    overlap = q_tokens & u_tokens
+    # Jaccard-like: overlap / smaller set
+    return len(overlap) / min(len(q_tokens), len(u_tokens))
+
+
+def _validate_query_relevance(
+    queries: list[str],
+    user_query: str,
+    min_score: float = 0.0,
+) -> tuple[list[str], list[str]]:
+    """Split queries into relevant and rejected based on topical overlap.
+
+    Args:
+        queries: Extracted search queries.
+        user_query: The user's original question.
+        min_score: Minimum relevance score (0 = at least 1 content token overlap).
+
+    Returns:
+        (relevant, rejected) — two lists.
+    """
+    if not user_query:
+        return queries, []
+
+    relevant: list[str] = []
+    rejected: list[str] = []
+
+    for q in queries:
+        score = _query_relevance_score(q, user_query)
+        if score > min_score:
+            relevant.append(q)
+        else:
+            rejected.append(q)
+            logger.warning(
+                "QUERY REJECTED (zero topical overlap with user query): %r",
+                q[:120],
+            )
+
+    if rejected:
+        logger.error(
+            "Query validator rejected %d/%d queries as off-topic "
+            "(zero overlap with user query)",
+            len(rejected), len(queries),
+        )
+
+    return relevant, rejected
+
+
+_DISSOLUTION_PROMPT = """\
+You are a research librarian with deep expertise across every academic field.
+Your task: dissolve a research question and strategy into precise, specific
+search queries that will retrieve the exact scholarly and specialist sources
+needed.
+
+RULES:
+- Each query must be CONCEPTUALLY RICH: use the actual technical terms,
+  named theorists, specific mechanisms, journal-quality language.
+- NEVER produce generic queries like "research strategy" or "energy allocation".
+  These retrieve business/tech content, not the interdisciplinary scholarship
+  the user needs.
+- Each query should target a DIFFERENT facet or discipline of the question.
+- Include the proper nouns, named theories, specific biological pathways,
+  philosophical concepts, and cross-disciplinary bridges that a domain expert
+  would search for.
+- Aim for 6-10 queries, each 8-25 words.
+- For interdisciplinary questions, make sure queries span ALL relevant fields
+  (e.g. neuroscience AND psychoanalysis AND philosophy AND biology).
+- Output ONLY the queries, one per line, prefixed with "QUERY: ".
+  No commentary, no numbering, no explanation.
+
+EXAMPLE -- for a question about Lacan's psychic economy and metabolic theory:
+QUERY: Lacanian Real as autonomic dysregulation dorsal vagal shutdown polyvagal theory
+QUERY: jouissance allostatic overload metabolic cost psychoanalytic neuropsychoanalysis
+QUERY: "subject supposed to know" transferential safety signaling ventral vagal engagement
+QUERY: mTOR pathway growth signaling polyvagal safe-enough-to-grow neurobiological
+QUERY: Porges polyvagal theory Lacan Symbolic order cortical narrative regulation
+QUERY: imaginary register mirror stage interoception body schema neuroscience
+QUERY: psychoanalytic economy libido as metabolic energy Freud beyond pleasure principle
+QUERY: dorsal vagal conservation trauma freeze response dissociation neurobiology
+
+Now dissolve this:
+
+USER QUERY:
+{user_query}
+
+THINKER REASONING:
+{strategy}
+"""
+
+
+def _dissolve_via_llm(
+    strategy_text: str,
+    user_query: str,
+) -> list[str]:
+    """Use LLM to dissolve strategy into conceptually rich search queries.
+
+    Calls the Flock proxy (same LiteLLM backend used for scoring) to
+    deeply deconstruct the user's query and thinker strategy into
+    search queries that encode the full conceptual depth.
+    """
+    from utils.flock_proxy import get_flock_proxy_url
+    import json as _json
+    import urllib.request
+
+    proxy_url = get_flock_proxy_url()
+    if not proxy_url:
+        return []
+
+    prompt = _DISSOLUTION_PROMPT.format(
+        user_query=user_query[:2000],
+        strategy=strategy_text[:3000],
+    )
+
+    body = _json.dumps({
+        "model": "flock-model",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1024,
+        "temperature": 0.4,
+    }).encode()
+    req = urllib.request.Request(
+        f"{proxy_url}/v1/chat/completions",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = _json.loads(resp.read())
+        choices = data.get("choices", [])
+        raw = choices[0]["message"]["content"] if choices else ""
+    except Exception as exc:
+        logger.warning("LLM query dissolution failed: %s", exc)
+        return []
+
+    # Parse QUERY: lines from the response
+    queries: list[str] = []
+    seen: set[str] = set()
+    for line in raw.split("\n"):
+        line = line.strip()
+        if line.upper().startswith("QUERY:"):
+            q = line[6:].strip().strip('"\'')
+        elif line and not line.startswith("#") and len(line) > 15:
+            # Accept bare lines too (LLM may skip the prefix)
+            q = line.strip().strip('"\'')
+        else:
+            continue
+
+        q = _sanitise_query_for_api(q)
+        if len(q) < 10 or len(q) > 250:
+            continue
+        normalised = q.lower()
+        if normalised not in seen:
+            seen.add(normalised)
+            queries.append(q)
+
+    return queries[:12]
+
+
+def _regex_extract_queries(strategy_text: str) -> list[str]:
+    """Regex fallback -- extract queries from thinker prose.
+
+    Used only when LLM dissolution is unavailable.
     """
     if not strategy_text or not strategy_text.strip():
         return []
@@ -920,7 +1262,59 @@ def extract_search_queries(strategy_text: str) -> list[str]:
                 seen.add(normalised)
                 queries.append(q)
 
-    return queries[:10]
+    raw_queries = queries[:10]
+
+    # ── Architectural guardrail: query relevance validation ──
+    if user_query:
+        relevant, rejected = _validate_query_relevance(raw_queries, user_query)
+        return relevant
+
+    return raw_queries
+
+
+def extract_search_queries(
+    strategy_text: str,
+    user_query: str = "",
+) -> list[str]:
+    """Extract search queries from the thinker's research strategy.
+
+    Primary path: LLM-powered deep dissolution that deconstructs the
+    query's full conceptual architecture into specific, intellectually
+    rich search queries.  Falls back to regex extraction if the LLM
+    call fails.
+
+    Returns deduplicated queries, capped at 12.
+    """
+    if not strategy_text or not strategy_text.strip():
+        return []
+
+    # Primary: LLM dissolution (when user_query is available)
+    if user_query:
+        try:
+            dissolved = _dissolve_via_llm(strategy_text, user_query)
+        except Exception:
+            dissolved = []
+        if dissolved:
+            logger.info(
+                "LLM query dissolution produced %d conceptually rich queries",
+                len(dissolved),
+            )
+            # Apply relevance validation (architectural guardrail)
+            relevant, rejected = _validate_query_relevance(dissolved, user_query)
+            return relevant if relevant else dissolved
+        logger.warning(
+            "LLM query dissolution failed or empty -- falling back to regex"
+        )
+
+    # Fallback: regex extraction
+    queries = _regex_extract_queries(strategy_text)
+
+    # Apply relevance validation when user_query is available
+    if user_query and queries:
+        relevant, rejected = _validate_query_relevance(queries, user_query)
+        return relevant if relevant else queries
+
+    return queries
 
 
 def _get_existing_corpus_urls(corpus: Any) -> set[str]:
@@ -974,6 +1368,33 @@ def _record_executed_queries(state: dict, queries: list[str]) -> None:
         state["_executed_query_fingerprints"] = new_fps
 
 
+_SERENDIPITY_DISSOLUTION_PROMPT = """\
+You are a contrarian intellectual provocateur.
+Given these research queries, generate {n} unexpected but deeply relevant
+alternative queries that the researcher would NEVER think to search for.
+
+These should be:
+- From adjacent or opposing fields (e.g. if the queries are about
+  psychoanalysis, try neurobiology, comparative religion, ethology)
+- Historically deep (precursor theories, forgotten debates)
+- Methodologically surprising (opposite paradigm, different species,
+  different culture)
+- Genuinely likely to surface serendipitous connections
+
+Do NOT just add "criticism of" or "debate about" — that's lazy.
+Instead, find the ADJACENT POSSIBLE: what related concept from a
+different field would illuminate this question unexpectedly?
+
+Original user question: {user_query}
+
+Current queries:
+{queries}
+
+Output ONLY the contrarian queries, one per line, prefixed with "QUERY: ".
+No commentary.
+"""
+
+
 def _generate_serendipitous_queries(
     queries: list[str],
     user_query: str,
@@ -981,21 +1402,72 @@ def _generate_serendipitous_queries(
 ) -> list[str]:
     """Generate contrarian/unexpected query variants for serendipity.
 
-    For a fraction of the strategy queries, produce structurally
-    contrarian variants that push the search toward unexpected but
-    relevant directions.  No LLM call — uses deterministic templates
-    applied to the existing queries.
+    Primary path: LLM-powered serendipity that finds the adjacent
+    possible — queries from neighbouring fields that illuminate the
+    research question from unexpected angles.
 
-    Returns additional queries (not replacements) marked for
-    serendipitous discovery.
+    Fallback: deterministic templates (better than nothing).
     """
     if not _SERENDIPITY_ENABLED or not queries:
         return []
 
-    import random
-    rng = random.Random(hash(user_query) & 0xFFFFFFFF)  # deterministic per query
+    n_variants = max(2, int(len(queries) * _SERENDIPITY_RATE))
 
-    # Templates that produce structurally contrarian queries
+    # Try LLM-powered serendipity first
+    if user_query:
+        try:
+            from utils.flock_proxy import get_flock_proxy_url
+            import json as _json
+            import urllib.request
+
+            proxy_url = get_flock_proxy_url()
+            if proxy_url:
+                prompt = _SERENDIPITY_DISSOLUTION_PROMPT.format(
+                    n=n_variants,
+                    user_query=user_query[:1000],
+                    queries="\n".join(f"- {q}" for q in queries[:8]),
+                )
+                body = _json.dumps({
+                    "model": "flock-model",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 512,
+                    "temperature": 0.7,
+                }).encode()
+                req = urllib.request.Request(
+                    f"{proxy_url}/v1/chat/completions",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    data = _json.loads(resp.read())
+                choices = data.get("choices", [])
+                raw = choices[0]["message"]["content"] if choices else ""
+                variants: list[str] = []
+                for line in raw.split("\n"):
+                    line = line.strip()
+                    if line.upper().startswith("QUERY:"):
+                        q = line[6:].strip().strip('"\'')
+                    elif line and not line.startswith("#") and len(line) > 15:
+                        q = line.strip().strip('"\'')
+                    else:
+                        continue
+                    q = _sanitise_query_for_api(q)
+                    if 10 <= len(q) <= 200:
+                        variants.append(q)
+                if variants:
+                    logger.info(
+                        "Serendipity (LLM): generated %d contrarian queries",
+                        len(variants),
+                    )
+                    return variants[:n_variants + 1]
+        except Exception as exc:
+            logger.warning("LLM serendipity failed: %s", exc)
+
+    # Fallback: deterministic templates
+    import random
+    rng = random.Random(hash(user_query) & 0xFFFFFFFF)
+
     _TEMPLATES = [
         "criticisms of {q}",
         "evidence against {q}",
@@ -1009,13 +1481,9 @@ def _generate_serendipitous_queries(
         "{q} unintended consequences OR side effects",
     ]
 
-    # Pick which queries get serendipitous variants
-    n_serendipitous = max(1, int(len(queries) * _SERENDIPITY_RATE))
-    selected = rng.sample(queries, min(n_serendipitous, len(queries)))
-
-    variants: list[str] = []
+    selected = rng.sample(queries, min(n_variants, len(queries)))
+    variants = []
     for q in selected:
-        # Shorten the query for template insertion (first 80 chars)
         short_q = q[:80].strip()
         template = rng.choice(_TEMPLATES)
         variant = template.replace("{q}", short_q)
@@ -1024,7 +1492,7 @@ def _generate_serendipitous_queries(
 
     if variants:
         logger.info(
-            "Serendipity: generated %d contrarian query variants from %d queries",
+            "Serendipity (template fallback): generated %d variants from %d queries",
             len(variants), len(selected),
         )
 
@@ -1091,7 +1559,30 @@ async def run_search_executor(
         "total_ingested": 0,
         "queries_deduped": 0,
         "urls_deduped": 0,
+        "queries_rejected_noise": 0,
+        "circuit_breakers_tripped": 0,
     }
+
+    # ── Architectural guardrail: heartbeat emitter ──
+    # Emits progress events so the SSE stream stays alive and the stall
+    # detector doesn't kill productive search work.  Each phase boundary
+    # emits a heartbeat with the current stats.
+    try:
+        from dashboard import get_active_collector
+        _heartbeat_collector = get_active_collector()
+    except Exception:
+        _heartbeat_collector = None
+
+    def _emit_heartbeat(phase: str) -> None:
+        """Emit a search-executor heartbeat event for stall prevention."""
+        if _heartbeat_collector:
+            _heartbeat_collector.emit_event(
+                "search_executor_heartbeat",
+                data={"phase": phase, **stats},
+            )
+        logger.info("Search executor heartbeat: %s", phase)
+
+    _emit_heartbeat("init")
 
     # ── P1: Cross-run dedup — collect URLs and query fingerprints ──
     existing_urls = _get_existing_corpus_urls(corpus)
@@ -1132,7 +1623,10 @@ async def run_search_executor(
             stats["expansion_searches"] += 1
 
     # A2. Strategy queries -- fan-out to multiple APIs
-    strategy_queries = extract_search_queries(strategy)
+    # Pass user_query for both LLM dissolution and the query relevance
+    # validator (architectural guardrail that rejects off-topic queries
+    # before they hit any API).
+    strategy_queries = extract_search_queries(strategy, user_query=user_query)
 
     # ── Serendipity: inject contrarian query variants ──
     # Generate unexpected-but-relevant query variants that push the
@@ -1184,6 +1678,24 @@ async def run_search_executor(
             stats["queries_deduped"],
         )
 
+    # Track rejected noise queries in stats BEFORE the early return so
+    # that even when all queries are rejected, stats capture the root cause.
+    # Uses _query_relevance_score directly to avoid double-logging.
+    if user_query:
+        raw_all = extract_search_queries(strategy)
+        rejected_count = sum(
+            1 for q in raw_all
+            if _query_relevance_score(q, user_query) <= 0.0
+        )
+        stats["queries_rejected_noise"] = rejected_count
+        stats["total_raw_queries"] = len(raw_all)
+
+    # Track tripped circuit breakers (also before early return)
+    stats["circuit_breakers_tripped"] = sum(
+        1 for fn_name in _circuit_breaker
+        if _circuit_is_open(fn_name)
+    )
+
     if not search_tasks and not fan_out_tasks:
         logger.info("Search executor: no searches to execute")
         return stats
@@ -1193,6 +1705,7 @@ async def run_search_executor(
         stats["expansion_searches"],
         stats["strategy_searches"],
     )
+    _emit_heartbeat("phase_a_start")
 
     async def _bounded_search(
         tool: str, query: str, source_type: str,
@@ -1290,6 +1803,7 @@ async def run_search_executor(
         "Phase A complete: %d results, %d ingested (%.1fs)",
         stats["total_results"], stats["total_ingested"], elapsed_a,
     )
+    _emit_heartbeat("phase_a_complete")
 
     # -------------------------------------------------------------------
     # Phase B: Content Extraction (Jina Reader + Apify fallback)
@@ -1369,6 +1883,7 @@ async def run_search_executor(
                 "Phase B complete: %d content extractions",
                 stats["content_extractions"],
             )
+            _emit_heartbeat("phase_b_complete")
 
     # -------------------------------------------------------------------
     # Phase C: Academic Search (conditional)
@@ -1421,10 +1936,21 @@ async def run_search_executor(
                     "Failed to ingest academic result", exc_info=True,
                 )
 
+        # Report academic search failures transparently
+        if stats["academic_searches"] == 0:
+            logger.error(
+                "Phase C: ZERO academic results ingested — all academic "
+                "APIs failed or returned empty (tripped breakers: %s)",
+                [
+                    fn for fn in _circuit_breaker
+                    if _circuit_is_open(fn)
+                ],
+            )
         logger.info(
             "Phase C complete: %d academic results ingested",
             stats["academic_searches"],
         )
+        _emit_heartbeat("phase_c_complete")
 
     # -------------------------------------------------------------------
     # Phase D: Citation Following (one hop)
@@ -1512,6 +2038,34 @@ async def run_search_executor(
                 pass
 
     total_elapsed = time.monotonic() - start
+    stats["total_elapsed_s"] = int(total_elapsed)
+
+    # ── Architectural guardrail: transparent failure summary ──
+    # Log ERROR (not warning) for systemic failures so the diagnostic
+    # tool and operators can see what went wrong.
+    failure_lines: list[str] = []
+    if stats.get("queries_rejected_noise", 0) > 0:
+        failure_lines.append(
+            f"  - {stats['queries_rejected_noise']} queries rejected as "
+            f"off-topic noise"
+        )
+    tripped = [
+        fn for fn in _circuit_breaker if _circuit_is_open(fn)
+    ]
+    if tripped:
+        failure_lines.append(
+            f"  - Circuit breakers tripped: {', '.join(tripped)}"
+        )
+    if stats["total_ingested"] == 0 and stats["total_results"] == 0:
+        failure_lines.append(
+            "  - ZERO results from ALL search APIs — complete search failure"
+        )
+    if failure_lines:
+        logger.error(
+            "Search executor FAILURE SUMMARY:\n%s",
+            "\n".join(failure_lines),
+        )
+
     logger.info(
         "Search executor complete: %d surface, %d extractions, "
         "%d academic, %d citations, %d total ingested (%.1fs)",
@@ -1522,4 +2076,5 @@ async def run_search_executor(
         stats["total_ingested"],
         total_elapsed,
     )
+    _emit_heartbeat("complete")
     return stats

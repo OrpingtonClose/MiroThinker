@@ -69,7 +69,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+import os
+from typing import Optional, TYPE_CHECKING
 
 from google.adk.agents import SequentialAgent
 from google.adk.agents.callback_context import CallbackContext
@@ -86,6 +87,9 @@ from callbacks.condition_manager import (
     run_swarm_synthesis,
     search_executor_callback,
 )
+
+if TYPE_CHECKING:
+    from models.pipeline_block import PipelineRunner
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +164,26 @@ def _init_pipeline_state(
         except Exception:
             pass
 
+        # ── Architectural guardrail: reset circuit breakers ──
+        # Each pipeline run starts with a clean slate — APIs that were
+        # tripped in a previous run get a fresh chance.
+        try:
+            from tools.search_executor import reset_circuit_breakers
+            reset_circuit_breakers()
+        except Exception:
+            pass
+
+        # ── Pipeline health model ──
+        # Create a fresh PipelineHealth tracker for this run.
+        # Every phase reports structured health data here; the health
+        # gate at each boundary validates phase contracts.
+        try:
+            from models.pipeline_health import PipelineHealth
+            health = PipelineHealth()
+            health.save(state)
+        except Exception:
+            logger.warning("Failed to initialise PipelineHealth", exc_info=True)
+
         # ── P0: Skip scout on corpus re-open ──
         # The scout decomposes the query and probes with cheap searches.
         # On continuation runs the thinker already has the full corpus,
@@ -203,6 +227,26 @@ def _init_pipeline_state(
                     cancel_event.set()
                     logger.warning("Phase 0 scout failed (non-fatal): %s", exc)
 
+                # ── Pipeline health gate: scout ──
+                try:
+                    from models.pipeline_health import PipelineHealth, check_scout
+                    health = PipelineHealth.from_state(state)
+                    phase = health.begin_phase("scout")
+                    # The scout writes landscape text to research_findings.
+                    # Measure whether it produced content (non-default value).
+                    findings_text = state.get("research_findings", "")
+                    has_landscape = (
+                        bool(findings_text)
+                        and findings_text != "(no findings yet)"
+                    )
+                    phase.metrics["has_landscape"] = has_landscape
+                    phase.metrics["landscape_length"] = len(findings_text) if has_landscape else 0
+                    check_scout(phase, state)
+                    health.evaluate_gate(phase)
+                    health.save(state)
+                except Exception:
+                    pass  # health tracking is best-effort
+
     return None
 
 
@@ -245,8 +289,52 @@ def _cleanup_pipeline_state(
     Mirrors :func:`_init_pipeline_state` — closes the DuckDB connection
     and removes the store from the module-level ``_corpus_stores`` dict
     so memory and connections are not leaked across runs.
+
+    Also records the final pipeline health verdict.
     """
-    cleanup_corpus(callback_context.state)
+    state = callback_context.state
+
+    # ── Pipeline health gate: synthesiser (final) ──
+    # The synthesiser just ran — check if it produced a useful report.
+    try:
+        from models.pipeline_health import PipelineHealth, check_synthesiser
+        health = PipelineHealth.from_state(state)
+        phase = health.begin_phase("synthesiser")
+        # corpus_for_synthesis is the swarm output (synthesiser's INPUT).
+        # The synthesiser itself has no output_key so its output goes to
+        # conversation history.  We measure whether the swarm provided
+        # content for the synthesiser to work with.
+        swarm_output = state.get("corpus_for_synthesis", "")
+        phase.metrics["swarm_input_length"] = len(swarm_output) if swarm_output else 0
+        # Count corpus findings for the health check.
+        # MUST check that no background scoring thread is alive before
+        # touching DuckDB — connections are not thread-safe.
+        try:
+            from callbacks.condition_manager import (
+                _corpus_stores, _wait_for_pending_scoring,
+            )
+            corpus_key = state.get("_corpus_key")
+            if corpus_key and corpus_key in _corpus_stores:
+                safe = _wait_for_pending_scoring(corpus_key)
+                if safe:
+                    corpus = _corpus_stores[corpus_key]
+                    phase.metrics["corpus_findings"] = corpus.conn.execute(
+                        "SELECT COUNT(*) FROM conditions "
+                        "WHERE row_type = 'finding'"
+                    ).fetchone()[0]
+                else:
+                    # Scoring thread still alive — skip DuckDB query
+                    phase.metrics["corpus_findings"] = -1
+        except Exception:
+            phase.metrics["corpus_findings"] = 0
+        check_synthesiser(phase, state)
+        health.evaluate_gate(phase)
+        health.save(state)
+        logger.info("Final pipeline health: %s", health.summary())
+    except Exception:
+        logger.warning("Pipeline health (final) failed (non-fatal)", exc_info=True)
+
+    cleanup_corpus(state)
     return None
 
 
@@ -310,3 +398,92 @@ pipeline_agent = SequentialAgent(
     before_agent_callback=_init_pipeline_state,
     after_agent_callback=_cleanup_pipeline_state,
 )
+
+
+# ---------------------------------------------------------------------------
+# PIPELINE_MODE=blocks — aspect-oriented block pipeline (feature-flagged)
+# ---------------------------------------------------------------------------
+# When PIPELINE_MODE=blocks, ADK callbacks delegate to PipelineRunner
+# which applies aspects uniformly around each block's execution.
+# The ADK agent graph is unchanged — blocks wrap the same logic that
+# callbacks currently do, but with clean I/O contracts and cross-cutting
+# concerns handled by aspects instead of ad-hoc inline code.
+# ---------------------------------------------------------------------------
+
+_PIPELINE_MODE = os.environ.get("PIPELINE_MODE", "callbacks")
+
+
+def build_pipeline_runner() -> "PipelineRunner":
+    """Construct a PipelineRunner with all blocks and aspects wired up.
+
+    Called once per pipeline session.  The runner is stateful — it tracks
+    health, costs, and error counts across all blocks in a session.
+    """
+    from models.pipeline_block import PipelineRunner
+
+    from aspects.timing import TimingAspect
+    from aspects.heartbeat import HeartbeatAspect
+    from aspects.io_validation import InputOutputValidationAspect
+    from aspects.duckdb_safety import DuckDBSafetyAspect
+    from aspects.health_gate import HealthGateAspect
+    from aspects.cost_tracking import CostTrackingAspect
+    from aspects.corpus_refresh import CorpusRefreshAspect
+    from aspects.error_escalation import ErrorEscalationAspect
+
+    from blocks.scout_block import ScoutBlock
+    from blocks.thinker_block import ThinkerBlock
+    from blocks.search_executor_block import SearchExecutorBlock
+    from blocks.maestro_block import MaestroBlock
+    from blocks.swarm_block import SwarmSynthesisBlock
+    from blocks.synthesiser_block import SynthesiserBlock
+
+    # Aspect order matters:
+    # 1. Timing — outermost, measures total wall-clock
+    # 2. Heartbeat — dashboard events at boundaries
+    # 3. I/O Validation — validate inputs before execution
+    # 4. DuckDB Safety — thread-safety gate for corpus blocks
+    # 5. Health Gate — cumulative health tracking
+    # 6. Cost Tracking — API cost deltas
+    # 7. Corpus Refresh — state refresh after corpus mutators
+    # 8. Error Escalation — LAST, decides absorb vs propagate
+    aspects = [
+        TimingAspect(),
+        HeartbeatAspect(),
+        InputOutputValidationAspect(),
+        DuckDBSafetyAspect(),
+        HealthGateAspect(),
+        CostTrackingAspect(),
+        CorpusRefreshAspect(),
+        ErrorEscalationAspect(),
+    ]
+
+    blocks = [
+        ScoutBlock(),
+        ThinkerBlock(),
+        SearchExecutorBlock(),
+        MaestroBlock(),
+        SwarmSynthesisBlock(),
+        SynthesiserBlock(),
+    ]
+
+    return PipelineRunner(blocks=blocks, aspects=aspects)
+
+
+# Module-level runner instance (lazy, created on first use in blocks mode)
+_runner: Optional["PipelineRunner"] = None
+
+
+def get_pipeline_runner() -> "PipelineRunner":
+    """Get or create the module-level PipelineRunner singleton."""
+    global _runner
+    if _runner is None:
+        _runner = build_pipeline_runner()
+        logger.info("PipelineRunner created with %d blocks, %d aspects",
+                     len(_runner.blocks), len(_runner.aspects))
+    return _runner
+
+
+def reset_pipeline_runner() -> None:
+    """Reset the runner (e.g. between pipeline sessions)."""
+    global _runner
+    _runner = None

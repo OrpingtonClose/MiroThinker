@@ -414,7 +414,7 @@ class CorpusStore:
                         "(id, fact, source_type, source_ref, row_type, "
                         "consider_for_use, created_at) "
                         "VALUES (?, ?, ?, ?, 'raw', ?, ?)",
-                            [cid, raw_text[:2000], src_type, src_ref,
+                            [cid, raw_text, src_type, src_ref,
                              False, ingested_at or ""],
                     )
                 logger.info("Migrated %d raw_ingestion rows", len(raw_rows))
@@ -974,10 +974,19 @@ class CorpusStore:
         return False
 
     def score_new_conditions(self, user_query: str = "") -> int:
-        """Score all unscored conditions using Flock. Returns count."""
+        """Score all unscored conditions using genuine per-finding LLM assessment.
+
+        Uses ``score_version = 0`` (not ``scored_at = ''``) to find unscored
+        findings.  This is critical: if the maestro writes flat default scores
+        via a bulk UPDATE (setting scored_at but NOT incrementing score_version),
+        those findings will be RE-SCORED here with genuine per-finding LLM
+        assessment.  This breaks the flat-scoring pre-emption chain.
+
+        Returns count of findings scored.
+        """
         unscored = self.conn.execute(
             "SELECT id, fact, source_url FROM conditions "
-            "WHERE scored_at = '' AND consider_for_use = TRUE "
+            "WHERE score_version = 0 AND consider_for_use = TRUE "
             "AND row_type = 'finding'"
         ).fetchall()
         if not unscored:
@@ -1001,73 +1010,126 @@ class CorpusStore:
     ) -> None:
         """Score a single condition across all gradient dimensions.
 
-        All 6-7 scoring prompts are batched into a single parallel call
+        All 7 scoring prompts are batched into a single parallel call
         via ``_http_complete_batch()`` so they execute concurrently
-        instead of sequentially (6-7x speedup per condition).
+        instead of sequentially (7x speedup per condition).
+
+        Every prompt includes the user's research question so the LLM
+        can calibrate scores relative to the actual topic.  Without
+        this context, all findings received identical scores because
+        the LLM had no frame of reference for what "relevant" or
+        "novel" meant.
         """
         url_text = source_url if source_url else "(no URL)"
+        query_ctx = (
+            f"Research question: {user_query}\n" if user_query else ""
+        )
 
-        # Build all scoring prompts up front
+        # Build all scoring prompts up front — each one is query-aware
         prompts: list[tuple[str, str]] = [
             (
-                "Rate the confidence of this research finding on a scale "
-                "from 0.0 to 1.0. Consider: Is it specific? Does it cite "
-                "sources? Is the language hedged or definitive? Return "
-                "ONLY a decimal number, nothing else. "
-                "Finding: " + fact,
+                f"{query_ctx}"
+                "Rate the confidence of this research finding on 0.0-1.0.\n"
+                "Consider: Does it make specific, verifiable claims? "
+                "Does it cite named sources, studies, or data? "
+                "Is the language hedged ('may', 'might') or definitive?\n"
+                "0.2 = vague opinion with no evidence. "
+                "0.5 = plausible claim with some support. "
+                "0.8 = specific claim citing named studies/data. "
+                "1.0 = verifiable fact with exact citations.\n"
+                "Return ONLY a decimal number.\n"
+                f"Finding: {fact}",
                 "score_confidence",
             ),
             (
-                "Rate the trustworthiness of this source URL on a scale "
-                "from 0.0 to 1.0. Academic/government = high, established "
-                "news = medium-high, forums/social = medium, unknown/no "
-                "URL = low. Return ONLY a decimal number. "
-                "URL: " + url_text,
+                f"{query_ctx}"
+                "Rate the trustworthiness of this source on 0.0-1.0.\n"
+                "0.1 = no URL or obviously unreliable. "
+                "0.3 = blog/forum/social media. "
+                "0.5 = established news outlet. "
+                "0.7 = professional/institutional source. "
+                "0.9 = peer-reviewed journal, government data, or "
+                "primary academic source.\n"
+                "Return ONLY a decimal number.\n"
+                f"URL: {url_text}",
                 "score_trust",
             ),
             (
-                "Rate how specific and concrete this finding is on 0.0 to "
-                "1.0. 1.0 = contains exact names, numbers, dates, URLs. "
-                "0.0 = vague generality with no concrete data. Return "
-                "ONLY a decimal number. "
-                "Finding: " + fact,
+                f"{query_ctx}"
+                "Rate how specific and concrete this finding is on 0.0-1.0.\n"
+                "0.1 = completely generic ('experts say it matters'). "
+                "0.3 = names a concept but no data or specifics. "
+                "0.5 = mentions specific mechanisms or named theories. "
+                "0.7 = includes names, dates, numbers, or citations. "
+                "1.0 = contains exact data points, measurements, or "
+                "direct quotes with attribution.\n"
+                "Return ONLY a decimal number.\n"
+                f"Finding: {fact}",
                 "score_specificity",
             ),
             (
-                "Rate the risk that this finding is "
-                "fabricated/hallucinated on 0.0 to 1.0. "
-                "0.0 = clearly grounded in real sources. "
-                "1.0 = likely made up, no verifiable details. Consider: "
-                "Does it cite a real URL? Are the claims verifiable? "
-                "Return ONLY a decimal number. "
-                "Finding: " + fact + " Source: " + url_text,
+                f"{query_ctx}"
+                "Rate the fabrication risk of this finding on 0.0-1.0.\n"
+                "0.0 = clearly grounded in verifiable, real sources. "
+                "0.3 = plausible but hard to verify independently. "
+                "0.6 = suspicious — mixes real concepts with "
+                "unverifiable claims. "
+                "1.0 = likely fabricated — names fake studies, "
+                "impossible statistics, or hallucinates details.\n"
+                "Return ONLY a decimal number.\n"
+                f"Finding: {fact}\nSource: {url_text}",
                 "score_fabrication",
             ),
             (
-                "Rate how novel this finding is on 0.0 to 1.0. "
-                "1.0 = completely new information not commonly known. "
-                "0.0 = widely known, obvious, or trivial. "
-                "Return ONLY a decimal number. "
-                "Finding: " + fact,
+                f"{query_ctx}"
+                "Rate how novel this finding is on 0.0-1.0.\n"
+                "Consider novelty RELATIVE TO the research question — "
+                "common knowledge about an obscure topic is still novel "
+                "if it's not widely cross-referenced.\n"
+                "0.1 = textbook knowledge anyone in the field knows. "
+                "0.3 = well-known within the discipline. "
+                "0.5 = known to specialists but crosses disciplines "
+                "in a useful way. "
+                "0.8 = unusual connection or rarely cited finding. "
+                "1.0 = genuinely surprising or contrarian.\n"
+                "Return ONLY a decimal number.\n"
+                f"Finding: {fact}",
                 "score_novelty",
             ),
             (
-                "Rate how actionable this finding is on 0.0 to 1.0. "
-                "1.0 = directly usable, contains specific steps or data. "
-                "0.0 = purely informational with no actionable content. "
-                "Return ONLY a decimal number. "
-                "Finding: " + fact,
+                f"{query_ctx}"
+                "Rate how actionable this finding is for the research "
+                "question on 0.0-1.0.\n"
+                "0.1 = purely background context, no usable content. "
+                "0.3 = informational but not directly applicable. "
+                "0.5 = provides a useful reference or framework. "
+                "0.8 = contains specific evidence or arguments that "
+                "directly address the research question. "
+                "1.0 = a key finding that could change the direction "
+                "of the research.\n"
+                "Return ONLY a decimal number.\n"
+                f"Finding: {fact}",
                 "score_actionability",
             ),
         ]
 
-        # Conditionally add relevance scoring if we have a user query
+        # Conditionally add relevance scoring — needs a user query to
+        # evaluate against; without one the LLM has no frame of reference
         has_relevance = bool(user_query)
         if has_relevance:
             prompts.append((
-                "Rate how relevant this finding is to the user query "
-                "on 0.0 to 1.0. Return ONLY a decimal number. "
-                "Query: " + user_query + " Finding: " + fact,
+                f"{query_ctx}"
+                "Rate how relevant this finding is to the research "
+                "question on 0.0-1.0.\n"
+                "Score based on genuine conceptual connection to the "
+                "research question — not surface keyword overlap.\n"
+                "0.0 = completely off-topic, no conceptual connection. "
+                "0.2 = shares a keyword but different domain entirely. "
+                "0.5 = tangentially related, same broad field. "
+                "0.7 = directly addresses a sub-question. "
+                "1.0 = core finding that precisely answers the query.\n"
+                "Return ONLY a decimal number.\n"
+                f"Finding: {fact}",
                 "score_relevance",
             ))
 
@@ -1081,7 +1143,10 @@ class CorpusStore:
         fabrication = self._parse_float(responses[3], 0.0)
         novelty = self._parse_float(responses[4], 0.5)
         actionability = self._parse_float(responses[5], 0.5)
-        relevance = self._parse_float(responses[6], 0.5) if has_relevance else 0.5
+        relevance = (
+            self._parse_float(responses[6], 0.5)
+            if has_relevance else 0.5
+        )
 
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
@@ -1119,9 +1184,9 @@ class CorpusStore:
         results as relationship rows (row_type='similarity') in
         the conditions table.  Returns count of pairs evaluated.
 
-        Uses a keyword-overlap pre-filter to skip obviously unrelated
-        pairs, then batches the remaining LLM comparisons in parallel
-        via ``_http_complete_batch()``.
+        Uses a proper-noun / technical-term pre-filter to skip obviously
+        unrelated pairs, then batches the remaining LLM comparisons in
+        parallel via ``_http_complete_batch()``.
         """
         new_ids = self.conn.execute(
             "SELECT id FROM conditions "
@@ -1144,16 +1209,68 @@ class CorpusStore:
                 [new_id, new_id],
             ).fetchall()
 
-            # Pre-filter: skip pairs with <15% keyword overlap
-            new_words = set(new_fact.lower().split())
+            # Pre-filter: use proper nouns & technical terms (not generic
+            # words) to identify candidate pairs for LLM comparison.
+            # Generic word overlap misses paraphrases that use different
+            # vocabulary for the same claim.  Proper nouns, numbers, and
+            # technical terms are much stronger signals of topical overlap.
+            # Common sentence starters that get capitalised but are
+            # NOT proper nouns or technical terms.
+            _SIG_STOPS = {
+                "the", "this", "that", "these", "there", "their",
+                "a", "an", "in", "it", "is", "are", "for", "from",
+                "with", "has", "have", "was", "were", "will", "been",
+                "some", "many", "most", "several", "according",
+                "however", "although", "research", "studies", "recent",
+                "new", "our", "its", "other", "such", "both", "each",
+                "one", "two", "three", "four", "five", "six", "seven",
+                "eight", "nine", "ten", "more", "less", "much", "very",
+                "while", "when", "where", "what", "which", "who",
+                "how", "why", "also", "but", "yet", "nor", "not",
+                "all", "any", "no", "only", "so", "too", "than",
+                "they", "we", "he", "she", "you", "may", "can",
+                "would", "could", "should", "must", "shall", "might",
+            }
+
+            def _signature_terms(text: str) -> set[str]:
+                """Extract proper nouns, numbers, and technical terms.
+
+                Filters out common sentence starters that happen to be
+                capitalised at sentence boundaries.
+                """
+                terms: set[str] = set()
+                for word in text.split():
+                    clean = word.strip(".,;:!?\"'()[]")
+                    if not clean:
+                        continue
+                    low = clean.lower()
+                    if low in _SIG_STOPS:
+                        continue
+                    # Capitalised words (proper nouns, named theories)
+                    if clean[0].isupper() and len(clean) > 1:
+                        terms.add(low)
+                    # Numbers and measurements
+                    elif any(c.isdigit() for c in clean):
+                        terms.add(low)
+                    # Hyphenated compound terms (technical jargon)
+                    elif "-" in clean and len(clean) > 5:
+                        terms.add(low)
+                return terms
+
+            new_terms = _signature_terms(new_fact)
             candidates: list[tuple[int, str]] = []
             for other_id, other_fact in others:
-                other_words = set(other_fact.lower().split())
-                union_size = len(new_words | other_words)
-                if union_size > 0:
-                    overlap = len(new_words & other_words) / union_size
-                    if overlap >= 0.15:
-                        candidates.append((other_id, other_fact))
+                other_terms = _signature_terms(other_fact)
+                # If either has very few signature terms, include as
+                # candidate — the LLM should decide
+                if len(new_terms) < 2 or len(other_terms) < 2:
+                    candidates.append((other_id, other_fact))
+                    continue
+                # Require >=2 shared terms to tolerate one coincidental
+                # match (e.g. a common methodology name)
+                shared = len(new_terms & other_terms)
+                if shared >= 2:
+                    candidates.append((other_id, other_fact))
 
             if not candidates:
                 self.conn.execute(
@@ -2753,14 +2870,14 @@ class CorpusStore:
             f"({len(delta)} new this iteration, {len(prior)} from prior iterations)\n",
         ]
 
-        # ── Tier 2: Condensed summary of PRIOR findings ──
+        # ── Tier 2: PRIOR findings (full detail, no truncation) ──
         if prior:
             lines.append("=" * 60)
-            lines.append("PRIOR FINDINGS (condensed summary)")
+            lines.append("PRIOR FINDINGS")
             lines.append("=" * 60)
             lines.append("")
 
-            # Group prior findings by angle/topic for compact display
+            # Group prior findings by angle/topic
             by_angle: dict[str, list[dict]] = defaultdict(list)
             for c in prior:
                 angle = c.get("angle", "") or "general"
@@ -2768,18 +2885,16 @@ class CorpusStore:
 
             for angle, findings in sorted(by_angle.items()):
                 lines.append(f"[{angle}] ({len(findings)} findings):")
-                # Show top findings by quality, one-line each
+                # Show ALL findings by quality — no cap, no truncation
                 top = sorted(
                     findings,
                     key=lambda x: x.get("composite_quality") or 0,
                     reverse=True,
-                )[:15]  # Cap at 15 per angle to keep it compact
+                )
                 for c in top:
                     q = c.get("composite_quality") or 0
-                    fact = (c.get("fact") or "")[:200]
+                    fact = c.get("fact") or ""
                     lines.append(f"  [{c['id']}] (q={q:.2f}) {fact}")
-                if len(findings) > 15:
-                    lines.append(f"  ... and {len(findings) - 15} more findings")
                 lines.append("")
 
         # ── Tier 1: Full detail for DELTA (new) findings ──
@@ -2817,7 +2932,7 @@ class CorpusStore:
 
             lines.append(f"--- Source Passage (chunk {chunk_id}) ---")
             if chunk_text:
-                lines.append(chunk_text[:2000])
+                lines.append(chunk_text)
             lines.append("")
             lines.append("Extracted findings:")
 
@@ -2845,13 +2960,13 @@ class CorpusStore:
         if edges:
             lines.append("RELATIONSHIPS BETWEEN FINDINGS:")
             for src, tgt, rel in edges:
-                src_preview = cond_by_id[src]["fact"][:80] if src in cond_by_id else f"[{src}]"
-                tgt_preview = cond_by_id[tgt]["fact"][:80] if tgt in cond_by_id else f"[{tgt}]"
+                src_fact = cond_by_id[src]["fact"] if src in cond_by_id else f"[{src}]"
+                tgt_fact = cond_by_id[tgt]["fact"] if tgt in cond_by_id else f"[{tgt}]"
                 lines.append(
                     f"  [{src}] --{rel}--> [{tgt}]"
                 )
-                lines.append(f"    {src_preview}")
-                lines.append(f"    → {tgt_preview}")
+                lines.append(f"    {src_fact}")
+                lines.append(f"    → {tgt_fact}")
                 lines.append("")
 
         if chains:
@@ -2862,7 +2977,7 @@ class CorpusStore:
                     if mid in cond_by_id:
                         chain_facts.append(
                             f"  {len(chain_facts) + 1}. [{mid}] "
-                            f"{cond_by_id[mid]['fact'][:120]}"
+                            f"{cond_by_id[mid]['fact']}"
                         )
                 if chain_facts:
                     lines.append(f"Thread {i}:")
@@ -2886,8 +3001,8 @@ class CorpusStore:
                 if partner_c:
                     lines.append(
                         f"  [{c['id']}] vs [{partner}]: "
-                        f"{c['fact'][:200]} CONTRADICTS "
-                        f"{partner_c['fact'][:200]}"
+                        f"{c['fact']} CONTRADICTS "
+                        f"{partner_c['fact']}"
                     )
             lines.append("")
 
@@ -2936,7 +3051,7 @@ class CorpusStore:
                 for ins in insights:
                     lines.append(
                         f"  [insight #{ins['id']}, angle={ins['angle']}]: "
-                        f"{ins['fact'][:500]}"
+                        f"{ins['fact']}"
                     )
                 lines.append("")
 
@@ -2955,7 +3070,7 @@ class CorpusStore:
                     for v in verdicts:
                         lines.append(
                             f"    [thought #{v['id']}, iter={v['iteration']}]: "
-                            f"{v['fact'][:400]}"
+                            f"{v['fact']}"
                         )
                 if specialists:
                     lines.append("  SPECIALIST ANALYSIS:")
@@ -2963,7 +3078,7 @@ class CorpusStore:
                         depth_tag = f" depth={s['expansion_depth']}" if s.get("expansion_depth", 0) > 0 else ""
                         lines.append(
                             f"    [thought #{s['id']}, iter={s['iteration']}"
-                            f"{depth_tag}]: {s['fact'][:300]}"
+                            f"{depth_tag}]: {s['fact']}"
                         )
                 lines.append("")
 
@@ -2975,27 +3090,139 @@ class CorpusStore:
                 f"Budget: {len(by_angle)} angles."
             )
 
-        result = "\n".join(lines)
+        return "\n".join(lines)
 
-        # ── Context overflow safeguard ──
-        # gpt-4o-mini has 128K tokens (~512K chars).  The thinker prompt
-        # also includes system instructions + conversation history, so
-        # cap the corpus briefing at ~300K chars (~75K tokens) to leave
-        # headroom.  Prefer keeping the corpus health summary (end) and
-        # the most recent findings (later chunks = higher iteration).
-        _MAX_THINKER_CHARS = 300_000
-        if len(result) > _MAX_THINKER_CHARS:
-            # Keep the last N chars (most recent findings + health summary)
-            truncation_note = (
-                f"[CORPUS TRUNCATED: {len(result)} chars → {_MAX_THINKER_CHARS} chars. "
-                f"Oldest findings omitted to fit context window. "
-                f"Focus on the newest material below.]\n\n"
-            )
-            result = truncation_note + result[-(
-                _MAX_THINKER_CHARS - len(truncation_note)
-            ):]
+    def format_summary_for_maestro(self) -> str:
+        """Format a compact structural summary for the maestro.
 
-        return result
+        The maestro has unrestricted SQL access to the full corpus via
+        ``execute_flock_sql()``, so it does NOT need every finding's text
+        in its instruction.  This method provides just enough orientation
+        for the maestro to know what SQL operations to perform:
+
+        - Total counts by processing status and row type
+        - Unscored condition count (the maestro's primary job)
+        - Expansion targets awaiting fulfilment
+        - Per-angle statistics (count, avg quality)
+        - Top contradictions and cluster info
+
+        This keeps the maestro's context window lean, leaving room for
+        SQL results and Flock LLM outputs.
+        """
+        lines: list[str] = []
+
+        # ── Overall counts ──
+        total = self.count()
+        if total == 0:
+            return "(empty corpus — no conditions to organise)"
+
+        status_counts = self._status_snapshot()
+        lines.append(f"CORPUS OVERVIEW: {total} total conditions")
+        if status_counts:
+            status_parts = [f"{s}={n}" for s, n in sorted(status_counts.items())]
+            lines.append(f"  By processing_status: {', '.join(status_parts)}")
+
+        # Row type breakdown
+        try:
+            rt_rows = self.conn.execute(
+                "SELECT row_type, COUNT(*) FROM conditions "
+                "WHERE consider_for_use = TRUE GROUP BY row_type "
+                "ORDER BY COUNT(*) DESC"
+            ).fetchall()
+            if rt_rows:
+                rt_parts = [f"{rt}={n}" for rt, n in rt_rows]
+                lines.append(f"  By type: {', '.join(rt_parts)}")
+        except Exception:
+            pass
+
+        # ── Unscored conditions (primary maestro task) ──
+        try:
+            unscored = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions "
+                "WHERE score_version = 0 AND consider_for_use = TRUE "
+                "AND row_type = 'finding'"
+            ).fetchone()[0]
+            if unscored:
+                lines.append(f"\n⚠ UNSCORED: {unscored} findings need scoring (score_version=0)")
+            else:
+                lines.append("\n✓ All findings scored")
+        except Exception:
+            pass
+
+        # ── Expansion targets ──
+        try:
+            exp_rows = self.conn.execute(
+                "SELECT expansion_tool, COUNT(*), "
+                "GROUP_CONCAT(CAST(id AS VARCHAR), ', ') "
+                "FROM conditions "
+                "WHERE expansion_tool != 'none' "
+                "AND expansion_fulfilled = FALSE "
+                "AND consider_for_use = TRUE "
+                "GROUP BY expansion_tool"
+            ).fetchall()
+            if exp_rows:
+                lines.append(f"\nEXPANSION TARGETS ({sum(r[1] for r in exp_rows)} pending):")
+                for tool, cnt, ids in exp_rows:
+                    lines.append(f"  {tool}: {cnt} conditions (ids: {ids})")
+        except Exception:
+            pass
+
+        # ── Per-angle statistics ──
+        try:
+            angle_rows = self.conn.execute(
+                "SELECT angle, COUNT(*), "
+                "ROUND(AVG(composite_quality), 2), "
+                "SUM(CASE WHEN score_version = 0 THEN 1 ELSE 0 END) "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE AND row_type = 'finding' "
+                "GROUP BY angle ORDER BY COUNT(*) DESC"
+            ).fetchall()
+            if angle_rows:
+                lines.append(f"\nANGLE BREAKDOWN ({len(angle_rows)} angles):")
+                for angle, cnt, avg_q, unscored_n in angle_rows:
+                    label = angle or "(no angle)"
+                    unscored_note = f", {int(unscored_n)} unscored" if unscored_n else ""
+                    lines.append(
+                        f"  [{label}]: {cnt} findings, avg_quality={avg_q}{unscored_note}"
+                    )
+        except Exception:
+            pass
+
+        # ── Contradiction summary ──
+        try:
+            contra_count = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions "
+                "WHERE contradiction_flag = TRUE AND consider_for_use = TRUE"
+            ).fetchone()[0]
+            lines.append(f"\nCONTRADICTIONS: {contra_count}")
+        except Exception:
+            pass
+
+        # ── Cluster summary ──
+        try:
+            cluster_rows = self.conn.execute(
+                "SELECT COUNT(DISTINCT cluster_id) FROM conditions "
+                "WHERE cluster_id >= 0 AND consider_for_use = TRUE"
+            ).fetchone()[0]
+            lines.append(f"CLUSTERS: {cluster_rows}")
+        except Exception:
+            pass
+
+        # ── Thought/insight counts ──
+        try:
+            thought_count = self.count_thoughts()
+            if thought_count:
+                lines.append(f"THOUGHTS: {thought_count} (immutable — do not modify)")
+            insight_count = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions "
+                "WHERE row_type = 'insight' AND consider_for_use = TRUE"
+            ).fetchone()[0]
+            if insight_count:
+                lines.append(f"INSIGHTS: {insight_count}")
+        except Exception:
+            pass
+
+        return "\n".join(lines)
 
     def format_for_synthesiser(self) -> str:
         """Format the corpus for the synthesiser — chunk-based layout.
@@ -3033,7 +3260,7 @@ class CorpusStore:
 
             lines.append(f"--- Source Passage (chunk {chunk_id}) ---")
             if chunk_text:
-                lines.append(chunk_text[:2000])
+                lines.append(chunk_text)
             lines.append("")
             lines.append("Key findings for synthesis:")
             for c in atoms:
@@ -3058,7 +3285,7 @@ class CorpusStore:
                     if mid in cond_by_id:
                         chain_items.append(
                             f"  {len(chain_items) + 1}. "
-                            f"{cond_by_id[mid]['fact'][:150]}"
+                            f"{cond_by_id[mid]['fact']}"
                         )
                 if chain_items:
                     lines.append(f"Thread {i}:")
@@ -3081,20 +3308,174 @@ class CorpusStore:
             f"{contradictions} contradictions to address."
         )
 
-        result = "\n".join(lines)
+        return "\n".join(lines)
 
-        # ── Context overflow safeguard (same as format_for_thinker) ──
-        _MAX_SYNTH_CHARS = 300_000
-        if len(result) > _MAX_SYNTH_CHARS:
-            truncation_note = (
-                f"[CORPUS TRUNCATED: {len(result)} chars → {_MAX_SYNTH_CHARS} chars. "
-                f"Oldest findings omitted to fit context window.]\n\n"
-            )
-            result = truncation_note + result[-(
-                _MAX_SYNTH_CHARS - len(truncation_note)
-            ):]
+    def format_for_specialist(self, angle: str, user_query: str = "") -> str:
+        """Format a FULL per-angle corpus view for a specialist thinker.
 
-        return result
+        Each specialist in the swarm receives a **complete**, untruncated
+        view of the findings relevant to their assigned angle.  This is
+        the swarm's corpus-partitioning mechanism — inspired by the
+        deep-search-portal pattern of decomposing a query into targeted
+        sub-probes.
+
+        Instead of giving every specialist a truncated copy of the whole
+        corpus, each specialist gets:
+
+        1. **Full findings for their angle** — every finding tagged with
+           this angle, rendered in full verbal prose via ``_describe_finding``.
+        2. **Unassigned findings** — findings with no angle tag that may
+           be relevant to any specialist.
+        3. **Prior thoughts for this angle** — full text of prior
+           specialist analysis, arbitration verdicts, and insights so the
+           specialist can build on previous work.
+        4. **Orientation** — a one-line count of what other angles exist
+           in the corpus (the specialist doesn't need their data, just
+           awareness that parallel investigation is happening).
+
+        Because each specialist is spawned with a **clean context**, the
+        per-angle slice is naturally smaller than the full corpus, making
+        context overflow a non-issue for typical research corpora.
+
+        Args:
+            angle: The specialist's assigned research angle.
+            user_query: The user's original query for context.
+        """
+        lines: list[str] = []
+
+        # ── Query per-angle findings ──
+        cols = [
+            "id", "fact", "source_url", "confidence", "trust_score",
+            "novelty_score", "specificity_score", "duplication_score",
+            "fabrication_risk", "verification_status", "angle",
+            "parent_id", "related_id", "expansion_depth", "iteration",
+            "row_type", "consider_for_use",
+            "composite_quality", "information_density", "cross_ref_boost",
+            "relevance_score", "actionability_score",
+            "cluster_id", "cluster_rank",
+            "expansion_tool", "expansion_hint", "expansion_fulfilled",
+            "contradiction_flag", "contradiction_partner",
+            "staleness_penalty", "processing_status",
+        ]
+        angle_rows = self.conn.execute(
+            """SELECT id, fact, source_url, confidence, trust_score,
+                      novelty_score, specificity_score, duplication_score,
+                      fabrication_risk, verification_status, angle,
+                      parent_id, related_id, expansion_depth, iteration,
+                      row_type, consider_for_use,
+                      composite_quality, information_density, cross_ref_boost,
+                      relevance_score, actionability_score,
+                      cluster_id, cluster_rank,
+                      expansion_tool, expansion_hint, expansion_fulfilled,
+                      contradiction_flag, contradiction_partner,
+                      staleness_penalty, processing_status
+               FROM conditions
+               WHERE consider_for_use = TRUE
+                 AND row_type = 'finding'
+                 AND angle = ?
+               ORDER BY composite_quality DESC, novelty_score DESC""",
+            [angle],
+        ).fetchall()
+        angle_findings = [dict(zip(cols, row)) for row in angle_rows]
+
+        # ── Unassigned findings (no angle — potentially relevant) ──
+        unassigned_rows = self.conn.execute(
+            """SELECT id, fact, source_url, confidence, trust_score,
+                      novelty_score, specificity_score, duplication_score,
+                      fabrication_risk, verification_status, angle,
+                      parent_id, related_id, expansion_depth, iteration,
+                      row_type, consider_for_use,
+                      composite_quality, information_density, cross_ref_boost,
+                      relevance_score, actionability_score,
+                      cluster_id, cluster_rank,
+                      expansion_tool, expansion_hint, expansion_fulfilled,
+                      contradiction_flag, contradiction_partner,
+                      staleness_penalty, processing_status
+               FROM conditions
+               WHERE consider_for_use = TRUE
+                 AND row_type = 'finding'
+                 AND (angle IS NULL OR angle = '')
+               ORDER BY composite_quality DESC""",
+        ).fetchall()
+        unassigned_findings = [dict(zip(cols, row)) for row in unassigned_rows]
+
+        # ── Orientation: other angles ──
+        other_angles = self.conn.execute(
+            """SELECT angle, COUNT(*) FROM conditions
+               WHERE row_type = 'finding' AND consider_for_use = TRUE
+                 AND angle != ? AND angle IS NOT NULL AND angle != ''
+               GROUP BY angle ORDER BY COUNT(*) DESC""",
+            [angle],
+        ).fetchall()
+
+        # ── Prior thoughts for this angle ──
+        prior_thoughts = self.get_thoughts_by_angle(angle)
+
+        # ── Build the briefing ──
+        lines.append(f"SPECIALIST BRIEFING: angle '{angle}'")
+        if user_query:
+            lines.append(f"USER QUERY: {user_query}")
+        lines.append(f"  {len(angle_findings)} findings for your angle")
+        lines.append(f"  {len(unassigned_findings)} unassigned findings")
+        if other_angles:
+            other_summary = ", ".join(f"{a} ({n})" for a, n in other_angles)
+            lines.append(f"  Other angles under investigation: {other_summary}")
+        lines.append("")
+
+        # ── Full findings for this angle ──
+        if angle_findings:
+            lines.append("=" * 60)
+            lines.append(f"FINDINGS FOR '{angle}' (full detail)")
+            lines.append("=" * 60)
+            lines.append("")
+            for c in angle_findings:
+                lines.append(self._describe_finding(c))
+                lines.append("")
+
+        # ── Unassigned findings ──
+        if unassigned_findings:
+            lines.append("=" * 60)
+            lines.append("UNASSIGNED FINDINGS (potentially relevant)")
+            lines.append("=" * 60)
+            lines.append("")
+            for c in unassigned_findings:
+                lines.append(self._describe_finding(c))
+                lines.append("")
+
+        # ── Prior thoughts (full text) ──
+        if prior_thoughts:
+            lines.append("=" * 60)
+            lines.append(f"PRIOR ANALYSIS FOR '{angle}' (build on this)")
+            lines.append("=" * 60)
+            lines.append("")
+            for t in prior_thoughts:
+                depth_tag = (
+                    f", depth={t['expansion_depth']}"
+                    if t.get("expansion_depth", 0) > 0 else ""
+                )
+                lines.append(
+                    f"[thought #{t['id']}, strategy={t['strategy']}, "
+                    f"iter={t['iteration']}{depth_tag}]:"
+                )
+                lines.append(t["fact"])
+                lines.append("")
+
+        # ── Corpus health for this angle ──
+        strong = sum(
+            1 for c in angle_findings
+            if (c.get("composite_quality") or 0) >= 0.6
+        )
+        weak = sum(
+            1 for c in angle_findings
+            if (c.get("composite_quality") or 0) < 0.3
+        )
+        lines.append(
+            f"ANGLE HEALTH: {len(angle_findings)} findings for '{angle}'. "
+            f"{strong} strong, {weak} weak. "
+            f"{len(prior_thoughts)} prior thoughts."
+        )
+
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Unified ingestion (Flock atomisation)
@@ -3331,54 +3712,15 @@ class CorpusStore:
                 )
                 continue
 
-            # Semantic dedup: keyword-overlap pre-filter.
-            # If >80% of this atom's significant words appear in an
-            # existing finding, it's likely a paraphrase — skip it.
-            _stop = {
-                "the", "a", "an", "is", "are", "was", "were", "be",
-                "been", "being", "have", "has", "had", "do", "does",
-                "did", "will", "would", "could", "should", "may",
-                "might", "shall", "can", "to", "of", "in", "for",
-                "on", "with", "at", "by", "from", "as", "into",
-                "through", "during", "before", "after", "and", "but",
-                "or", "nor", "not", "so", "yet", "both", "either",
-                "neither", "each", "every", "all", "any", "few",
-                "more", "most", "other", "some", "such", "no", "only",
-                "own", "same", "than", "too", "very", "that", "this",
-                "these", "those", "it", "its", "they", "their", "them",
-                "which", "what", "who", "whom", "when", "where", "how",
-            }
-            new_words = {
-                w for w in re.findall(r'\w+', stripped.lower())
-                if len(w) > 2 and w not in _stop
-            }
-            is_semantic_dup = False
-            if len(new_words) >= 3:
-                # Check against recent findings (last 200 to keep it fast)
-                recent = self.conn.execute(
-                    "SELECT id, fact FROM conditions "
-                    "WHERE row_type = 'finding' "
-                    "AND consider_for_use = TRUE "
-                    "ORDER BY id DESC LIMIT 200",
-                ).fetchall()
-                for eid, efact in recent:
-                    existing_words = {
-                        w for w in re.findall(r'\w+', (efact or "").lower())
-                        if len(w) > 2 and w not in _stop
-                    }
-                    if not existing_words:
-                        continue
-                    overlap = len(new_words & existing_words) / len(new_words)
-                    if overlap > 0.80:
-                        logger.debug(
-                            "Semantic dedup: %.0f%% overlap with id=%d, "
-                            "skipping: %.80s",
-                            overlap * 100, eid, stripped,
-                        )
-                        is_semantic_dup = True
-                        break
-            if is_semantic_dup:
-                continue
+            # Semantic dedup: LLM-powered via compute_duplications()
+            # downstream. We deliberately do NOT pre-filter by keyword
+            # overlap here — word overlap is a bag-of-words heuristic
+            # that destroys meaning.  Two findings can share 85% of
+            # their vocabulary while making opposite claims (e.g.
+            # "mTOR signals growth when resources are abundant" vs
+            # "...when resources are scarce").  The downstream
+            # compute_duplications() uses LLM comparison to detect
+            # true semantic duplicates accurately.
 
             # Insert atom with parent_id → chunk for lineage
             cid = self._next_id
@@ -3513,7 +3855,7 @@ class CorpusStore:
                 "voice and nuance. Include ALL facts, names, "
                 "numbers, URLs. This section will be merged "
                 "with other sections. Stay under 6000 chars."
-                "\nSource passage:\n" + (chunk_text[:3000] or "(no source)")
+                "\nSource passage:\n" + (chunk_text or "(no source)")
                 + "\n\nExtracted findings:\n" + facts_text
                 + "\nUser query: " + user_query,
                 caller="gossip_phase1_worker",
@@ -3582,7 +3924,7 @@ class CorpusStore:
                 for mid in chain:
                     if mid in cond_by_id:
                         items.append(
-                            f"  {len(items) + 1}. {cond_by_id[mid]['fact'][:150]}"
+                            f"  {len(items) + 1}. {cond_by_id[mid]['fact']}"
                         )
                 if items:
                     chain_lines.append(f"Thread {i}:")

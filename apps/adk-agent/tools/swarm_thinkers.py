@@ -67,19 +67,68 @@ _MIN_THOUGHT_CHARS = 100
 # 1. Angle extraction from thinker strategy
 # ═══════════════════════════════════════════════════════════════════════
 
-def extract_angles(strategy_text: str) -> list[str]:
-    """Extract specialist angles from the thinker's strategy output.
+def _extract_angles_via_llm(strategy_text: str) -> list[str]:
+    """Use LLM to identify distinct research angles in the strategy.
 
-    The thinker is instructed to include a structured block::
-
-        SPECIALIST_ANGLES: [angle1, angle2, angle3]
-
-    Falls back to heuristic extraction from section headings if no
-    structured block is found.
+    The thinker's strategy is rich prose that may not follow any fixed
+    format.  An LLM understands the conceptual structure and can extract
+    the genuinely distinct research facets regardless of formatting.
     """
-    if not strategy_text:
+    from utils.flock_proxy import get_flock_proxy_url
+    import json as _json
+    import urllib.request
+
+    proxy_url = get_flock_proxy_url()
+    if not proxy_url:
         return []
 
+    prompt = (
+        "You are a research strategist. Read the following research strategy "
+        "and identify the distinct specialist research ANGLES — the separate "
+        "facets, disciplines, or lines of inquiry the strategy proposes.\n\n"
+        "Each angle should be a concise label (3-8 words) that names a "
+        "specific investigative direction. Do NOT return generic labels like "
+        "'further research' or 'additional analysis'. Each angle must name "
+        "the actual domain, theory, mechanism, or question to investigate.\n\n"
+        "Return 2-5 angles, one per line, prefixed with ANGLE: \n"
+        "If the strategy only has one coherent direction, return just one.\n\n"
+        f"STRATEGY:\n{strategy_text}"
+    )
+
+    body = _json.dumps({
+        "model": "flock-model",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 256,
+        "temperature": 0.3,
+    }).encode()
+    req = urllib.request.Request(
+        f"{proxy_url}/v1/chat/completions",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = _json.loads(resp.read())
+        choices = data.get("choices", [])
+        raw = choices[0]["message"]["content"] if choices else ""
+    except Exception as exc:
+        logger.warning("LLM angle extraction failed: %s", exc)
+        return []
+
+    angles: list[str] = []
+    for line in raw.split("\n"):
+        line = line.strip()
+        if line.upper().startswith("ANGLE:"):
+            a = line[6:].strip().strip("'\"-.•")
+            if a and len(a) > 2:
+                angles.append(a[:80])
+    return angles[:_MAX_SPECIALISTS]
+
+
+def _regex_extract_angles(strategy_text: str) -> list[str]:
+    """Fallback: regex-based angle extraction for when LLM is unavailable."""
     # Try structured format first
     m = re.search(
         r"SPECIALIST_ANGLES:\s*\[([^\]]+)\]",
@@ -103,36 +152,52 @@ def extract_angles(strategy_text: str) -> list[str]:
     return []
 
 
+def extract_angles(strategy_text: str) -> list[str]:
+    """Extract specialist angles from the thinker's strategy output.
+
+    Primary path: LLM-powered extraction that understands the conceptual
+    structure of the strategy regardless of formatting.  Falls back to
+    regex if the LLM call fails.
+    """
+    if not strategy_text:
+        return []
+
+    # Primary: LLM-powered angle extraction
+    try:
+        angles = _extract_angles_via_llm(strategy_text)
+    except Exception:
+        angles = []
+    if angles:
+        logger.info(
+            "LLM angle extraction produced %d angles: %s",
+            len(angles), angles,
+        )
+        return angles
+
+    # Fallback: regex extraction
+    logger.warning("LLM angle extraction failed — falling back to regex")
+    return _regex_extract_angles(strategy_text)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # 2. Specialist thinker spawning
 # ═══════════════════════════════════════════════════════════════════════
 
 def _build_specialist_prompt(
     angle: str,
-    corpus_summary: str,
-    prior_thoughts: list[dict],
+    corpus_briefing: str,
     user_query: str,
 ) -> str:
     """Build the prompt for a specialist thinker focused on *angle*.
 
-    The specialist sees:
-    - The user's original query
-    - A summary of the corpus (findings relevant to their angle)
-    - Any prior thoughts from this angle (to build on, not repeat)
+    The specialist receives a **full per-angle corpus briefing** from
+    ``CorpusStore.format_for_specialist()`` — no truncation.  The
+    briefing already contains:
+    - All findings for this angle (full verbal prose)
+    - Unassigned findings (potentially relevant)
+    - Prior thoughts (full text, so the specialist can build on them)
+    - Orientation (what other angles exist)
     """
-    prior_section = ""
-    if prior_thoughts:
-        prior_lines = []
-        for t in prior_thoughts[-3:]:  # last 3 thoughts for this angle
-            prior_lines.append(
-                f"  [thought #{t['id']}, depth={t['expansion_depth']}]: "
-                f"{t['fact'][:500]}"
-            )
-        prior_section = (
-            "\n\nPRIOR ANALYSIS FOR THIS ANGLE (build on this, do NOT repeat):\n"
-            + "\n".join(prior_lines)
-        )
-
     return f"""\
 You are a specialist research analyst assigned to a specific angle of \
 investigation. Your job is to provide DEEP, FOCUSED analysis on your \
@@ -142,9 +207,7 @@ USER QUERY: {user_query}
 
 YOUR ASSIGNED ANGLE: {angle}
 
-CORPUS SUMMARY (relevant findings):
-{corpus_summary[:6000]}
-{prior_section}
+{corpus_briefing}
 
 INSTRUCTIONS:
 1. Analyse the corpus findings SPECIFICALLY through the lens of your angle
@@ -155,7 +218,7 @@ INSTRUCTIONS:
 6. If prior analysis exists for this angle, BUILD ON IT — add new insight, \
    don't repeat what's already been said
 
-OUTPUT: A focused analytical report (500-2000 chars) with specific citations \
+OUTPUT: A focused analytical report with specific citations \
 to evidence. Be substantive, not vague. Every claim must be grounded in \
 the corpus findings."""
 
@@ -187,16 +250,15 @@ def spawn_specialist_thinkers(
     # Limit to configured max
     angles = angles[:_MAX_SPECIALISTS]
 
-    # Prepare prompts for each specialist
-    tasks: list[tuple[str, str, list[dict]]] = []
-    corpus_summary = corpus.format_for_thinker()
+    # Prepare prompts for each specialist — per-angle corpus partitioning
+    tasks: list[tuple[str, str]] = []
 
     for angle in angles:
-        prior = corpus.get_thoughts_by_angle(angle)
+        corpus_briefing = corpus.format_for_specialist(angle, user_query)
         prompt = _build_specialist_prompt(
-            angle, corpus_summary, prior, user_query,
+            angle, corpus_briefing, user_query,
         )
-        tasks.append((angle, prompt, prior))
+        tasks.append((angle, prompt))
 
     # Run specialists in parallel via ThreadPoolExecutor
     thought_ids: list[int] = []
@@ -214,13 +276,13 @@ def spawn_specialist_thinkers(
 
     logger.info(
         "Spawning %d specialist thinkers for angles: %s",
-        len(tasks), [a for a, _, _ in tasks],
+        len(tasks), [a for a, _ in tasks],
     )
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(_run_specialist, angle, prompt): angle
-            for angle, prompt, _ in tasks
+            for angle, prompt in tasks
         }
         for fut in as_completed(futures):
             angle = futures[fut]
@@ -309,7 +371,7 @@ def arbitrate_competing_thoughts(
         src = f" (source: {f[4]})" if f[4] else ""
         finding_summaries.append(
             f"  [finding #{f[0]}, conf={f[2]:.2f}, trust={f[3]:.2f}]: "
-            f"{f[1][:300]}{src}"
+            f"{f[1]}{src}"
         )
 
     # Build arbitration prompt
@@ -317,7 +379,7 @@ def arbitrate_competing_thoughts(
     for t in specialist_thoughts[-5:]:  # latest 5 specialist thoughts
         thought_summaries.append(
             f"  [thought #{t['id']}, iteration={t['iteration']}]: "
-            f"{t['fact'][:800]}"
+            f"{t['fact']}"
         )
 
     prompt = f"""\
@@ -472,7 +534,7 @@ analysis that contains multiple distinct sub-claims or angles. Your job \
 is to identify and separate these into focused, independent claims.
 
 ORIGINAL ANALYSIS (thought #{thought_id}):
-{target['fact'][:3000]}
+{target['fact']}
 
 INSTRUCTIONS:
 1. Identify 2-4 distinct sub-claims, hypotheses, or angles in this analysis
@@ -561,20 +623,75 @@ class AngleState:
 def _estimate_novelty(current: str, previous: str) -> float:
     """Estimate novelty of *current* thought relative to *previous*.
 
-    Uses a cheap heuristic: Jaccard similarity on word trigrams.
+    Primary path: LLM-powered semantic novelty assessment that
+    understands whether genuinely new intellectual content has been
+    introduced, regardless of vocabulary overlap.
+
+    Falls back to trigram Jaccard if the LLM is unavailable.
     Returns 0.0 (identical) to 1.0 (completely novel).
     """
     if not previous or not current:
         return 1.0
 
+    # Primary: LLM-powered novelty assessment
+    try:
+        from utils.flock_proxy import get_flock_proxy_url
+        import json as _json
+        import urllib.request
+
+        proxy_url = get_flock_proxy_url()
+        if proxy_url:
+            prompt = (
+                "Rate the intellectual novelty of THOUGHT B relative to "
+                "THOUGHT A. Does B introduce genuinely new claims, "
+                "evidence, connections, or perspectives that A did not "
+                "contain?\n\n"
+                "Return a decimal from 0.0 to 1.0:\n"
+                "  0.0 = identical content (just rephrased)\n"
+                "  0.3 = minor additions but mostly the same ideas\n"
+                "  0.6 = substantial new content mixed with familiar ideas\n"
+                "  1.0 = completely new intellectual territory\n\n"
+                "Return ONLY a decimal number.\n\n"
+                f"THOUGHT A:\n{previous}\n\n"
+                f"THOUGHT B:\n{current}"
+            )
+            body = _json.dumps({
+                "model": "flock-model",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 16,
+                "temperature": 0.1,
+            }).encode()
+            req = urllib.request.Request(
+                f"{proxy_url}/v1/chat/completions",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = _json.loads(resp.read())
+            choices = data.get("choices", [])
+            raw = (choices[0]["message"]["content"] if choices else "").strip()
+            import re as _re
+            m = _re.search(r"(\d+\.?\d*)", raw)
+            if m:
+                val = float(m.group(1))
+                novelty = max(0.0, min(1.0, val))
+                logger.debug(
+                    "LLM novelty estimate: %.2f", novelty,
+                )
+                return novelty
+    except Exception:
+        pass  # fall through to trigram heuristic
+
+    # Fallback: Jaccard similarity on word trigrams
     def _trigrams(text: str) -> set[str]:
         words = text.lower().split()
         if len(words) < 3:
             return set(words)
         return {" ".join(words[i:i + 3]) for i in range(len(words) - 2)}
 
-    t_cur = _trigrams(current[:2000])
-    t_prev = _trigrams(previous[:2000])
+    t_cur = _trigrams(current)
+    t_prev = _trigrams(previous)
     if not t_cur or not t_prev:
         return 1.0
     intersection = len(t_cur & t_prev)
@@ -624,17 +741,72 @@ class SwarmRouter:
                 # Signal 1: Novelty decay (trigram overlap)
                 novelty = _estimate_novelty(latest_text, state.prev_thought_summary)
                 state.novelty_scores.append(novelty)
-                state.prev_thought_summary = latest_text[:2000]
+                state.prev_thought_summary = latest_text
 
-                # Signal 2: Check for self-reported exhaustion
-                exhaustion_markers = [
-                    "no additional", "already covered", "nothing new",
-                    "previously established", "as noted before",
-                    "reiterating", "no further evidence",
-                ]
-                self_reported_exhaustion = any(
-                    marker in latest_text.lower() for marker in exhaustion_markers
-                )
+                # Signal 2: LLM-powered exhaustion detection
+                # Instead of brittle substring matching, ask the LLM
+                # whether the specialist is signalling it has run out
+                # of new material (vs. academic prose that references
+                # prior work while making new claims).
+                # Track whether the LLM gave a definitive answer so we
+                # can fall back to substring markers when it didn't.
+                self_reported_exhaustion = False
+                llm_decided = False
+                try:
+                    from utils.flock_proxy import get_flock_proxy_url
+                    import json as _json
+                    import urllib.request
+
+                    proxy_url = get_flock_proxy_url()
+                    if proxy_url:
+                        exh_prompt = (
+                            "Is this research specialist signalling that it "
+                            "has EXHAUSTED its line of inquiry (no more new "
+                            "material to contribute), or is it still making "
+                            "substantive new claims?\n\n"
+                            "IMPORTANT: Academic prose often references prior "
+                            "work ('as previously established...') while "
+                            "making NEW points. That is NOT exhaustion.\n"
+                            "True exhaustion = the specialist is explicitly "
+                            "saying it has nothing new to add.\n\n"
+                            "Return ONLY one word: EXHAUSTED or ACTIVE\n\n"
+                            f"TEXT:\n{latest_text}"
+                        )
+                        body = _json.dumps({
+                            "model": "flock-model",
+                            "messages": [{"role": "user", "content": exh_prompt}],
+                            "max_tokens": 16,
+                            "temperature": 0.1,
+                        }).encode()
+                        req = urllib.request.Request(
+                            f"{proxy_url}/v1/chat/completions",
+                            data=body,
+                            headers={"Content-Type": "application/json"},
+                            method="POST",
+                        )
+                        with urllib.request.urlopen(req, timeout=10) as resp:
+                            data = _json.loads(resp.read())
+                        choices = data.get("choices", [])
+                        answer = (choices[0]["message"]["content"] if choices else "").strip().strip(".,!?\n").upper()
+                        if answer == "EXHAUSTED":
+                            self_reported_exhaustion = True
+                            llm_decided = True
+                        elif answer == "ACTIVE":
+                            llm_decided = True
+                except Exception:
+                    pass  # fall through to substring fallback
+
+                if not llm_decided:
+                    # Fallback: substring markers (less accurate but
+                    # always available when LLM proxy is absent or fails)
+                    _exhaustion_markers = [
+                        "no additional", "already covered", "nothing new",
+                        "no further evidence",
+                    ]
+                    self_reported_exhaustion = any(
+                        marker in latest_text.lower()
+                        for marker in _exhaustion_markers
+                    )
 
                 # Signal 3: Diminishing output length
                 short_output = state.last_thought_chars < _MIN_THOUGHT_CHARS
@@ -723,7 +895,7 @@ def _detect_cross_angle_surprises(
         if rows:
             lines = [f"ANGLE '{angle}':"]
             for rid, fact in rows:
-                lines.append(f"  [#{rid}] {fact[:300]}")
+                lines.append(f"  [#{rid}] {fact}")
             angle_summaries.append("\n".join(lines))
 
     if len(angle_summaries) < 2:
@@ -735,7 +907,7 @@ def _detect_cross_angle_surprises(
         if thoughts:
             latest = thoughts[0]
             angle_summaries.append(
-                f"SPECIALIST THOUGHT for '{angle}': {latest['fact'][:500]}"
+                f"SPECIALIST THOUGHT for '{angle}': {latest['fact']}"
             )
 
     prompt = f"""\
