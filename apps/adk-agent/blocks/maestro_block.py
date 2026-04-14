@@ -13,9 +13,9 @@ Wraps the maestro's after_agent_callback logic as a fenced block:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-import threading
 
 from models.pipeline_block import (
     BlockContext, BlockCriticality, BlockResult, ParamSpec,
@@ -35,10 +35,10 @@ class MaestroBlock(PipelineBlock):
 
     input_specs = [
         ParamSpec(
-            key="research_findings",
+            key="corpus_summary_for_maestro",
             expected_type=str,
             required=False,
-            description="Current corpus briefing",
+            description="Compact structural summary for maestro orientation",
         ),
         ParamSpec(
             key="research_strategy",
@@ -64,8 +64,8 @@ class MaestroBlock(PipelineBlock):
         """
         from callbacks.condition_manager import (
             _drain_search_queue,
-            _scoring_lock,
-            _scoring_threads,
+            _safe_corpus_write,
+            _swarm_tasks,
             run_swarm_synthesis,
         )
 
@@ -120,6 +120,7 @@ class MaestroBlock(PipelineBlock):
         state_updates = {
             "research_findings": thinker_briefing,
             "corpus_for_synthesis": corpus.format_for_synthesiser(),
+            "corpus_summary_for_maestro": corpus.format_summary_for_maestro(),
             "_expansion_targets": expansion_text,
         }
 
@@ -135,7 +136,7 @@ class MaestroBlock(PipelineBlock):
             except Exception:
                 pass
 
-        # Background scoring thread
+        # Safety-net scoring under async lock
         def _background_scoring() -> None:
             try:
                 scored = corpus.score_new_conditions(user_query)
@@ -150,39 +151,30 @@ class MaestroBlock(PipelineBlock):
                 logger.warning("Maestro safety-net scoring failed", exc_info=True)
 
         corpus_key = state.get("_corpus_key", "default")
-        with _scoring_lock:
-            old_t = _scoring_threads.get(corpus_key)
-            if old_t is not None and old_t.is_alive():
-                logger.warning(
-                    "Previous scoring thread still alive (key=%s) — "
-                    "skipping safety-net scoring",
-                    corpus_key,
-                )
-            else:
-                t = threading.Thread(
-                    target=_background_scoring,
-                    daemon=True,
-                    name=f"maestro-safety-scoring-{corpus_key}",
-                )
-                _scoring_threads[corpus_key] = t
-                t.start()
+        try:
+            await _safe_corpus_write(corpus_key, _background_scoring)
+        except Exception:
+            logger.warning("Async safety-net scoring failed", exc_info=True)
 
-        # Periodic synthesis
+        # Periodic synthesis under async lock
         synthesis_interval = int(os.environ.get("SYNTHESIS_INTERVAL", "1"))
         if iteration > 0 and iteration % synthesis_interval == 0:
             try:
                 swarm_report = run_swarm_synthesis(state)
                 if swarm_report and swarm_report.strip():
-                    corpus.admit_thought(
-                        reasoning=swarm_report,
-                        angle="periodic_synthesis",
-                        strategy="periodic_synthesis_report",
-                        iteration=iteration,
+                    await _safe_corpus_write(
+                        corpus_key,
+                        lambda: corpus.admit_thought(
+                            reasoning=swarm_report,
+                            angle="periodic_synthesis",
+                            strategy="periodic_synthesis_report",
+                            iteration=iteration,
+                        ),
                     )
             except Exception:
                 logger.warning("Periodic synthesis failed (non-fatal)", exc_info=True)
 
-        # Thought swarm cycle (background)
+        # Thought swarm cycle (async task under lock)
         try:
             from tools.swarm_thinkers import run_swarm_cycle
 
@@ -192,9 +184,12 @@ class MaestroBlock(PipelineBlock):
                 "research_strategy": state.get("research_strategy", ""),
             }
 
-            def _bg_swarm() -> None:
+            async def _async_bg_swarm() -> None:
                 try:
-                    swarm_ids = run_swarm_cycle(swarm_state_snapshot, corpus)
+                    swarm_ids = await _safe_corpus_write(
+                        corpus_key,
+                        lambda: run_swarm_cycle(swarm_state_snapshot, corpus),
+                    )
                     if swarm_ids:
                         logger.info(
                             "Background swarm produced %d new thoughts at iter %d",
@@ -203,10 +198,11 @@ class MaestroBlock(PipelineBlock):
                 except Exception:
                     logger.warning("Background swarm cycle failed (non-fatal)", exc_info=True)
 
-            swarm_thread = threading.Thread(
-                target=_bg_swarm, daemon=True, name=f"swarm-iter-{iteration}",
+            task = asyncio.create_task(
+                _async_bg_swarm(),
+                name=f"swarm-iter-{iteration}",
             )
-            swarm_thread.start()
+            _swarm_tasks[corpus_key] = task
         except Exception:
             logger.warning("Swarm dispatch failed (non-fatal)", exc_info=True)
 

@@ -53,8 +53,8 @@ Your job: read the corpus state, decide what operations will improve it, \
 and execute them.  You are NOT limited to predefined steps — you can \
 invent new operations based on what you see.
 
-=== CORPUS STATE (verbal briefing from thinker) ===
-{research_findings}
+=== CORPUS STATE (structural summary — use SQL to drill into details) ===
+{corpus_summary_for_maestro}
 === END CORPUS STATE ===
 
 === THINKER'S STRATEGY ===
@@ -90,30 +90,47 @@ WORKFLOW — Start by assessing, then act:
 1. ASSESS the corpus:
    SELECT COUNT(*), processing_status FROM conditions \
 GROUP BY processing_status;
-   SELECT COUNT(*) FROM conditions WHERE scored_at = '';
+   SELECT COUNT(*) FROM conditions WHERE score_version = 0;
    SELECT COUNT(*) FROM conditions WHERE expansion_tool != 'none' \
 AND expansion_fulfilled = FALSE;
 
-2. SCORE unscored conditions (if any with scored_at = ''):
-   This is critical — new findings from the search executor arrive \
-unscored.  Use Flock to score them:
+2. SCORE unscored conditions (if any with score_version = 0):
+   This is critical — new findings arrive unscored.  You MUST use Flock \
+LLM functions to score them PER-ROW.  Each finding must be evaluated \
+individually against its actual content — NEVER write a bulk UPDATE with \
+flat hardcoded score values.
 
-   For EACH unscored condition, evaluate these dimensions via LLM:
-   - trust_score (0-1): source credibility
-   - novelty_score (0-1): how new/unique is this finding
-   - specificity_score (0-1): concrete data vs vague claims
-   - relevance_score (0-1): relevance to the research query
-   - actionability_score (0-1): practical utility
-   - fabrication_risk (0-1): likelihood of being fabricated
-
-   You can score in bulk:
+   CORRECT (per-row LLM scoring — each finding assessed individually):
    UPDATE conditions SET
-     trust_score = ..., novelty_score = ..., specificity_score = ...,
-     relevance_score = ..., actionability_score = ...,
-     fabrication_risk = ...,
+     trust_score = CAST(llm_complete(
+       'Rate source trustworthiness 0.0-1.0. 0.1=unreliable, 0.5=news, \
+0.9=peer-reviewed. Return ONLY a number.', source_url) AS FLOAT),
+     novelty_score = CAST(llm_complete(
+       'Rate novelty 0.0-1.0. 0.1=textbook, 0.5=known to specialists, \
+0.9=surprising. Return ONLY a number.', fact) AS FLOAT),
+     specificity_score = CAST(llm_complete(
+       'Rate specificity 0.0-1.0. 0.1=vague, 0.5=named concepts, \
+0.9=exact data points. Return ONLY a number.', fact) AS FLOAT),
+     relevance_score = CAST(llm_complete(
+       'Rate relevance to the research query 0.0-1.0. Return ONLY a \
+number. Research query: {user_query}', fact) AS FLOAT),
+     actionability_score = CAST(llm_complete(
+       'Rate actionability 0.0-1.0. 0.1=background only, 0.5=useful \
+reference, 0.9=key finding. Return ONLY a number.', fact) AS FLOAT),
+     fabrication_risk = CAST(llm_complete(
+       'Rate fabrication risk 0.0-1.0. 0.0=clearly real, 0.5=hard to \
+verify, 1.0=likely fabricated. Return ONLY a number.', fact) AS FLOAT),
      scored_at = CURRENT_TIMESTAMP,
+     score_version = score_version + 1,
      processing_status = 'scored'
-   WHERE scored_at = '' AND consider_for_use = TRUE;
+   WHERE score_version = 0 AND consider_for_use = TRUE \
+AND row_type = 'finding';
+
+   FORBIDDEN (bulk flat scoring — assigns identical scores to all findings):
+   UPDATE conditions SET trust_score = 0.6, novelty_score = 0.7 ... ;
+   ^^^ This destroys the scoring system.  Every finding MUST be assessed \
+individually via llm_complete().  The safety-net scorer will override \
+any flat scores it detects (via score_version = 0 check).
 
 3. COMPUTE composite quality:
    UPDATE conditions SET composite_quality = (
@@ -294,17 +311,38 @@ every iteration.  Use judgement:
   - Run SURPRISE SCORING every iteration after scoring (it is cheap SQL)
   - Run ANGLE DIVERSITY BOOST every iteration (also cheap SQL)
 
-BEYOND THE TEMPLATES — You are NOT limited to these 13 steps.  Based on \
-what you see in the corpus, you might:
-  - CREATE new columns for domain-specific scoring
-  - INSERT new rows that synthesise clusters into meta-findings
-  - Use llm_complete to GENERATE relationship mappings
-  - RECLASSIFY findings by angle or strategy
-  - Compute CUSTOM metrics the templates don't cover
-  - Flag findings that need SPECIFIC types of enrichment
-  - Combine serendipity templates in novel ways — e.g. run CONTRARIAN \
-    CHALLENGE on the output of CROSS-ANGLE BRIDGE to stress-test \
-    newly discovered connections
+EXTENDING THE TEMPLATES — You can create new operations, but they \
+MUST follow the established Flock patterns.  Your operations are \
+REFERENCE IMPLEMENTATIONS — other parts of the platform will adopt \
+your Flock query patterns as templates.  Write them as if they will \
+be copy-pasted into production systems.
+
+SANCTIONED PATTERNS (follow these for any new operation):
+  - For intelligent per-row assessment: use llm_complete() or llm_filter() \
+    with CAST to the appropriate type.  NEVER hardcode scores or classifications.
+  - For mechanical computation: use pure SQL \
+    (composite quality, gates, aggregations, status transitions).
+  - For new analysis: materialise results as thought or insight rows \
+    (the swarm integrates them as peer contributions).
+  - For new metrics: compute via the Flock pattern and store in existing \
+    columns (e.g. cross_ref_boost) rather than ALTER TABLE.
+
+FORBIDDEN PATTERNS (never do these):
+  - Flat-scoring: ``UPDATE SET trust_score = 0.6`` without llm_complete() \
+    — this destroys the scoring system.
+  - Freestyle schema mutation: ``ALTER TABLE ADD COLUMN`` for ad-hoc \
+    columns that create schema drift other queries cannot anticipate.
+  - Direct DELETE — use ``consider_for_use = FALSE`` instead.
+  - Thought/insight mutation — these rows are IMMUTABLE.
+
+VRAM AWARENESS: Every llm_complete() call consumes local GPU VRAM. \
+Before running Flock LLM queries:
+  - Check ``SELECT COUNT(*) FROM conditions WHERE score_version = 0`` \
+    — only score what is new.
+  - Use WHERE clauses to limit scope (avoid full-table LLM scans).
+  - Prefer operating on unscored/unprocessed subsets.
+  - Skip operations the safety-net scorer will handle anyway \
+    (it catches score_version = 0 rows automatically)
 
 RULES:
 1. Start with assessment — understand the corpus before acting
@@ -366,11 +404,11 @@ maestro_agent = Agent(
     name="maestro",
     model=build_model(),
     description=(
-        "Free-form Flock conductor with unrestricted SQL access to the "
-        "corpus DuckDB database.  Reads corpus state, decides what "
-        "operations will improve it, and executes them via "
-        "execute_flock_sql().  Can invent new columns, create new rows, "
-        "and compose arbitrary Flock operations."
+        "Flock conductor with SQL access to the corpus DuckDB database.  "
+        "Reads corpus state, decides what operations will improve it, and "
+        "executes them via execute_flock_sql().  Creates new rows and "
+        "composes Flock operations within the established schema — "
+        "llm_complete() for assessment, pure SQL for computation."
     ),
     instruction=MAESTRO_INSTRUCTION,
     tools=CORPUS_SQL_TOOLS,
