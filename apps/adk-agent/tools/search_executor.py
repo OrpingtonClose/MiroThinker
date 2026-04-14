@@ -963,7 +963,7 @@ Now dissolve this:
 USER QUERY:
 {user_query}
 
-THINKER STRATEGY:
+THINKER REASONING:
 {strategy}
 """
 

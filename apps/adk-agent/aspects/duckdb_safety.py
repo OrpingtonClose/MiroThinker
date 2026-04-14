@@ -34,14 +34,14 @@ class DuckDBSafetyAspect(Aspect):
         if not block.needs_corpus:
             return None
 
-        # Check for pending scoring threads
+        # Check for DuckDB contention via the per-corpus async lock
         try:
-            from callbacks.condition_manager import _wait_for_pending_scoring
+            from callbacks.condition_manager import _get_corpus_lock
             corpus_key = ctx.state.get("_corpus_key", "default")
-            safe = _wait_for_pending_scoring(corpus_key)
-            if not safe:
+            lock = _get_corpus_lock(corpus_key)
+            if lock.locked():
                 logger.warning(
-                    "DuckDB safety: scoring thread still alive for '%s' "
+                    "DuckDB safety: async lock held for '%s' "
                     "— skipping block '%s' to avoid concurrent access",
                     corpus_key, block.name,
                 )
@@ -52,8 +52,8 @@ class DuckDBSafetyAspect(Aspect):
                     },
                     routing=RoutingHint.CONTINUE,
                     diagnosis=(
-                        f"Block '{block.name}' skipped: DuckDB scoring "
-                        f"thread still active (key={corpus_key})"
+                        f"Block '{block.name}' skipped: DuckDB async "
+                        f"lock held (key={corpus_key})"
                     ),
                 )
         except ImportError:

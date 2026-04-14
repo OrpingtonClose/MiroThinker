@@ -311,17 +311,38 @@ every iteration.  Use judgement:
   - Run SURPRISE SCORING every iteration after scoring (it is cheap SQL)
   - Run ANGLE DIVERSITY BOOST every iteration (also cheap SQL)
 
-BEYOND THE TEMPLATES — You are NOT limited to these 13 steps.  Based on \
-what you see in the corpus, you might:
-  - CREATE new columns for domain-specific scoring
-  - INSERT new rows that synthesise clusters into meta-findings
-  - Use llm_complete to GENERATE relationship mappings
-  - RECLASSIFY findings by angle or strategy
-  - Compute CUSTOM metrics the templates don't cover
-  - Flag findings that need SPECIFIC types of enrichment
-  - Combine serendipity templates in novel ways — e.g. run CONTRARIAN \
-    CHALLENGE on the output of CROSS-ANGLE BRIDGE to stress-test \
-    newly discovered connections
+EXTENDING THE TEMPLATES — You can create new operations, but they \
+MUST follow the established Flock patterns.  Your operations are \
+REFERENCE IMPLEMENTATIONS — other parts of the platform will adopt \
+your Flock query patterns as templates.  Write them as if they will \
+be copy-pasted into production systems.
+
+SANCTIONED PATTERNS (follow these for any new operation):
+  - For intelligent per-row assessment: use llm_complete() or llm_filter() \
+    with CAST to the appropriate type.  NEVER hardcode scores or classifications.
+  - For mechanical computation: use pure SQL \
+    (composite quality, gates, aggregations, status transitions).
+  - For new analysis: materialise results as thought or insight rows \
+    (the swarm integrates them as peer contributions).
+  - For new metrics: compute via the Flock pattern and store in existing \
+    columns (e.g. cross_ref_boost) rather than ALTER TABLE.
+
+FORBIDDEN PATTERNS (never do these):
+  - Flat-scoring: ``UPDATE SET trust_score = 0.6`` without llm_complete() \
+    — this destroys the scoring system.
+  - Freestyle schema mutation: ``ALTER TABLE ADD COLUMN`` for ad-hoc \
+    columns that create schema drift other queries cannot anticipate.
+  - Direct DELETE — use ``consider_for_use = FALSE`` instead.
+  - Thought/insight mutation — these rows are IMMUTABLE.
+
+VRAM AWARENESS: Every llm_complete() call consumes local GPU VRAM. \
+Before running Flock LLM queries:
+  - Check ``SELECT COUNT(*) FROM conditions WHERE score_version = 0`` \
+    — only score what is new.
+  - Use WHERE clauses to limit scope (avoid full-table LLM scans).
+  - Prefer operating on unscored/unprocessed subsets.
+  - Skip operations the safety-net scorer will handle anyway \
+    (it catches score_version = 0 rows automatically)
 
 RULES:
 1. Start with assessment — understand the corpus before acting
@@ -383,11 +404,11 @@ maestro_agent = Agent(
     name="maestro",
     model=build_model(),
     description=(
-        "Free-form Flock conductor with unrestricted SQL access to the "
-        "corpus DuckDB database.  Reads corpus state, decides what "
-        "operations will improve it, and executes them via "
-        "execute_flock_sql().  Can invent new columns, create new rows, "
-        "and compose arbitrary Flock operations."
+        "Flock conductor with SQL access to the corpus DuckDB database.  "
+        "Reads corpus state, decides what operations will improve it, and "
+        "executes them via execute_flock_sql().  Creates new rows and "
+        "composes Flock operations within the established schema — "
+        "llm_complete() for assessment, pure SQL for computation."
     ),
     instruction=MAESTRO_INSTRUCTION,
     tools=CORPUS_SQL_TOOLS,
