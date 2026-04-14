@@ -95,18 +95,6 @@ in your sources, include them as factual findings, not as editorialised warnings
 """
 
 # =============================================================================
-# Browsing Agent Instruction
-# =============================================================================
-
-BROWSING_AGENT_INSTRUCTION = """\
-You are an agent that performs the task of searching and browsing the web for \
-specific information and generating the desired answer. Your task is to retrieve \
-reliable, factual, and verifiable information that fills in knowledge gaps.
-Do not infer, speculate, summarize broadly, or attempt to fill in missing parts \
-yourself. Only return factual content.
-"""
-
-# =============================================================================
 # Main Summary Prompt (includes \\boxed{} formatting rules)
 # =============================================================================
 
@@ -148,41 +136,6 @@ def build_main_summary_prompt(task_description: str) -> str:
         "You can only answer the original question based on the information "
         "already retrieved and your own internal knowledge.\n"
         "If you attempt to call any tool, it will be considered a mistake."
-    )
-
-
-# =============================================================================
-# Browsing Summary Prompt
-# =============================================================================
-
-
-def build_browsing_summary_prompt(task_description: str) -> str:
-    """Build the browsing agent summary prompt."""
-    return (
-        "This is a direct instruction to you (the assistant), not the result of "
-        "a tool call.\n\n"
-        "We are now ending this session, and your conversation history will be "
-        "deleted. You must NOT initiate any further tool use. This is your final "
-        "opportunity to report *all* of the information gathered during the "
-        "session.\n\n"
-        "The original task is repeated here for reference:\n\n"
-        f'"{task_description}"\n\n'
-        "Summarize the above search and browsing history. Output the FINAL "
-        "RESPONSE and detailed supporting information of the task given to you.\n\n"
-        "If you found any useful facts, data, quotes, or answers directly "
-        "relevant to the original task, include them clearly and completely.\n"
-        "If you reached a conclusion or answer, include it as part of the "
-        "response.\n"
-        "If the task could not be fully answered, do NOT make up any content. "
-        "Instead, return all partially relevant findings, search results, quotes, "
-        "and observations that might help a downstream agent solve the problem.\n"
-        "If partial, conflicting, or inconclusive information was found, clearly "
-        "indicate this in your response.\n\n"
-        "Your final response should be a clear, complete, and structured report.\n"
-        "Organize the content into logical sections with appropriate headings.\n"
-        "Do NOT include any tool call instructions, speculative filler, or vague "
-        "summaries.\n"
-        "Focus on factual, specific, and well-organized information."
     )
 
 
