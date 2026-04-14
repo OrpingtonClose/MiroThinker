@@ -71,11 +71,12 @@ async def thinker_escalate_callback(
 
             await _safe_corpus_write(
                 corpus_key,
-                corpus.admit_thought,
-                strategy,                              # reasoning
-                "thinker_reasoning",                    # angle
-                f"thinker_iteration_{iteration}",       # strategy
-                iteration,                              # iteration
+                lambda: corpus.admit_thought(
+                    reasoning=strategy,
+                    angle="thinker_reasoning",
+                    strategy=f"thinker_iteration_{iteration}",
+                    iteration=iteration,
+                ),
             )
             logger.info(
                 "Thinker thought admitted directly: %d chars at iteration %d",

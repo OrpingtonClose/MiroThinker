@@ -404,11 +404,11 @@ maestro_agent = Agent(
     name="maestro",
     model=build_model(),
     description=(
-        "Free-form Flock conductor with unrestricted SQL access to the "
-        "corpus DuckDB database.  Reads corpus state, decides what "
-        "operations will improve it, and executes them via "
-        "execute_flock_sql().  Can invent new columns, create new rows, "
-        "and compose arbitrary Flock operations."
+        "Flock conductor with SQL access to the corpus DuckDB database.  "
+        "Reads corpus state, decides what operations will improve it, and "
+        "executes them via execute_flock_sql().  Creates new rows and "
+        "composes Flock operations within the established schema — "
+        "llm_complete() for assessment, pure SQL for computation."
     ),
     instruction=MAESTRO_INSTRUCTION,
     tools=CORPUS_SQL_TOOLS,
