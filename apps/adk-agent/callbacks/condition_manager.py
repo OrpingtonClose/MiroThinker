@@ -19,6 +19,7 @@ Flock turns it into queryable atoms with gradient-flag scoring.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
@@ -58,16 +59,18 @@ _last_corpus_db_path: str = ""
 _corpus_continuity_map: dict[str, str] = {}  # query_fingerprint → db_path
 
 # ---------------------------------------------------------------------------
-# Background scoring threads — the maestro callback fires scoring in a
-# daemon thread so the asyncio event loop stays responsive (keepalives
-# can fire, SSE events are delivered).  The *next* search_executor
-# callback waits for this thread before touching DuckDB.
+# Per-corpus async locks — serialise all DuckDB writes through an
+# asyncio.Lock so waiting coroutines yield to the event loop instead of
+# blocking it.  Actual DuckDB work runs in the thread pool via
+# asyncio.to_thread().  This replaces the old fire-and-forget scoring
+# threads + non-blocking skip pattern, eliminating data loss.
 #
 # Keyed by corpus_key so concurrent sessions don't block each other.
-# Each session has its own CorpusStore / DuckDB connection, so cross-
-# session synchronisation is unnecessary and harmful (it would block
-# unrelated event loops, defeating the purpose of this PR).
 # ---------------------------------------------------------------------------
+_corpus_async_locks: dict[str, asyncio.Lock] = {}
+
+# Legacy references kept for backward compatibility during transition.
+# TODO: Remove once all callers use _corpus_async_locks.
 _scoring_threads: dict[str, threading.Thread] = {}
 _scoring_lock = threading.Lock()
 
@@ -236,13 +239,47 @@ def _score_and_battery(state: dict) -> dict:
 # Search Executor callback
 # ---------------------------------------------------------------------------
 
+def _get_corpus_lock(corpus_key: str) -> asyncio.Lock:
+    """Get or create the per-corpus asyncio.Lock.
+
+    Uses the module-level ``_corpus_async_locks`` dict.  Creating a new
+    Lock is cheap and idempotent — the first caller for a given key
+    creates it, subsequent callers reuse it.
+    """
+    lock = _corpus_async_locks.get(corpus_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _corpus_async_locks[corpus_key] = lock
+    return lock
+
+
+async def _safe_corpus_write(
+    corpus_key: str,
+    fn: "object",
+    *args: "object",
+) -> "object":
+    """Execute a corpus-writing function with async mutual exclusion.
+
+    Acquires the per-corpus ``asyncio.Lock`` (yields to event loop, never
+    blocks), then dispatches the actual DuckDB work to the thread pool
+    via ``asyncio.to_thread()``.
+
+    This gives us:
+      - No event loop blocking (asyncio.Lock yields)
+      - No data loss (coroutines wait their turn instead of skipping)
+      - Thread safety (only one thread touches DuckDB at a time)
+    """
+    lock = _get_corpus_lock(corpus_key)
+    async with lock:
+        return await asyncio.to_thread(fn, *args)  # type: ignore[arg-type]
+
+
 def _wait_for_pending_scoring(corpus_key: str) -> bool:
     """NON-BLOCKING check whether the background scoring thread has finished.
 
-    This function NEVER calls ``thread.join()`` or any other blocking
-    primitive.  Blocking here would freeze the asyncio event loop and
-    prevent SSE keepalive comments from being delivered — exactly the
-    bug this PR fixes.
+    LEGACY: This function is retained for backward compatibility during
+    the transition to ``_safe_corpus_write()``.  New code should use
+    the async lock pattern instead.
 
     Returns ``True`` if DuckDB is safe to access (thread finished or
     was never running).  Returns ``False`` if the thread is **still
@@ -290,19 +327,18 @@ async def search_executor_callback(
     corpus = _get_corpus(state)
     _c = get_active_collector()
 
-    # Non-blocking check: is the background scoring thread still alive?
+    # Acquire the per-corpus async lock before touching DuckDB.
+    # This replaces the old non-blocking check that would SKIP the entire
+    # iteration if the scoring thread was alive (causing data loss).
+    # The async lock yields to the event loop, so SSE keepalives still fire.
     corpus_key = state.get("_corpus_key", "default")
-    if not _wait_for_pending_scoring(corpus_key):
-        logger.warning(
-            "search_executor_callback: scoring thread still alive — "
-            "skipping entire search+maestro iteration to avoid concurrent DuckDB access",
-        )
-        # Return Content (not None) to SHORT-CIRCUIT the SequentialAgent.
-        # Returning None means "proceed" in ADK — the maestro sub-agent
-        # would still run and access DuckDB via execute_flock_sql().
-        return genai_types.Content(
-            parts=[genai_types.Part(text="[Scoring thread still active — skipping this iteration]")],
-        )
+    lock = _get_corpus_lock(corpus_key)
+    await lock.acquire()
+    try:
+        # Legacy compat: also clear any stale scoring thread reference
+        _wait_for_pending_scoring(corpus_key)
+    finally:
+        lock.release()
 
     # Set tracing context
     iteration = state.get("_corpus_iteration", 0)
@@ -315,18 +351,16 @@ async def search_executor_callback(
     # Drain any queued search results from previous tool callbacks
     _drain_search_queue(state)
 
-    # ── DEFERRED THOUGHT LINEAGE: admit thinker's thought ────────────
-    # thinker_escalate_callback stashes the thinker's full reasoning in
-    # state["_pending_thinker_thought"] instead of writing directly to
-    # DuckDB (because the previous iteration's background scoring thread
-    # may still be alive at that point).  Now that _wait_for_pending_scoring
-    # has confirmed DuckDB is safe to access, we flush the pending thought.
+    # ── THOUGHT LINEAGE (legacy fallback) ────────────────────────────
+    # thinker_escalate_callback now writes thoughts directly under the
+    # async lock.  This fallback handles any residual pending thoughts
+    # from before the migration (or if the async write failed).
     pending_thought = state.pop("_pending_thinker_thought", None)
     if pending_thought:
         try:
             corpus.admit_thought(**pending_thought)
             logger.info(
-                "Deferred thinker thought admitted: %d chars at iteration %d",
+                "Legacy deferred thought admitted: %d chars at iteration %d",
                 len(pending_thought.get("reasoning", "")),
                 pending_thought.get("iteration", 0),
             )
@@ -405,7 +439,7 @@ async def search_executor_callback(
 # Maestro callback (new maestro architecture)
 # ---------------------------------------------------------------------------
 
-def maestro_condition_callback(
+async def maestro_condition_callback(
     callback_context: CallbackContext,
 ) -> Optional[genai_types.Content]:
     """After-agent callback for the maestro: refresh corpus state.
@@ -414,14 +448,14 @@ def maestro_condition_callback(
     ``execute_flock_sql()``.  This callback:
 
     1. Drains any remaining search results from tool callbacks
-    2. Kicks off safety-net scoring in a **background thread** so the
-       asyncio event loop stays responsive (SSE keepalives can fire)
+    2. Runs safety-net scoring under the per-corpus ``asyncio.Lock``
+       (DuckDB work dispatched to thread pool, event loop stays responsive)
     3. Refreshes state with the current corpus for the thinker
     4. Advances the iteration counter
 
-    The background scoring thread is joined at the start of the next
-    ``search_executor_callback`` to guarantee DuckDB is not accessed
-    concurrently.
+    ASYNC: Uses ``_safe_corpus_write()`` for DuckDB operations, replacing
+    the old fire-and-forget background thread pattern.  ADK awaits async
+    callbacks (``inspect.isawaitable`` check in ``base_agent.py``).
     """
     state = callback_context.state
     corpus = _get_corpus(state)
@@ -510,28 +544,22 @@ def maestro_condition_callback(
         except Exception:
             pass
 
-    def _background_scoring() -> None:
-        """Run scoring + dedup in a background thread.
+    def _safety_net_scoring() -> None:
+        """Run scoring + dedup (called via asyncio.to_thread under the lock).
 
-        P2 improvement: skip scoring for conditions already scored by
-        the maestro via execute_flock_sql().  ``score_new_conditions``
-        already checks ``score_version = 0`` so it naturally skips
-        maestro-scored rows.  We also skip the full algorithm battery
-        here — it runs during ``_score_and_battery`` in the main
-        ingestion path — to avoid redundant LLM calls.
+        Skips conditions already scored by the maestro via
+        execute_flock_sql().  ``score_new_conditions`` checks
+        ``score_version = 0`` so it naturally skips maestro-scored rows.
         """
         try:
-            # Only score conditions the maestro missed (score_version=0)
             scored = corpus.score_new_conditions(user_query)
             if scored:
                 logger.info("Maestro safety-net: scored %d conditions", scored)
 
-            # Dedup is cheap (SQL only) — always run it
             deduped = corpus.compute_duplications()
             if deduped:
                 logger.info("Maestro safety-net: deduped %d pairs", deduped)
 
-            # Composite quality is also cheap — refresh for newly scored
             if scored:
                 corpus.compute_composite_quality()
         except Exception:
@@ -539,25 +567,16 @@ def maestro_condition_callback(
 
     corpus_key = state.get("_corpus_key", "default")
 
-    # NON-BLOCKING check: is the previous scoring thread still alive?
-    # We NEVER call join() here — even a 10s join blocks the event loop
-    # and prevents SSE keepalive comments from being delivered.
-    with _scoring_lock:
-        old_t = _scoring_threads.get(corpus_key)
-        if old_t is not None and old_t.is_alive():
-            logger.warning(
-                "Previous scoring thread still alive (key=%s) — "
-                "skipping safety-net scoring to avoid concurrent DuckDB access",
-                corpus_key,
-            )
-        else:
-            t = threading.Thread(
-                target=_background_scoring,
-                daemon=True,
-                name=f"maestro-safety-scoring-{corpus_key}",
-            )
-            _scoring_threads[corpus_key] = t
-            t.start()
+    # Run safety-net scoring under the per-corpus async lock.
+    # This replaces the old fire-and-forget thread pattern that could
+    # skip scoring entirely if the previous thread was still alive.
+    # The async lock yields to the event loop (SSE keepalives fire),
+    # and asyncio.to_thread() dispatches the actual DuckDB work to the
+    # thread pool so the event loop is never blocked.
+    try:
+        await _safe_corpus_write(corpus_key, _safety_net_scoring)
+    except Exception:
+        logger.warning("Async safety-net scoring failed", exc_info=True)
 
     # Advance iteration at the loop boundary — the maestro is the last
     # agent in each LoopAgent iteration.
