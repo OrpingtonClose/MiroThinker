@@ -95,8 +95,12 @@ class ErrorEscalationAspect(Aspect):
                 block.name, typed_error,
             )
             self._consecutive_failures -= 1  # don't count ignorable
+            self._total_errors -= 1
             return BlockResult(
-                metrics={"error": str(typed_error), "escalation": "ignored"},
+                # block_failed=True prevents after() from resetting
+                # _consecutive_failures to 0, preserving any existing
+                # chain of real failures.
+                metrics={"error": str(typed_error), "escalation": "ignored", "block_failed": True},
                 routing=RoutingHint.CONTINUE,
             )
 
