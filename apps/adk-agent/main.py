@@ -468,6 +468,10 @@ async def run_pipeline(task: str) -> str:
     # Store the user's query in state so agent instruction templates
     # (e.g. maestro's {user_query} scoring prompt) can resolve it.
     corpus_state["user_query"] = task
+    # Initialise cumulative cost for the thinker's ${_cumulative_api_cost}
+    # template variable.  Not in build_corpus_state() because the AG-UI
+    # path uses a conditional guard to preserve cost across continuation runs.
+    corpus_state["_cumulative_api_cost"] = 0.0
     session = await _new_session(
         session_service,
         report_mode=True,

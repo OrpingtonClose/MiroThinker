@@ -789,9 +789,11 @@ def build_corpus_state(db_path: str = "") -> dict:
         # Iteration context for thinker (P1)
         "_prev_thinker_strategies": "(first iteration — no previous strategies)",
         "_last_thinker_strategy": "",
-        # Cumulative cost tracking (P3) — only set if not already present
-        # (preserved across runs by cleanup_corpus)
-        "_cumulative_api_cost": 0.0,
+        # NOTE: _cumulative_api_cost is NOT included here.  It is
+        # initialised by _init_pipeline_state (pipeline.py) which
+        # uses a conditional guard to preserve accumulated cost on
+        # continuation runs.  For the CLI run_pipeline() path,
+        # it is set explicitly alongside user_query.
     }
 
 
