@@ -3116,6 +3116,138 @@ class CorpusStore:
 
         return result
 
+    def format_summary_for_maestro(self) -> str:
+        """Format a compact structural summary for the maestro.
+
+        The maestro has unrestricted SQL access to the full corpus via
+        ``execute_flock_sql()``, so it does NOT need every finding's text
+        in its instruction.  This method provides just enough orientation
+        for the maestro to know what SQL operations to perform:
+
+        - Total counts by processing status and row type
+        - Unscored condition count (the maestro's primary job)
+        - Expansion targets awaiting fulfilment
+        - Per-angle statistics (count, avg quality)
+        - Top contradictions and cluster info
+
+        This keeps the maestro's context window lean, leaving room for
+        SQL results and Flock LLM outputs.
+        """
+        lines: list[str] = []
+
+        # ── Overall counts ──
+        total = self.count()
+        if total == 0:
+            return "(empty corpus — no conditions to organise)"
+
+        status_counts = self._status_snapshot()
+        lines.append(f"CORPUS OVERVIEW: {total} total conditions")
+        if status_counts:
+            status_parts = [f"{s}={n}" for s, n in sorted(status_counts.items())]
+            lines.append(f"  By processing_status: {', '.join(status_parts)}")
+
+        # Row type breakdown
+        try:
+            rt_rows = self.conn.execute(
+                "SELECT row_type, COUNT(*) FROM conditions "
+                "WHERE consider_for_use = TRUE GROUP BY row_type "
+                "ORDER BY COUNT(*) DESC"
+            ).fetchall()
+            if rt_rows:
+                rt_parts = [f"{rt}={n}" for rt, n in rt_rows]
+                lines.append(f"  By type: {', '.join(rt_parts)}")
+        except Exception:
+            pass
+
+        # ── Unscored conditions (primary maestro task) ──
+        try:
+            unscored = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions "
+                "WHERE score_version = 0 AND consider_for_use = TRUE "
+                "AND row_type = 'finding'"
+            ).fetchone()[0]
+            if unscored:
+                lines.append(f"\n⚠ UNSCORED: {unscored} findings need scoring (score_version=0)")
+            else:
+                lines.append("\n✓ All findings scored")
+        except Exception:
+            pass
+
+        # ── Expansion targets ──
+        try:
+            exp_rows = self.conn.execute(
+                "SELECT expansion_tool, COUNT(*), "
+                "GROUP_CONCAT(CAST(id AS VARCHAR), ', ') "
+                "FROM conditions "
+                "WHERE expansion_tool != 'none' "
+                "AND expansion_fulfilled = FALSE "
+                "AND consider_for_use = TRUE "
+                "GROUP BY expansion_tool"
+            ).fetchall()
+            if exp_rows:
+                lines.append(f"\nEXPANSION TARGETS ({sum(r[1] for r in exp_rows)} pending):")
+                for tool, cnt, ids in exp_rows:
+                    lines.append(f"  {tool}: {cnt} conditions (ids: {ids})")
+        except Exception:
+            pass
+
+        # ── Per-angle statistics ──
+        try:
+            angle_rows = self.conn.execute(
+                "SELECT angle, COUNT(*), "
+                "ROUND(AVG(composite_quality), 2), "
+                "SUM(CASE WHEN score_version = 0 THEN 1 ELSE 0 END) "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE AND row_type = 'finding' "
+                "GROUP BY angle ORDER BY COUNT(*) DESC"
+            ).fetchall()
+            if angle_rows:
+                lines.append(f"\nANGLE BREAKDOWN ({len(angle_rows)} angles):")
+                for angle, cnt, avg_q, unscored_n in angle_rows:
+                    label = angle or "(no angle)"
+                    unscored_note = f", {int(unscored_n)} unscored" if unscored_n else ""
+                    lines.append(
+                        f"  [{label}]: {cnt} findings, avg_quality={avg_q}{unscored_note}"
+                    )
+        except Exception:
+            pass
+
+        # ── Contradiction summary ──
+        try:
+            contra_count = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions "
+                "WHERE contradiction_flag = TRUE AND consider_for_use = TRUE"
+            ).fetchone()[0]
+            lines.append(f"\nCONTRADICTIONS: {contra_count}")
+        except Exception:
+            pass
+
+        # ── Cluster summary ──
+        try:
+            cluster_rows = self.conn.execute(
+                "SELECT COUNT(DISTINCT cluster_id) FROM conditions "
+                "WHERE cluster_id >= 0 AND consider_for_use = TRUE"
+            ).fetchone()[0]
+            lines.append(f"CLUSTERS: {cluster_rows}")
+        except Exception:
+            pass
+
+        # ── Thought/insight counts ──
+        try:
+            thought_count = self.count_thoughts()
+            if thought_count:
+                lines.append(f"THOUGHTS: {thought_count} (immutable — do not modify)")
+            insight_count = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions "
+                "WHERE row_type = 'insight' AND consider_for_use = TRUE"
+            ).fetchone()[0]
+            if insight_count:
+                lines.append(f"INSIGHTS: {insight_count}")
+        except Exception:
+            pass
+
+        return "\n".join(lines)
+
     def format_for_synthesiser(self) -> str:
         """Format the corpus for the synthesiser — chunk-based layout.
 

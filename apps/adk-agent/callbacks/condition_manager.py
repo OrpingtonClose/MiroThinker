@@ -391,20 +391,12 @@ async def search_executor_callback(
     except Exception as exc:
         logger.warning("Search executor failed (non-fatal): %s", exc, exc_info=True)
 
-    # Update state with current corpus for the maestro.
-    # For the thinker briefing, use swarm-digested synthesis when the
-    # corpus is large enough — synthesise() auto-selects single-pass
-    # (≤GOSSIP_THRESHOLD findings) vs gossip protocol for large corpora.
-    # Falls back to format_for_thinker() if synthesis fails or returns empty.
-    iteration = state.get("_corpus_iteration", 0)
-    user_query = state.get("user_query", "")
-    try:
-        briefing = corpus.synthesise(user_query) if user_query else ""
-    except Exception:
-        logger.warning("Swarm-digested briefing failed (non-fatal)", exc_info=True)
-        briefing = ""
-    state["research_findings"] = briefing or corpus.format_for_thinker(current_iteration=iteration)
-    state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
+    # Update state with views for each downstream consumer.
+    # The maestro gets a compact structural summary (counts, status,
+    # expansion targets) — it has SQL access for full detail.
+    # The thinker gets the full corpus briefing (set by maestro_condition_callback).
+    # The synthesiser gets the chunk-grouped format (also set by maestro_condition_callback).
+    state["corpus_summary_for_maestro"] = corpus.format_summary_for_maestro()
 
     return None
 
@@ -501,6 +493,7 @@ def maestro_condition_callback(
 
     state["research_findings"] = thinker_briefing
     state["corpus_for_synthesis"] = corpus.format_for_synthesiser()
+    state["corpus_summary_for_maestro"] = corpus.format_summary_for_maestro()
 
     # Emit corpus stats to dashboard (also before thread start)
     if _c:
@@ -770,6 +763,7 @@ def build_corpus_state(db_path: str = "") -> dict:
         # "(no findings yet)" matches the thinker's first-iteration check.
         "corpus_for_synthesis": "(no findings)",
         "research_findings": "(no findings yet)",
+        "corpus_summary_for_maestro": "(empty corpus — no conditions to organise)",
         # Iteration context for thinker (P1)
         "_prev_thinker_strategies": "(first iteration — no previous strategies)",
         "_last_thinker_strategy": "",
