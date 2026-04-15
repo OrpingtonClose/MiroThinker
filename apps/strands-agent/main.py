@@ -57,14 +57,25 @@ def _store_log(req_id: str, entry: dict) -> None:
         _request_logs.popitem(last=False)
 
 
-def _format_inline_log(tool_events: list[dict], elapsed: float, query: str = "", model: str = "") -> str:
-    """Format a detailed activity log as a collapsible code block.
+def _format_inline_log(tool_events: list[dict], elapsed: float, query: str = "", model: str = "", reasoning: str = "") -> str:
+    """Format a detailed activity log as collapsible sections.
 
-    Renders as a clickable ``<details>`` section in LibreChat that expands
-    to show a full text-file-style log of the agent's activity.
+    Renders two ``<details>`` blocks in LibreChat:
+    1. Thinking — the model's full reasoning chain (if any)
+    2. Activity Log — tool execution timeline
     """
     from datetime import datetime, timezone
 
+    parts = []
+
+    # ── Thinking section ──
+    if reasoning and reasoning.strip():
+        parts.append(
+            f"\n\n<details>\n<summary>💭 Thinking</summary>\n\n"
+            f"{reasoning.strip()}\n\n</details>"
+        )
+
+    # ── Activity log section ──
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     log_lines = [
         f"=== Strands Agent Activity Log ===",
@@ -88,7 +99,6 @@ def _format_inline_log(tool_events: list[dict], elapsed: float, query: str = "",
             offset = f"+{t - start_time:.1f}s" if start_time else ""
             log_lines.append(f"  [{i}] {offset:>8s}  {tool_name}")
             if tool_input and tool_input != "{}":
-                # Wrap long inputs
                 for line in tool_input[:300].split("\n"):
                     log_lines.append(f"              {line}")
                 if len(tool_input) > 300:
@@ -98,10 +108,12 @@ def _format_inline_log(tool_events: list[dict], elapsed: float, query: str = "",
     log_lines.append("=== End of Log ===")
     log_content = "\n".join(log_lines)
 
-    return (
+    parts.append(
         f"\n\n<details>\n<summary>📄 agent-activity-log.txt ({len(tool_events)} tools, {elapsed:.1f}s)</summary>\n\n"
         f"```\n{log_content}\n```\n\n</details>"
     )
+
+    return "".join(parts)
 
 
 @asynccontextmanager
@@ -457,6 +469,7 @@ async def openai_chat_completions(body: ChatCompletionRequest):
                     # Snapshot captured data while still under lock
                     result_holder["tool_events"] = list(stream_capture.tool_events)
                     result_holder["streamed_text"] = "".join(stream_capture.response_text)
+                    result_holder["reasoning_text"] = "".join(stream_capture.reasoning_text)
                     stream_capture.deactivate()
 
         thread = threading.Thread(target=_agent_thread, daemon=True)
@@ -500,7 +513,11 @@ async def openai_chat_completions(body: ChatCompletionRequest):
 
             # Append inline activity log at end of response
             elapsed = round(time.time() - start_time, 2)
-            inline_log = _format_inline_log(result_holder["tool_events"], elapsed, query=user_message, model=model)
+            inline_log = _format_inline_log(
+                result_holder["tool_events"], elapsed,
+                query=user_message, model=model,
+                reasoning=result_holder.get("reasoning_text", ""),
+            )
             yield _openai_chunk(req_id, model, inline_log)
 
             yield _openai_chunk(req_id, model, "", finish=True)
@@ -538,11 +555,12 @@ async def openai_chat_completions(body: ChatCompletionRequest):
                 # Snapshot captured data while still under lock
                 captured_tool_events = list(stream_capture.tool_events)
                 captured_all_text = "".join(stream_capture.response_text)
+                captured_reasoning = "".join(stream_capture.reasoning_text)
                 stream_capture.deactivate()
-        return answer, captured_tool_events, captured_all_text
+        return answer, captured_tool_events, captured_all_text, captured_reasoning
 
     try:
-        answer, captured_tool_events, captured_all_text = await asyncio.to_thread(
+        answer, captured_tool_events, captured_all_text, captured_reasoning = await asyncio.to_thread(
             _sync_non_streaming
         )
     except Exception as exc:
@@ -552,7 +570,11 @@ async def openai_chat_completions(body: ChatCompletionRequest):
         )
 
     elapsed = round(time.time() - start_time, 2)
-    inline_log = _format_inline_log(captured_tool_events, elapsed, query=user_message, model=model)
+    inline_log = _format_inline_log(
+        captured_tool_events, elapsed,
+        query=user_message, model=model,
+        reasoning=captured_reasoning,
+    )
     answer_with_log = f"{answer}{inline_log}"
 
     _store_log(

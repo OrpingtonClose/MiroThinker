@@ -123,6 +123,7 @@ class StreamCapture:
         self._seen_tool_ids: set[str] = set()
         self.all_text: list[str] = []
         self.response_text: list[str] = []
+        self.reasoning_text: list[str] = []
 
     def activate(self) -> queue.Queue:
         """Start capturing. Returns queue the caller reads from."""
@@ -133,6 +134,7 @@ class StreamCapture:
             self._seen_tool_ids.clear()
             self.all_text.clear()
             self.response_text.clear()
+            self.reasoning_text.clear()
             return q
 
     def deactivate(self):
@@ -159,6 +161,7 @@ class StreamCapture:
         # all_text = everything (for logging); response_text = data only (for answer fallback)
         if reasoning and isinstance(reasoning, str):
             self.all_text.append(reasoning)
+            self.reasoning_text.append(reasoning)
             with self._lock:
                 if self._queue is not None:
                     self._queue.put(("thinking", reasoning))
