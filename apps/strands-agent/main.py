@@ -68,11 +68,10 @@ def _format_inline_log(tool_events: list[dict], elapsed: float, query: str = "",
 
     parts = []
 
-    # ── Thinking section ──
+    # ── Thinking section (inline, not collapsible) ──
     if reasoning and reasoning.strip():
         parts.append(
-            f"\n\n<details>\n<summary>💭 Thinking</summary>\n\n"
-            f"{reasoning.strip()}\n\n</details>"
+            f"\n\n---\n**💭 Thinking**\n\n{reasoning.strip()}"
         )
 
     # ── Activity log section ──
