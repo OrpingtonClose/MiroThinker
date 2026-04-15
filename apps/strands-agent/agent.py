@@ -24,7 +24,10 @@ import time
 
 from dotenv import load_dotenv
 from strands import Agent
-from strands.agent.callback_handler import PrintingCallbackHandler
+from strands.handlers.callback_handler import (
+    CompositeCallbackHandler,
+    PrintingCallbackHandler,
+)
 from strands.agent.conversation_manager import SlidingWindowConversationManager
 
 from config import build_model
@@ -34,17 +37,37 @@ from tools import get_all_mcp_clients
 logger = logging.getLogger(__name__)
 
 # ── Guardrails: budget tracking callback ─────────────────────────────
+# Tracks actual tool invocations (not user queries) via Strands' callback
+# system.  The callback fires for every streaming event; we only increment
+# when ``current_tool_use`` is present with a tool ``name`` and we haven't
+# already counted that specific invocation (keyed by ``toolUseId``).
 # Similar to the budget gating in apps/adk-agent/.env.example lines 43-44.
 
 _session_start = time.time()
 _tool_call_count = 0
+_seen_tool_use_ids: set[str] = set()
 _MAX_TOOL_CALLS = int(os.environ.get("MAX_TOOL_CALLS", "200"))
 _SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "3600"))
 
 
 def budget_callback(**kwargs) -> None:
-    """Pre-processing guardrail that enforces tool call budget and session timeout."""
+    """Callback-handler guardrail that counts actual tool invocations.
+
+    Strands fires this callback for every streaming event.  We detect new
+    tool calls by checking for the ``current_tool_use`` kwarg with a tool
+    ``name`` and a unique ``toolUseId``.  Each unique ID is counted once.
+    """
     global _tool_call_count
+
+    tool_use = kwargs.get("current_tool_use")
+    if not tool_use or not tool_use.get("name"):
+        return
+
+    tool_use_id = tool_use.get("toolUseId", "")
+    if tool_use_id in _seen_tool_use_ids:
+        return
+    _seen_tool_use_ids.add(tool_use_id)
+
     _tool_call_count += 1
 
     elapsed = time.time() - _session_start
@@ -68,6 +91,11 @@ def budget_callback(**kwargs) -> None:
             _tool_call_count,
             elapsed,
         )
+
+
+def _build_callback_handler():
+    """Build a composite callback handler: printing + budget guardrail."""
+    return CompositeCallbackHandler(PrintingCallbackHandler(), budget_callback)
 
 
 # ── OpenTelemetry setup ──────────────────────────────────────────────
@@ -130,7 +158,7 @@ def create_single_agent():
         system_prompt=SYSTEM_PROMPT,
         tools=tool_list,
         conversation_manager=conversation_manager,
-        callback_handler=PrintingCallbackHandler(),
+        callback_handler=_build_callback_handler(),
     )
     return agent, mcp_clients
 
@@ -169,7 +197,7 @@ def create_multi_agent():
             window_size=15,
             should_truncate_results=True,
         ),
-        callback_handler=PrintingCallbackHandler(),
+        callback_handler=_build_callback_handler(),
     )
 
     # Planner: strategic agent that delegates to the researcher
@@ -187,7 +215,7 @@ def create_multi_agent():
             ),
         ],
         conversation_manager=conversation_manager,
-        callback_handler=PrintingCallbackHandler(),
+        callback_handler=_build_callback_handler(),
     )
     return planner, mcp_clients
 
@@ -236,7 +264,6 @@ def main():
             if query.lower() in ("quit", "exit", "q"):
                 break
 
-            budget_callback()
             response = agent(query)
             print(f"\nAgent: {response}\n")
     except KeyboardInterrupt:
