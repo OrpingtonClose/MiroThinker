@@ -13,13 +13,16 @@ Exposes the Strands agent as an HTTP API with:
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 load_dotenv()
@@ -111,6 +114,19 @@ class QueryResponse(BaseModel):
     response: str
     mode: str
     elapsed_seconds: float
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str | list = ""
+
+
+class ChatCompletionRequest(BaseModel):
+    model: str = "strands-venice-single"
+    messages: list[ChatMessage] = []
+    stream: bool = False
+
+    model_config = {"extra": "allow"}
 
 
 # ── Endpoints ────────────────────────────────────────────────────────
@@ -211,4 +227,162 @@ def query_multi(req: QueryRequest):
         response=str(response),
         mode="multi",
         elapsed_seconds=round(time.time() - start, 2),
+    )
+
+
+# ── OpenAI-compatible endpoints (for LibreChat integration) ──────────
+
+_MODEL_SINGLE = "strands-venice-single"
+_MODEL_MULTI = "strands-venice-multi"
+
+
+@app.get("/v1/models")
+async def openai_models():
+    """Return available models in OpenAI list format."""
+    return JSONResponse(
+        {
+            "object": "list",
+            "data": [
+                {
+                    "id": _MODEL_SINGLE,
+                    "object": "model",
+                    "created": 1700000000,
+                    "owned_by": "strands-venice-agent",
+                },
+                {
+                    "id": _MODEL_MULTI,
+                    "object": "model",
+                    "created": 1700000000,
+                    "owned_by": "strands-venice-agent",
+                },
+            ],
+        }
+    )
+
+
+def _run_agent(model: str, user_message: str) -> str:
+    """Dispatch to the correct agent based on model id. Runs under lock."""
+    from agent import reset_budget
+
+    with _agent_lock:
+        if model == _MODEL_MULTI and _multi_agent is not None:
+            _multi_agent.messages.clear()
+            if _multi_researcher is not None:
+                _multi_researcher.messages.clear()
+            reset_budget()
+            return str(_multi_agent(user_message))
+        elif _single_agent is not None:
+            _single_agent.messages.clear()
+            reset_budget()
+            return str(_single_agent(user_message))
+        else:
+            raise RuntimeError("No agent initialised")
+
+
+def _openai_chunk(req_id: str, model: str, content: str, finish: bool = False) -> str:
+    """Format a single SSE chunk in OpenAI streaming format."""
+    chunk = {
+        "id": req_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": {} if finish else {"content": content},
+                "finish_reason": "stop" if finish else None,
+            }
+        ],
+    }
+    return f"data: {json.dumps(chunk)}\n\n"
+
+
+@app.post("/v1/chat/completions")
+def openai_chat_completions(body: ChatCompletionRequest):
+    """OpenAI-compatible chat completions endpoint.
+
+    Accepts standard OpenAI request format. Routes to single or multi
+    agent based on the ``model`` field. Supports both streaming and
+    non-streaming responses.
+
+    Uses plain ``def`` so FastAPI runs it in a threadpool.
+    """
+    model = body.model
+    stream = body.stream
+    req_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+
+    # Extract last user message
+    user_message = ""
+    for msg in reversed(body.messages):
+        if msg.role == "user":
+            content = msg.content
+            if isinstance(content, list):
+                # Handle content array format
+                user_message = " ".join(
+                    part.get("text", "")
+                    for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                )
+            else:
+                user_message = str(content)
+            break
+
+    if not user_message:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "message": "No user message found",
+                    "type": "invalid_request_error",
+                }
+            },
+        )
+
+    logger.info(
+        "[%s] model=%s messages=%d stream=%s query=%.100s",
+        req_id,
+        model,
+        len(body.messages),
+        stream,
+        user_message,
+    )
+
+    try:
+        answer = _run_agent(model, user_message)
+    except Exception as exc:
+        logger.exception("Agent error in /v1/chat/completions")
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"message": str(exc), "type": "server_error"}},
+        )
+
+    if stream:
+
+        def _generate():
+            yield _openai_chunk(req_id, model, answer)
+            yield _openai_chunk(req_id, model, "", finish=True)
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(_generate(), media_type="text/event-stream")
+
+    # Non-streaming response
+    return JSONResponse(
+        {
+            "id": req_id,
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": answer},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            },
+        }
     )
