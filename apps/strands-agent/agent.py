@@ -260,7 +260,7 @@ def main():
 
     if multi_agent:
         print("Venice GLM-4.7 Uncensored Research Agent (Strands — Multi-Agent)")
-        agent, mcp_clients = create_multi_agent()
+        agent, _researcher, mcp_clients = create_multi_agent()
     else:
         print("Venice GLM-4.7 Uncensored Research Agent (Strands)")
         agent, mcp_clients = create_single_agent()
