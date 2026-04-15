@@ -133,6 +133,30 @@ def _setup_otel() -> None:
 # ── Agent factories ──────────────────────────────────────────────────
 
 
+def _enter_mcp_clients(mcp_clients):
+    """Enter MCP client contexts and collect tools, with rollback on failure.
+
+    If the Nth client's ``__enter__()`` or ``list_tools_sync()`` raises,
+    all previously-entered clients are cleaned up so their subprocesses
+    (npx, node, uvx) don't leak.
+    """
+    entered: list = []
+    tool_list: list = []
+    try:
+        for client in mcp_clients:
+            client.__enter__()
+            entered.append(client)
+            tool_list.extend(client.list_tools_sync())
+    except Exception:
+        for c in entered:
+            try:
+                c.__exit__(None, None, None)
+            except Exception:
+                pass
+        raise
+    return tool_list
+
+
 def create_single_agent():
     """Create a single-agent setup with all tools directly available.
 
@@ -147,11 +171,7 @@ def create_single_agent():
         should_truncate_results=True,
     )
 
-    # Enter MCP client contexts and collect tools
-    tool_list = []
-    for client in mcp_clients:
-        client.__enter__()
-        tool_list.extend(client.list_tools_sync())
+    tool_list = _enter_mcp_clients(mcp_clients)
 
     agent = Agent(
         model=model,
@@ -182,11 +202,7 @@ def create_multi_agent():
         should_truncate_results=True,
     )
 
-    # Enter MCP client contexts and collect tools
-    tool_list = []
-    for client in mcp_clients:
-        client.__enter__()
-        tool_list.extend(client.list_tools_sync())
+    tool_list = _enter_mcp_clients(mcp_clients)
 
     # Researcher: tool-capable agent that does the actual searching
     researcher = Agent(
