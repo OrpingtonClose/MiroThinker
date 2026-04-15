@@ -122,6 +122,7 @@ class StreamCapture:
         self.tool_events: list[dict] = []
         self._seen_tool_ids: set[str] = set()
         self.all_text: list[str] = []
+        self.response_text: list[str] = []
 
     def activate(self) -> queue.Queue:
         """Start capturing. Returns queue the caller reads from."""
@@ -131,6 +132,7 @@ class StreamCapture:
             self.tool_events.clear()
             self._seen_tool_ids.clear()
             self.all_text.clear()
+            self.response_text.clear()
             return q
 
     def deactivate(self):
@@ -153,12 +155,20 @@ class StreamCapture:
         data = kwargs.get("data", "")
         reasoning = kwargs.get("reasoningText", "")
 
-        for text in (reasoning, data):
-            if text and isinstance(text, str):
-                self.all_text.append(text)
-                with self._lock:
-                    if self._queue is not None:
-                        self._queue.put(("text", text))
+        # Track reasoning and response text separately.
+        # all_text = everything (for logging); response_text = data only (for answer fallback)
+        if reasoning and isinstance(reasoning, str):
+            self.all_text.append(reasoning)
+            with self._lock:
+                if self._queue is not None:
+                    self._queue.put(("thinking", reasoning))
+
+        if data and isinstance(data, str):
+            self.all_text.append(data)
+            self.response_text.append(data)
+            with self._lock:
+                if self._queue is not None:
+                    self._queue.put(("text", data))
 
         # Capture tool invocations (deduplicated by toolUseId)
         # Tools can come via either 'current_tool_use' or 'event.contentBlockStart'

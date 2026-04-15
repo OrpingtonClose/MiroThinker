@@ -354,9 +354,9 @@ def _dispatch_agent(model: str, user_message: str) -> str:
         raise RuntimeError("No agent initialised")
 
     # Fallback: if the agent result has no text (e.g. ended on a tool call),
-    # use the captured streamed text which includes the full thinking output.
-    if not result.strip() and stream_capture.all_text:
-        result = "".join(stream_capture.all_text)
+    # use only the response text (not reasoning/thinking tokens).
+    if not result.strip() and stream_capture.response_text:
+        result = "".join(stream_capture.response_text)
     return result
 
 
@@ -456,7 +456,7 @@ async def openai_chat_completions(body: ChatCompletionRequest):
                 finally:
                     # Snapshot captured data while still under lock
                     result_holder["tool_events"] = list(stream_capture.tool_events)
-                    result_holder["streamed_text"] = "".join(stream_capture.all_text)
+                    result_holder["streamed_text"] = "".join(stream_capture.response_text)
                     stream_capture.deactivate()
 
         thread = threading.Thread(target=_agent_thread, daemon=True)
@@ -485,6 +485,9 @@ async def openai_chat_completions(body: ChatCompletionRequest):
                 event_type, data = item
                 if event_type == "text":
                     yield _openai_chunk(req_id, model, data)
+                elif event_type == "thinking":
+                    # Skip reasoning tokens — not shown to user
+                    pass
                 elif event_type == "tool":
                     # Emit tool call as SSE comment (visible in logs)
                     yield f": tool {data['tool']}\n\n"
@@ -534,7 +537,7 @@ async def openai_chat_completions(body: ChatCompletionRequest):
             finally:
                 # Snapshot captured data while still under lock
                 captured_tool_events = list(stream_capture.tool_events)
-                captured_all_text = "".join(stream_capture.all_text)
+                captured_all_text = "".join(stream_capture.response_text)
                 stream_capture.deactivate()
         return answer, captured_tool_events, captured_all_text
 
