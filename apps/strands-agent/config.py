@@ -18,7 +18,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-VENICE_API_KEY = os.environ["VENICE_API_KEY"]
 VENICE_API_BASE = os.environ.get("VENICE_API_BASE", "https://api.venice.ai/api/v1")
 VENICE_MODEL = os.environ.get("VENICE_MODEL", "zai-org-glm-4.7")
 
@@ -27,9 +26,16 @@ def build_model():
     """Build Strands model provider pointing at Venice AI."""
     from strands.models.openai import OpenAIModel
 
+    api_key = os.environ.get("VENICE_API_KEY", "")
+    if not api_key:
+        raise RuntimeError(
+            "VENICE_API_KEY is not set. "
+            "Copy .env.example to .env and add your Venice API key."
+        )
+
     return OpenAIModel(
         client_args={
-            "api_key": VENICE_API_KEY,
+            "api_key": api_key,
             "base_url": VENICE_API_BASE,
         },
         model_id=VENICE_MODEL,
