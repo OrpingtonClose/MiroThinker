@@ -14,6 +14,7 @@ Exposes the Strands agent as an HTTP API with:
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from contextlib import asynccontextmanager
 
@@ -31,6 +32,8 @@ _single_agent = None
 _multi_agent = None
 _mcp_clients_single: list = []
 _mcp_clients_multi: list = []
+_single_agent_lock = threading.Lock()
+_multi_agent_lock = threading.Lock()
 
 
 @asynccontextmanager
@@ -133,15 +136,15 @@ def query_single(req: QueryRequest):
     if _single_agent is None:
         raise HTTPException(status_code=503, detail="Single agent not initialised")
 
-    # Reset conversation so each HTTP request is independent
-    _single_agent.messages.clear()
-
     start = time.time()
-    try:
-        response = _single_agent(req.query)
-    except Exception as exc:
-        logger.exception("Agent error")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    with _single_agent_lock:
+        # Reset conversation so each HTTP request is independent
+        _single_agent.messages.clear()
+        try:
+            response = _single_agent(req.query)
+        except Exception as exc:
+            logger.exception("Agent error")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return QueryResponse(
         query=req.query,
@@ -163,15 +166,15 @@ def query_multi(req: QueryRequest):
     if _multi_agent is None:
         raise HTTPException(status_code=503, detail="Multi agent not initialised")
 
-    # Reset conversation so each HTTP request is independent
-    _multi_agent.messages.clear()
-
     start = time.time()
-    try:
-        response = _multi_agent(req.query)
-    except Exception as exc:
-        logger.exception("Agent error")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    with _multi_agent_lock:
+        # Reset conversation so each HTTP request is independent
+        _multi_agent.messages.clear()
+        try:
+            response = _multi_agent(req.query)
+        except Exception as exc:
+            logger.exception("Agent error")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return QueryResponse(
         query=req.query,
