@@ -259,7 +259,7 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
         conversation_manager=conversation_manager,
         callback_handler=_build_callback_handler(),
     )
-    return planner, researcher, mcp_clients
+    return planner, researcher, mcp_clients or []
 
 
 def _cleanup_mcp(mcp_clients):
