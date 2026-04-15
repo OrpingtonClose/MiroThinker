@@ -66,10 +66,13 @@ def _format_inline_log(tool_events: list[dict], elapsed: float) -> str:
     for ev in tool_events:
         tool_name = ev.get("tool", "unknown")
         tool_input = ev.get("input", "")
-        # Trim input to keep it readable
-        if len(tool_input) > 80:
-            tool_input = tool_input[:77] + "..."
-        lines.append(f"- `{tool_name}` {tool_input}")
+        # Trim input to keep it readable; skip empty/trivial inputs
+        if tool_input and tool_input != "{}":
+            if len(tool_input) > 80:
+                tool_input = tool_input[:77] + "..."
+            lines.append(f"- `{tool_name}` {tool_input}")
+        else:
+            lines.append(f"- `{tool_name}`")
     lines.append(f"\n{len(tool_events)} tool calls | {elapsed:.1f}s elapsed")
     return "\n".join(lines)
 
