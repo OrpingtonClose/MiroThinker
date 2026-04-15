@@ -315,8 +315,14 @@ def _dispatch_agent(model: str, user_message: str) -> str:
 
 def _run_agent(model: str, user_message: str) -> str:
     """Dispatch to the correct agent under lock (convenience wrapper)."""
+    from agent import stream_capture
+
     with _agent_lock:
-        return _dispatch_agent(model, user_message)
+        stream_capture.activate()
+        try:
+            return _dispatch_agent(model, user_message)
+        finally:
+            stream_capture.deactivate()
 
 
 def _openai_chunk(req_id: str, model: str, content: str, finish: bool = False) -> str:
