@@ -57,12 +57,37 @@ def _store_log(req_id: str, entry: dict) -> None:
         _request_logs.popitem(last=False)
 
 
-def _format_inline_log(tool_events: list[dict], elapsed: float, query: str = "", model: str = "", reasoning: str = "") -> str:
+_METRICS_LOG_PATH = "/var/log/strands-metrics.jsonl"
+
+
+def _write_metrics_jsonl(req_id: str, model: str, query: str, elapsed: float,
+                         metrics_summary: dict | None, tool_events: list[dict]) -> None:
+    """Append a single JSON line to the metrics log file."""
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "request_id": req_id,
+        "model": model,
+        "query": query[:500] if query else "",
+        "elapsed_s": elapsed,
+        "tool_events": [
+            {"tool": e.get("tool", ""), "input": e.get("input", "")[:200]}
+            for e in tool_events
+        ],
+        "metrics": metrics_summary,
+    }
+    try:
+        with open(_METRICS_LOG_PATH, "a") as f:
+            f.write(json.dumps(record, default=str) + "\n")
+    except Exception:
+        logger.warning("Failed to write metrics JSONL", exc_info=True)
+
+
+def _format_inline_log(tool_events: list[dict], elapsed: float, query: str = "", model: str = "", reasoning: str = "", metrics: dict | None = None) -> str:
     """Format a detailed activity log as collapsible sections.
 
-    Renders two ``<details>`` blocks in LibreChat:
-    1. Thinking — the model's full reasoning chain (if any)
-    2. Activity Log — tool execution timeline
+    Renders:
+    1. Thinking — the model's full reasoning chain (inline, not collapsible)
+    2. Activity Log — tool execution timeline + metrics (collapsible)
     """
     from datetime import datetime, timezone
 
@@ -83,9 +108,47 @@ def _format_inline_log(tool_events: list[dict], elapsed: float, query: str = "",
         f"Elapsed   : {elapsed:.1f}s",
         f"Tool calls: {len(tool_events)}",
         f"Query     : {query[:200] if query else 'N/A'}",
-        f"",
-        f"--- Tool Execution Timeline ---",
     ]
+
+    # ── Metrics from AgentResult ──
+    if metrics:
+        log_lines.append("")
+        log_lines.append("--- Performance Metrics ---")
+        usage = metrics.get("accumulated_usage") or {}
+        if usage:
+            log_lines.append(f"  Input tokens : {usage.get('inputTokens', 'N/A')}")
+            log_lines.append(f"  Output tokens: {usage.get('outputTokens', 'N/A')}")
+            log_lines.append(f"  Total tokens : {usage.get('totalTokens', 'N/A')}")
+            if usage.get("cacheReadInputTokens"):
+                log_lines.append(f"  Cache read   : {usage['cacheReadInputTokens']}")
+            if usage.get("cacheWriteInputTokens"):
+                log_lines.append(f"  Cache write  : {usage['cacheWriteInputTokens']}")
+        latency = metrics.get("accumulated_metrics") or {}
+        if latency.get("latencyMs"):
+            log_lines.append(f"  Model latency: {latency['latencyMs']}ms")
+        cycles = metrics.get("total_cycles")
+        if cycles is not None:
+            log_lines.append(f"  Agent cycles : {cycles}")
+        duration = metrics.get("total_duration")
+        if duration is not None:
+            log_lines.append(f"  Total duration: {duration:.2f}s")
+
+        # Tool-level metrics from AgentResult
+        tool_usage = metrics.get("tool_usage") or {}
+        if tool_usage:
+            log_lines.append("")
+            log_lines.append("--- Tool Metrics ---")
+            for tname, tstats in tool_usage.items():
+                calls = tstats.get("total_calls", "?")
+                success = tstats.get("successful_calls", "?")
+                errors = tstats.get("errors", "?")
+                avg_time = tstats.get("average_execution_time", 0)
+                log_lines.append(
+                    f"  {tname}: {calls} calls, {success} ok, {errors} err, avg {avg_time:.2f}s"
+                )
+
+    log_lines.append("")
+    log_lines.append("--- Tool Execution Timeline ---")
 
     if not tool_events:
         log_lines.append("  (no tool calls)")
@@ -132,6 +195,31 @@ async def lifespan(app: FastAPI):
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+
+    # ── Structured JSON logging for Strands SDK internals ──
+    _strands_log_path = "/var/log/strands-agent-debug.jsonl"
+    try:
+        class _JsonFormatter(logging.Formatter):
+            def format(self, record):
+                return json.dumps({
+                    "ts": self.formatTime(record),
+                    "level": record.levelname,
+                    "logger": record.name,
+                    "msg": record.getMessage(),
+                }, default=str)
+
+        _fh = logging.FileHandler(_strands_log_path)
+        _fh.setFormatter(_JsonFormatter())
+        _fh.setLevel(logging.DEBUG)
+        # Capture detailed Strands SDK logs
+        for _mod in ("strands", "strands.tools", "strands.event_loop", "strands.models"):
+            _logger = logging.getLogger(_mod)
+            _logger.setLevel(logging.DEBUG)
+            _logger.addHandler(_fh)
+        logger.info("Strands SDK debug logging → %s", _strands_log_path)
+    except Exception:
+        logger.warning("Could not set up Strands JSON logging", exc_info=True)
+
     _setup_otel()
 
     # Enter MCP clients once and share tools between both agents
@@ -263,6 +351,7 @@ def query_single(req: QueryRequest):
         raise HTTPException(status_code=503, detail="Single agent not initialised")
 
     start = time.time()
+    req_id = f"query-{uuid.uuid4().hex[:12]}"
     with _agent_lock:
         from agent import reset_budget
 
@@ -270,15 +359,23 @@ def query_single(req: QueryRequest):
         reset_budget()
         try:
             response = _single_agent(req.query)
+            metrics = None
+            try:
+                metrics = response.metrics.get_summary()
+            except Exception:
+                pass
         except Exception as exc:
             logger.exception("Agent error")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    elapsed = round(time.time() - start, 2)
+    _write_metrics_jsonl(req_id, _MODEL_SINGLE, req.query, elapsed, metrics, [])
 
     return QueryResponse(
         query=req.query,
         response=str(response),
         mode="single",
-        elapsed_seconds=round(time.time() - start, 2),
+        elapsed_seconds=elapsed,
     )
 
 
@@ -289,6 +386,7 @@ def query_multi(req: QueryRequest):
         raise HTTPException(status_code=503, detail="Multi agent not initialised")
 
     start = time.time()
+    req_id = f"query-{uuid.uuid4().hex[:12]}"
     with _agent_lock:
         from agent import reset_budget
 
@@ -298,15 +396,23 @@ def query_multi(req: QueryRequest):
         reset_budget()
         try:
             response = _multi_agent(req.query)
+            metrics = None
+            try:
+                metrics = response.metrics.get_summary()
+            except Exception:
+                pass
         except Exception as exc:
             logger.exception("Agent error")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    elapsed = round(time.time() - start, 2)
+    _write_metrics_jsonl(req_id, _MODEL_MULTI, req.query, elapsed, metrics, [])
 
     return QueryResponse(
         query=req.query,
         response=str(response),
         mode="multi",
-        elapsed_seconds=round(time.time() - start, 2),
+        elapsed_seconds=elapsed,
     )
 
 
@@ -340,14 +446,16 @@ async def openai_models():
     )
 
 
-def _dispatch_agent(model: str, user_message: str) -> str:
+def _dispatch_agent(model: str, user_message: str) -> tuple[str, dict | None]:
     """Run the appropriate agent.  **Caller must already hold _agent_lock**.
 
-    Returns the final text answer.  If the agent result has no text
+    Returns (text_answer, metrics_summary).  If the agent result has no text
     content (e.g. it ended on a tool call), falls back to the captured
-    streamed text via ``stream_capture.all_text``.
+    streamed text via ``stream_capture.response_text``.
     """
     from agent import reset_budget, stream_capture
+
+    metrics_summary = None
 
     if model == _MODEL_MULTI:
         if _multi_agent is None:
@@ -356,11 +464,21 @@ def _dispatch_agent(model: str, user_message: str) -> str:
         if _multi_researcher is not None:
             _multi_researcher.messages.clear()
         reset_budget()
-        result = str(_multi_agent(user_message))
+        agent_result = _multi_agent(user_message)
+        result = str(agent_result)
+        try:
+            metrics_summary = agent_result.metrics.get_summary()
+        except Exception:
+            pass
     elif _single_agent is not None:
         _single_agent.messages.clear()
         reset_budget()
-        result = str(_single_agent(user_message))
+        agent_result = _single_agent(user_message)
+        result = str(agent_result)
+        try:
+            metrics_summary = agent_result.metrics.get_summary()
+        except Exception:
+            pass
     else:
         raise RuntimeError("No agent initialised")
 
@@ -368,10 +486,10 @@ def _dispatch_agent(model: str, user_message: str) -> str:
     # use only the response text (not reasoning/thinking tokens).
     if not result.strip() and stream_capture.response_text:
         result = "".join(stream_capture.response_text)
-    return result
+    return result, metrics_summary
 
 
-def _run_agent(model: str, user_message: str) -> str:
+def _run_agent(model: str, user_message: str) -> tuple[str, dict | None]:
     """Dispatch to the correct agent under lock (convenience wrapper)."""
     from agent import stream_capture
 
@@ -460,7 +578,9 @@ async def openai_chat_completions(body: ChatCompletionRequest):
                 queue_holder["q"] = token_q
                 queue_ready.set()
                 try:
-                    result_holder["text"] = _dispatch_agent(model, user_message)
+                    text, metrics = _dispatch_agent(model, user_message)
+                    result_holder["text"] = text
+                    result_holder["metrics"] = metrics
                 except Exception as exc:
                     logger.exception("Agent error in streaming [%s]", req_id)
                     result_holder["error"] = str(exc)
@@ -516,6 +636,7 @@ async def openai_chat_completions(body: ChatCompletionRequest):
                 result_holder["tool_events"], elapsed,
                 query=user_message, model=model,
                 reasoning=result_holder.get("reasoning_text", ""),
+                metrics=result_holder.get("metrics"),
             )
             yield _openai_chunk(req_id, model, inline_log)
 
@@ -537,6 +658,13 @@ async def openai_chat_completions(body: ChatCompletionRequest):
                 },
             )
 
+            # Write metrics to JSONL log file
+            _write_metrics_jsonl(
+                req_id, model, user_message, elapsed,
+                result_holder.get("metrics"),
+                result_holder["tool_events"],
+            )
+
         return StreamingResponse(_generate_sse(), media_type="text/event-stream")
 
     # ── Non-streaming mode ───────────────────────────────────────
@@ -546,7 +674,7 @@ async def openai_chat_completions(body: ChatCompletionRequest):
         with _agent_lock:
             stream_capture.activate()
             try:
-                answer = _dispatch_agent(model, user_message)
+                answer, metrics = _dispatch_agent(model, user_message)
             except Exception as exc:
                 logger.exception("Agent error in /v1/chat/completions [%s]", req_id)
                 raise
@@ -556,10 +684,10 @@ async def openai_chat_completions(body: ChatCompletionRequest):
                 captured_all_text = "".join(stream_capture.response_text)
                 captured_reasoning = "".join(stream_capture.reasoning_text)
                 stream_capture.deactivate()
-        return answer, captured_tool_events, captured_all_text, captured_reasoning
+        return answer, metrics, captured_tool_events, captured_all_text, captured_reasoning
 
     try:
-        answer, captured_tool_events, captured_all_text, captured_reasoning = await asyncio.to_thread(
+        answer, metrics, captured_tool_events, captured_all_text, captured_reasoning = await asyncio.to_thread(
             _sync_non_streaming
         )
     except Exception as exc:
@@ -573,6 +701,7 @@ async def openai_chat_completions(body: ChatCompletionRequest):
         captured_tool_events, elapsed,
         query=user_message, model=model,
         reasoning=captured_reasoning,
+        metrics=metrics,
     )
     answer_with_log = f"{answer}{inline_log}"
 
@@ -590,6 +719,22 @@ async def openai_chat_completions(body: ChatCompletionRequest):
         },
     )
 
+    # Write metrics to JSONL log file
+    _write_metrics_jsonl(
+        req_id, model, user_message, elapsed,
+        metrics, captured_tool_events,
+    )
+
+    # Extract token usage from metrics if available
+    usage_data = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    if metrics and metrics.get("accumulated_usage"):
+        u = metrics["accumulated_usage"]
+        usage_data = {
+            "prompt_tokens": u.get("inputTokens", 0),
+            "completion_tokens": u.get("outputTokens", 0),
+            "total_tokens": u.get("totalTokens", 0),
+        }
+
     return JSONResponse(
         {
             "id": req_id,
@@ -603,11 +748,7 @@ async def openai_chat_completions(body: ChatCompletionRequest):
                     "finish_reason": "stop",
                 }
             ],
-            "usage": {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-            },
+            "usage": usage_data,
         }
     )
 
