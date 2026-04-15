@@ -157,21 +157,28 @@ def _enter_mcp_clients(mcp_clients):
     return tool_list
 
 
-def create_single_agent():
+def create_single_agent(tool_list=None, mcp_clients=None):
     """Create a single-agent setup with all tools directly available.
 
     Use this for simple interactive sessions where one agent handles
     both search and synthesis.
+
+    Args:
+        tool_list: Pre-built list of MCP tools.  When *None* the
+            function enters its own MCP clients (REPL use-case).
+        mcp_clients: MCP clients that were entered to produce
+            *tool_list*.  Returned as-is for the caller to manage.
     """
     model = build_model()
-    mcp_clients = get_all_mcp_clients()
+    owns_clients = tool_list is None
+    if owns_clients:
+        mcp_clients = get_all_mcp_clients()
+        tool_list = _enter_mcp_clients(mcp_clients)
 
     conversation_manager = SlidingWindowConversationManager(
         window_size=20,
         should_truncate_results=True,
     )
-
-    tool_list = _enter_mcp_clients(mcp_clients)
 
     agent = Agent(
         model=model,
@@ -180,10 +187,10 @@ def create_single_agent():
         conversation_manager=conversation_manager,
         callback_handler=_build_callback_handler(),
     )
-    return agent, mcp_clients
+    return agent, mcp_clients or []
 
 
-def create_multi_agent():
+def create_multi_agent(tool_list=None, mcp_clients=None):
     """Create a planner + researcher multi-agent setup.
 
     The researcher agent has direct access to all MCP tools and handles
@@ -191,18 +198,25 @@ def create_multi_agent():
     via the agent-as-tool pattern and handles strategic decomposition
     and synthesis.
 
+    Args:
+        tool_list: Pre-built list of MCP tools.  When *None* the
+            function enters its own MCP clients (REPL use-case).
+        mcp_clients: MCP clients that were entered to produce
+            *tool_list*.  Returned as-is for the caller to manage.
+
     Returns:
         Tuple of (planner_agent, researcher_agent, mcp_clients).
     """
     model = build_model()
-    mcp_clients = get_all_mcp_clients()
+    owns_clients = tool_list is None
+    if owns_clients:
+        mcp_clients = get_all_mcp_clients()
+        tool_list = _enter_mcp_clients(mcp_clients)
 
     conversation_manager = SlidingWindowConversationManager(
         window_size=20,
         should_truncate_results=True,
     )
-
-    tool_list = _enter_mcp_clients(mcp_clients)
 
     # Researcher: tool-capable agent that does the actual searching
     researcher = Agent(

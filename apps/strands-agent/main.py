@@ -30,8 +30,7 @@ logger = logging.getLogger(__name__)
 
 _single_agent = None
 _multi_agent = None
-_mcp_clients_single: list = []
-_mcp_clients_multi: list = []
+_mcp_clients: list = []
 _multi_researcher = None
 _single_agent_lock = threading.Lock()
 _multi_agent_lock = threading.Lock()
@@ -40,14 +39,15 @@ _multi_agent_lock = threading.Lock()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: create agents. Shutdown: close MCP connections."""
-    global \
-        _single_agent, \
-        _multi_agent, \
-        _multi_researcher, \
-        _mcp_clients_single, \
-        _mcp_clients_multi
+    global _single_agent, _multi_agent, _multi_researcher, _mcp_clients
 
-    from agent import _setup_otel, create_multi_agent, create_single_agent
+    from agent import (
+        _enter_mcp_clients,
+        _setup_otel,
+        create_multi_agent,
+        create_single_agent,
+    )
+    from tools import get_all_mcp_clients
 
     logging.basicConfig(
         level=logging.INFO,
@@ -55,8 +55,19 @@ async def lifespan(app: FastAPI):
     )
     _setup_otel()
 
+    # Enter MCP clients once and share tools between both agents
     try:
-        _single_agent, _mcp_clients_single = create_single_agent()
+        _mcp_clients = get_all_mcp_clients()
+        tool_list = _enter_mcp_clients(_mcp_clients)
+    except Exception:
+        logger.exception("Failed to initialise MCP tools")
+        tool_list = []
+        _mcp_clients = []
+
+    try:
+        _single_agent, _ = create_single_agent(
+            tool_list=tool_list, mcp_clients=_mcp_clients
+        )
         logger.info(
             "Single agent ready — %d tools",
             len(_single_agent.tool_registry.get_all_tools_config()),
@@ -65,18 +76,19 @@ async def lifespan(app: FastAPI):
         logger.exception("Failed to create single agent")
 
     try:
-        _multi_agent, _multi_researcher, _mcp_clients_multi = create_multi_agent()
+        _multi_agent, _multi_researcher, _ = create_multi_agent(
+            tool_list=tool_list, mcp_clients=_mcp_clients
+        )
         logger.info("Multi agent ready")
     except Exception:
         logger.exception("Failed to create multi agent")
 
     yield
 
-    # Shutdown: close MCP connections
+    # Shutdown: close MCP connections (once)
     from agent import _cleanup_mcp
 
-    _cleanup_mcp(_mcp_clients_single)
-    _cleanup_mcp(_mcp_clients_multi)
+    _cleanup_mcp(_mcp_clients)
     logger.info("MCP connections closed")
 
 
