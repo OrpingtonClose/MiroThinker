@@ -283,8 +283,13 @@ async def openai_models():
 
 
 def _dispatch_agent(model: str, user_message: str) -> str:
-    """Run the appropriate agent.  **Caller must already hold _agent_lock**."""
-    from agent import reset_budget
+    """Run the appropriate agent.  **Caller must already hold _agent_lock**.
+
+    Returns the final text answer.  If the agent result has no text
+    content (e.g. it ended on a tool call), falls back to the captured
+    streamed text via ``stream_capture.all_text``.
+    """
+    from agent import reset_budget, stream_capture
 
     if model == _MODEL_MULTI:
         if _multi_agent is None:
@@ -293,13 +298,19 @@ def _dispatch_agent(model: str, user_message: str) -> str:
         if _multi_researcher is not None:
             _multi_researcher.messages.clear()
         reset_budget()
-        return str(_multi_agent(user_message))
+        result = str(_multi_agent(user_message))
     elif _single_agent is not None:
         _single_agent.messages.clear()
         reset_budget()
-        return str(_single_agent(user_message))
+        result = str(_single_agent(user_message))
     else:
         raise RuntimeError("No agent initialised")
+
+    # Fallback: if the agent result has no text (e.g. ended on a tool call),
+    # use the captured streamed text which includes the full thinking output.
+    if not result.strip() and stream_capture.all_text:
+        result = "".join(stream_capture.all_text)
+    return result
 
 
 def _run_agent(model: str, user_message: str) -> str:

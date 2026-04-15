@@ -141,16 +141,27 @@ class StreamCapture:
             self._queue = None
 
     def __call__(self, **kwargs):
-        # Capture streaming text tokens
+        # Capture streaming text tokens (both regular data and reasoning text)
         data = kwargs.get("data", "")
-        if data and isinstance(data, str):
-            self.all_text.append(data)
-            with self._lock:
-                if self._queue is not None:
-                    self._queue.put(("text", data))
+        reasoning = kwargs.get("reasoningText", "")
+
+        for text in (reasoning, data):
+            if text and isinstance(text, str):
+                self.all_text.append(text)
+                with self._lock:
+                    if self._queue is not None:
+                        self._queue.put(("text", text))
 
         # Capture tool invocations (deduplicated by toolUseId)
+        # Tools can come via either 'current_tool_use' or 'event.contentBlockStart'
         tool_use = kwargs.get("current_tool_use")
+        if not tool_use or not tool_use.get("name"):
+            tool_use = (
+                kwargs.get("event", {})
+                .get("contentBlockStart", {})
+                .get("start", {})
+                .get("toolUse")
+            )
         if tool_use and tool_use.get("name"):
             tid = tool_use.get("toolUseId", "")
             if tid and tid not in self._seen_tool_ids:
