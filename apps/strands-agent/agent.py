@@ -192,7 +192,7 @@ def create_multi_agent():
     and synthesis.
 
     Returns:
-        Tuple of (planner_agent, mcp_clients).
+        Tuple of (planner_agent, researcher_agent, mcp_clients).
     """
     model = build_model()
     mcp_clients = get_all_mcp_clients()
@@ -233,7 +233,7 @@ def create_multi_agent():
         conversation_manager=conversation_manager,
         callback_handler=_build_callback_handler(),
     )
-    return planner, mcp_clients
+    return planner, researcher, mcp_clients
 
 
 def _cleanup_mcp(mcp_clients):

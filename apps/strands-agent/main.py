@@ -32,6 +32,7 @@ _single_agent = None
 _multi_agent = None
 _mcp_clients_single: list = []
 _mcp_clients_multi: list = []
+_multi_researcher = None
 _single_agent_lock = threading.Lock()
 _multi_agent_lock = threading.Lock()
 
@@ -39,7 +40,12 @@ _multi_agent_lock = threading.Lock()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: create agents. Shutdown: close MCP connections."""
-    global _single_agent, _multi_agent, _mcp_clients_single, _mcp_clients_multi
+    global \
+        _single_agent, \
+        _multi_agent, \
+        _multi_researcher, \
+        _mcp_clients_single, \
+        _mcp_clients_multi
 
     from agent import _setup_otel, create_multi_agent, create_single_agent
 
@@ -59,7 +65,7 @@ async def lifespan(app: FastAPI):
         logger.exception("Failed to create single agent")
 
     try:
-        _multi_agent, _mcp_clients_multi = create_multi_agent()
+        _multi_agent, _multi_researcher, _mcp_clients_multi = create_multi_agent()
         logger.info("Multi agent ready")
     except Exception:
         logger.exception("Failed to create multi agent")
@@ -170,6 +176,8 @@ def query_multi(req: QueryRequest):
     with _multi_agent_lock:
         # Reset conversation so each HTTP request is independent
         _multi_agent.messages.clear()
+        if _multi_researcher is not None:
+            _multi_researcher.messages.clear()
         try:
             response = _multi_agent(req.query)
         except Exception as exc:
