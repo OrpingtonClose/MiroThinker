@@ -57,6 +57,23 @@ def _store_log(req_id: str, entry: dict) -> None:
         _request_logs.popitem(last=False)
 
 
+def _format_inline_log(tool_events: list[dict], elapsed: float) -> str:
+    """Format an inline activity log summary for embedding in the response."""
+    if not tool_events:
+        return f"\n\n---\n**Agent Activity** | {elapsed:.1f}s | no tool calls"
+
+    lines = ["\n\n---\n**Agent Activity**"]
+    for ev in tool_events:
+        tool_name = ev.get("tool", "unknown")
+        tool_input = ev.get("input", "")
+        # Trim input to keep it readable
+        if len(tool_input) > 80:
+            tool_input = tool_input[:77] + "..."
+        lines.append(f"- `{tool_name}` {tool_input}")
+    lines.append(f"\n{len(tool_events)} tool calls | {elapsed:.1f}s elapsed")
+    return "\n".join(lines)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: create agents. Shutdown: close MCP connections."""
@@ -448,11 +465,10 @@ async def openai_chat_completions(body: ChatCompletionRequest):
                     req_id, model, f"\n\nError: {result_holder['error']}"
                 )
 
-            # Append log link at end of response
-            log_url = f"/logs/{req_id}"
-            yield _openai_chunk(
-                req_id, model, f"\n\n---\n[Agent activity log]({log_url})"
-            )
+            # Append inline activity log at end of response
+            elapsed = round(time.time() - start_time, 2)
+            inline_log = _format_inline_log(result_holder["tool_events"], elapsed)
+            yield _openai_chunk(req_id, model, inline_log)
 
             yield _openai_chunk(req_id, model, "", finish=True)
             yield "data: [DONE]\n\n"
@@ -502,8 +518,9 @@ async def openai_chat_completions(body: ChatCompletionRequest):
             content={"error": {"message": str(exc), "type": "server_error"}},
         )
 
-    log_url = f"/logs/{req_id}"
-    answer_with_log = f"{answer}\n\n---\n[Agent activity log]({log_url})"
+    elapsed = round(time.time() - start_time, 2)
+    inline_log = _format_inline_log(captured_tool_events, elapsed)
+    answer_with_log = f"{answer}{inline_log}"
 
     _store_log(
         req_id,
