@@ -33,6 +33,9 @@ def _full_env(**overrides):
 # npm: @brave/brave-search-mcp-server  (MIT, brave/brave-search-mcp-server)
 # Tools: brave_web_search, brave_local_search, brave_image_search,
 #   brave_video_search, brave_news_search, brave_summarizer
+# Increase startup_timeout for slow npx/uvx downloads on staging VMs.
+_MCP_STARTUP_TIMEOUT = int(os.environ.get("MCP_STARTUP_TIMEOUT", "120"))
+
 brave_mcp = MCPClient(
     lambda: stdio_client(
         StdioServerParameters(
@@ -40,7 +43,8 @@ brave_mcp = MCPClient(
             args=["-y", "@brave/brave-search-mcp-server"],
             env=_full_env(BRAVE_API_KEY=os.environ.get("BRAVE_API_KEY", "")),
         )
-    )
+    ),
+    startup_timeout=_MCP_STARTUP_TIMEOUT,
 )
 
 # ── Firecrawl MCP ────────────────────────────────────────────────────
@@ -54,7 +58,8 @@ firecrawl_mcp = MCPClient(
             args=["-y", "firecrawl-mcp"],
             env=_full_env(FIRECRAWL_API_KEY=os.environ.get("FIRECRAWL_API_KEY", "")),
         )
-    )
+    ),
+    startup_timeout=_MCP_STARTUP_TIMEOUT,
 )
 
 # ── Exa MCP ──────────────────────────────────────────────────────────
@@ -77,7 +82,8 @@ exa_mcp = MCPClient(
             ],
             env=_full_env(EXA_API_KEY=os.environ.get("EXA_API_KEY", "")),
         )
-    )
+    ),
+    startup_timeout=_MCP_STARTUP_TIMEOUT,
 )
 
 # ── Kagi MCP ─────────────────────────────────────────────────────────
@@ -91,7 +97,8 @@ kagi_mcp = MCPClient(
             args=["kagimcp"],
             env=_full_env(KAGI_API_KEY=os.environ.get("KAGI_API_KEY", "")),
         )
-    )
+    ),
+    startup_timeout=_MCP_STARTUP_TIMEOUT,
 )
 
 # ── Registry mapping ─────────────────────────────────────────────────
