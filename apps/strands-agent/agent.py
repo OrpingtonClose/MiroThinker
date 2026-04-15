@@ -141,6 +141,14 @@ class StreamCapture:
             self._queue = None
 
     def __call__(self, **kwargs):
+        # Only accumulate data when a consumer is actively capturing
+        # (i.e. activate() has been called).  This prevents unbounded
+        # memory growth from /query endpoints that never activate.
+        with self._lock:
+            active = self._queue is not None
+        if not active:
+            return
+
         # Capture streaming text tokens (both regular data and reasoning text)
         data = kwargs.get("data", "")
         reasoning = kwargs.get("reasoningText", "")
