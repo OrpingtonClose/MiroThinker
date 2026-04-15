@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 VENICE_API_BASE = os.environ.get("VENICE_API_BASE", "https://api.venice.ai/api/v1")
-VENICE_MODEL = os.environ.get("VENICE_MODEL", "zai-org-glm-4.7")
+VENICE_MODEL = os.environ.get("VENICE_MODEL", "olafangensan-glm-4.7-flash-heretic")
 
 
 def build_model():
@@ -40,6 +40,9 @@ def build_model():
         },
         model_id=VENICE_MODEL,
         params={
-            "extra_body": {"venice_parameters": {"include_venice_system_prompt": False}}
+            "extra_body": {
+                "venice_parameters": {"include_venice_system_prompt": False},
+                "reasoning": {"effort": "high"},
+            }
         },
     )

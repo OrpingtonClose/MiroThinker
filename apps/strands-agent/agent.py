@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import sys
+import threading
 import time
 
 from dotenv import load_dotenv
@@ -105,9 +107,71 @@ def budget_callback(**kwargs) -> None:
         )
 
 
+class StreamCapture:
+    """Thread-safe callback that captures streaming tokens to a queue.
+
+    Activate before a request to start capturing; deactivate after.
+    When no queue is active, tokens are silently dropped (the
+    ``PrintingCallbackHandler`` still prints them to stdout).
+    """
+
+    def __init__(self):
+        self._queue: queue.Queue | None = None
+        self._lock = threading.Lock()
+        self.tool_events: list[dict] = []
+        self._seen_tool_ids: set[str] = set()
+        self.all_text: list[str] = []
+
+    def activate(self) -> queue.Queue:
+        """Start capturing. Returns queue the caller reads from."""
+        with self._lock:
+            q: queue.Queue = queue.Queue()
+            self._queue = q
+            self.tool_events.clear()
+            self._seen_tool_ids.clear()
+            self.all_text.clear()
+            return q
+
+    def deactivate(self):
+        """Stop capturing and send sentinel so readers know we're done."""
+        with self._lock:
+            if self._queue is not None:
+                self._queue.put(None)
+            self._queue = None
+
+    def __call__(self, **kwargs):
+        # Capture streaming text tokens
+        data = kwargs.get("data", "")
+        if data and isinstance(data, str):
+            self.all_text.append(data)
+            with self._lock:
+                if self._queue is not None:
+                    self._queue.put(("text", data))
+
+        # Capture tool invocations (deduplicated by toolUseId)
+        tool_use = kwargs.get("current_tool_use")
+        if tool_use and tool_use.get("name"):
+            tid = tool_use.get("toolUseId", "")
+            if tid and tid not in self._seen_tool_ids:
+                self._seen_tool_ids.add(tid)
+                event = {
+                    "tool": tool_use["name"],
+                    "input": str(tool_use.get("input", {}))[:500],
+                    "time": time.time(),
+                }
+                self.tool_events.append(event)
+                with self._lock:
+                    if self._queue is not None:
+                        self._queue.put(("tool", event))
+
+
+# Global stream-capture instance shared by all agents
+stream_capture = StreamCapture()
+
+
 def _build_callback_handler():
-    """Build a composite callback handler: printing + budget guardrail."""
-    return CompositeCallbackHandler(PrintingCallbackHandler(), budget_callback)
+    """Build a composite callback handler: streaming capture + budget guardrail."""
+    return CompositeCallbackHandler(stream_capture, budget_callback)
 
 
 # ── OpenTelemetry setup ──────────────────────────────────────────────
