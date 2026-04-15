@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import sys
+import threading
 import time
 
 from dotenv import load_dotenv
@@ -48,6 +50,18 @@ _tool_call_count = 0
 _seen_tool_use_ids: set[str] = set()
 _MAX_TOOL_CALLS = int(os.environ.get("MAX_TOOL_CALLS", "200"))
 _SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "3600"))
+
+
+def reset_budget() -> None:
+    """Reset per-request budget counters.
+
+    Call this before each HTTP request so that budget globals don't
+    accumulate across requests in a long-running server process.
+    """
+    global _session_start, _tool_call_count, _seen_tool_use_ids
+    _session_start = time.time()
+    _tool_call_count = 0
+    _seen_tool_use_ids = set()
 
 
 def budget_callback(**kwargs) -> None:
@@ -93,9 +107,104 @@ def budget_callback(**kwargs) -> None:
         )
 
 
+class StreamCapture:
+    """Thread-safe callback that captures streaming tokens to a queue.
+
+    Activate before a request to start capturing; deactivate after.
+    When no queue is active, tokens are silently dropped.
+    ``PrintingCallbackHandler`` is included separately in the composite
+    handler so REPL users still see real-time stdout output.
+    """
+
+    def __init__(self):
+        self._queue: queue.Queue | None = None
+        self._lock = threading.Lock()
+        self.tool_events: list[dict] = []
+        self._seen_tool_ids: set[str] = set()
+        self.all_text: list[str] = []
+        self.response_text: list[str] = []
+        self.reasoning_text: list[str] = []
+
+    def activate(self) -> queue.Queue:
+        """Start capturing. Returns queue the caller reads from."""
+        with self._lock:
+            q: queue.Queue = queue.Queue()
+            self._queue = q
+            self.tool_events.clear()
+            self._seen_tool_ids.clear()
+            self.all_text.clear()
+            self.response_text.clear()
+            self.reasoning_text.clear()
+            return q
+
+    def deactivate(self):
+        """Stop capturing and send sentinel so readers know we're done."""
+        with self._lock:
+            if self._queue is not None:
+                self._queue.put(None)
+            self._queue = None
+
+    def __call__(self, **kwargs):
+        # Only accumulate data when a consumer is actively capturing
+        # (i.e. activate() has been called).  This prevents unbounded
+        # memory growth from /query endpoints that never activate.
+        with self._lock:
+            active = self._queue is not None
+        if not active:
+            return
+
+        # Capture streaming text tokens (both regular data and reasoning text)
+        data = kwargs.get("data", "")
+        reasoning = kwargs.get("reasoningText", "")
+
+        # Track reasoning and response text separately.
+        # all_text = everything (for logging); response_text = data only (for answer fallback)
+        if reasoning and isinstance(reasoning, str):
+            self.all_text.append(reasoning)
+            self.reasoning_text.append(reasoning)
+            with self._lock:
+                if self._queue is not None:
+                    self._queue.put(("thinking", reasoning))
+
+        if data and isinstance(data, str):
+            self.all_text.append(data)
+            self.response_text.append(data)
+            with self._lock:
+                if self._queue is not None:
+                    self._queue.put(("text", data))
+
+        # Capture tool invocations (deduplicated by toolUseId)
+        # Tools can come via either 'current_tool_use' or 'event.contentBlockStart'
+        tool_use = kwargs.get("current_tool_use")
+        if not tool_use or not tool_use.get("name"):
+            tool_use = (
+                kwargs.get("event", {})
+                .get("contentBlockStart", {})
+                .get("start", {})
+                .get("toolUse")
+            )
+        if tool_use and tool_use.get("name"):
+            tid = tool_use.get("toolUseId", "")
+            if tid and tid not in self._seen_tool_ids:
+                self._seen_tool_ids.add(tid)
+                event = {
+                    "tool": tool_use["name"],
+                    "input": str(tool_use.get("input", {}))[:500],
+                    "time": time.time(),
+                }
+                self.tool_events.append(event)
+                with self._lock:
+                    if self._queue is not None:
+                        self._queue.put(("tool", event))
+
+
+# Global stream-capture instance shared by all agents
+stream_capture = StreamCapture()
+
+
 def _build_callback_handler():
-    """Build a composite callback handler: printing + budget guardrail."""
-    return CompositeCallbackHandler(PrintingCallbackHandler(), budget_callback)
+    """Build a composite callback handler: printing + streaming capture + budget guardrail."""
+    return CompositeCallbackHandler(PrintingCallbackHandler(), stream_capture, budget_callback)
 
 
 # ── OpenTelemetry setup ──────────────────────────────────────────────
@@ -157,21 +266,28 @@ def _enter_mcp_clients(mcp_clients):
     return tool_list
 
 
-def create_single_agent():
+def create_single_agent(tool_list=None, mcp_clients=None):
     """Create a single-agent setup with all tools directly available.
 
     Use this for simple interactive sessions where one agent handles
     both search and synthesis.
+
+    Args:
+        tool_list: Pre-built list of MCP tools.  When *None* the
+            function enters its own MCP clients (REPL use-case).
+        mcp_clients: MCP clients that were entered to produce
+            *tool_list*.  Returned as-is for the caller to manage.
     """
     model = build_model()
-    mcp_clients = get_all_mcp_clients()
+    owns_clients = tool_list is None
+    if owns_clients:
+        mcp_clients = get_all_mcp_clients()
+        tool_list = _enter_mcp_clients(mcp_clients)
 
     conversation_manager = SlidingWindowConversationManager(
         window_size=20,
         should_truncate_results=True,
     )
-
-    tool_list = _enter_mcp_clients(mcp_clients)
 
     agent = Agent(
         model=model,
@@ -180,10 +296,10 @@ def create_single_agent():
         conversation_manager=conversation_manager,
         callback_handler=_build_callback_handler(),
     )
-    return agent, mcp_clients
+    return agent, mcp_clients or []
 
 
-def create_multi_agent():
+def create_multi_agent(tool_list=None, mcp_clients=None):
     """Create a planner + researcher multi-agent setup.
 
     The researcher agent has direct access to all MCP tools and handles
@@ -191,18 +307,25 @@ def create_multi_agent():
     via the agent-as-tool pattern and handles strategic decomposition
     and synthesis.
 
+    Args:
+        tool_list: Pre-built list of MCP tools.  When *None* the
+            function enters its own MCP clients (REPL use-case).
+        mcp_clients: MCP clients that were entered to produce
+            *tool_list*.  Returned as-is for the caller to manage.
+
     Returns:
-        Tuple of (planner_agent, mcp_clients).
+        Tuple of (planner_agent, researcher_agent, mcp_clients).
     """
     model = build_model()
-    mcp_clients = get_all_mcp_clients()
+    owns_clients = tool_list is None
+    if owns_clients:
+        mcp_clients = get_all_mcp_clients()
+        tool_list = _enter_mcp_clients(mcp_clients)
 
     conversation_manager = SlidingWindowConversationManager(
         window_size=20,
         should_truncate_results=True,
     )
-
-    tool_list = _enter_mcp_clients(mcp_clients)
 
     # Researcher: tool-capable agent that does the actual searching
     researcher = Agent(
@@ -233,7 +356,7 @@ def create_multi_agent():
         conversation_manager=conversation_manager,
         callback_handler=_build_callback_handler(),
     )
-    return planner, mcp_clients
+    return planner, researcher, mcp_clients or []
 
 
 def _cleanup_mcp(mcp_clients):
@@ -260,7 +383,7 @@ def main():
 
     if multi_agent:
         print("Venice GLM-4.7 Uncensored Research Agent (Strands — Multi-Agent)")
-        agent, mcp_clients = create_multi_agent()
+        agent, _researcher, mcp_clients = create_multi_agent()
     else:
         print("Venice GLM-4.7 Uncensored Research Agent (Strands)")
         agent, mcp_clients = create_single_agent()
