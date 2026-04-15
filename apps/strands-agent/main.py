@@ -135,8 +135,13 @@ async def list_tools():
     return {
         "count": len(tools),
         "tools": [
-            {"name": t.get("name", "unknown"), "description": t.get("description", "")}
-            for t in tools
+            {
+                "name": name,
+                "description": spec.get("description", "")
+                if isinstance(spec, dict)
+                else "",
+            }
+            for name, spec in tools.items()
         ],
     }
 

@@ -14,6 +14,7 @@ Reference: apps/adk-agent/tools/mcp_tools.py lines 74-138.
 import os
 
 from mcp import StdioServerParameters
+from mcp.client.stdio import stdio_client
 from strands.tools.mcp import MCPClient
 
 
@@ -33,10 +34,12 @@ def _full_env(**overrides):
 # Tools: brave_web_search, brave_local_search, brave_image_search,
 #   brave_video_search, brave_news_search, brave_summarizer
 brave_mcp = MCPClient(
-    lambda: StdioServerParameters(
-        command="npx",
-        args=["-y", "@brave/brave-search-mcp-server"],
-        env=_full_env(BRAVE_API_KEY=os.environ.get("BRAVE_API_KEY", "")),
+    lambda: stdio_client(
+        StdioServerParameters(
+            command="npx",
+            args=["-y", "@brave/brave-search-mcp-server"],
+            env=_full_env(BRAVE_API_KEY=os.environ.get("BRAVE_API_KEY", "")),
+        )
     )
 )
 
@@ -45,10 +48,12 @@ brave_mcp = MCPClient(
 # Tools: firecrawl_scrape, firecrawl_crawl, firecrawl_map,
 #   firecrawl_search, firecrawl_extract
 firecrawl_mcp = MCPClient(
-    lambda: StdioServerParameters(
-        command="npx",
-        args=["-y", "firecrawl-mcp"],
-        env=_full_env(FIRECRAWL_API_KEY=os.environ.get("FIRECRAWL_API_KEY", "")),
+    lambda: stdio_client(
+        StdioServerParameters(
+            command="npx",
+            args=["-y", "firecrawl-mcp"],
+            env=_full_env(FIRECRAWL_API_KEY=os.environ.get("FIRECRAWL_API_KEY", "")),
+        )
     )
 )
 
@@ -58,18 +63,20 @@ firecrawl_mcp = MCPClient(
 #   get_code_context_exa
 # Requires: npm install -g exa-mcp-server
 exa_mcp = MCPClient(
-    lambda: StdioServerParameters(
-        command="node",
-        args=[
-            "-e",
-            # Bootstrap Smithery entry-point with config that enables
-            # ALL non-deprecated Exa tools.  Smithery reads config from
-            # process.argv.slice(2) as key=value pairs.
-            "process.argv[2]='enabledTools=web_search_exa,web_search_advanced_exa,crawling_exa,get_code_context_exa';"
-            "const r=require('child_process').execSync('npm root -g',{encoding:'utf8'}).trim();"
-            "require(r+'/exa-mcp-server/.smithery/stdio/index.cjs');",
-        ],
-        env=_full_env(EXA_API_KEY=os.environ.get("EXA_API_KEY", "")),
+    lambda: stdio_client(
+        StdioServerParameters(
+            command="node",
+            args=[
+                "-e",
+                # Bootstrap Smithery entry-point with config that enables
+                # ALL non-deprecated Exa tools.  Smithery reads config from
+                # process.argv.slice(2) as key=value pairs.
+                "process.argv[2]='enabledTools=web_search_exa,web_search_advanced_exa,crawling_exa,get_code_context_exa';"
+                "const r=require('child_process').execSync('npm root -g',{encoding:'utf8'}).trim();"
+                "require(r+'/exa-mcp-server/.smithery/stdio/index.cjs');",
+            ],
+            env=_full_env(EXA_API_KEY=os.environ.get("EXA_API_KEY", "")),
+        )
     )
 )
 
@@ -78,10 +85,12 @@ exa_mcp = MCPClient(
 # Tools: kagi_search, kagi_summarize, kagi_fastgpt, kagi_enrich_web,
 #   kagi_enrich_news
 kagi_mcp = MCPClient(
-    lambda: StdioServerParameters(
-        command="uvx",
-        args=["kagimcp"],
-        env=_full_env(KAGI_API_KEY=os.environ.get("KAGI_API_KEY", "")),
+    lambda: stdio_client(
+        StdioServerParameters(
+            command="uvx",
+            args=["kagimcp"],
+            env=_full_env(KAGI_API_KEY=os.environ.get("KAGI_API_KEY", "")),
+        )
     )
 )
 
