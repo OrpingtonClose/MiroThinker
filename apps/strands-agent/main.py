@@ -24,7 +24,6 @@ import queue
 import threading
 import time
 import uuid
-from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -34,6 +33,23 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 load_dotenv()
+
+# ── Observability: import from deep-search-portal when available ──────
+# The strands_observability module lives in deep-search-portal/proxies/
+# and is added to PYTHONPATH by scripts/start_strands_agent.sh.
+# If unavailable, we skip external observability (metrics still logged locally).
+try:
+    from strands_observability import (
+        extract_usage,
+        format_inline_log,
+        get_request_log,
+        setup_strands_sdk_logging,
+        store_request_log,
+        write_metrics_jsonl,
+    )
+    _HAS_OBSERVABILITY = True
+except ImportError:
+    _HAS_OBSERVABILITY = False
 
 logger = logging.getLogger(__name__)
 
@@ -45,155 +61,65 @@ _mcp_clients: list = []
 _multi_researcher = None
 _agent_lock = threading.Lock()
 
-# ── Per-request activity logs (ring buffer of last 200) ──────────────
 
-_MAX_LOGS = 200
-_request_logs: OrderedDict[str, dict] = OrderedDict()
-
-
-def _store_log(req_id: str, entry: dict) -> None:
-    _request_logs[req_id] = entry
-    while len(_request_logs) > _MAX_LOGS:
-        _request_logs.popitem(last=False)
-
-
-_METRICS_LOG_PATH = "/var/log/strands-metrics.jsonl"
-
+# ── Observability wrappers ────────────────────────────────────────────
+# When strands_observability (from deep-search-portal) is available,
+# delegate to it.  Otherwise fall back to minimal local-only logging.
 
 def _write_metrics_jsonl(req_id: str, model: str, query: str, elapsed: float,
                          metrics_summary: dict | None, tool_events: list[dict]) -> None:
-    """Append a single JSON line to the metrics log file."""
-    # Strip bulky fields from metrics to keep JSONL compact.
-    # The 'traces' field contains full model outputs (can be 100s of KB).
-    trimmed_metrics = None
-    if metrics_summary:
-        trimmed_metrics = {k: v for k, v in metrics_summary.items() if k != "traces"}
-        # Also trim agent_invocations to just usage (drop per-cycle message bodies)
-        if "agent_invocations" in trimmed_metrics:
-            trimmed_invocations = []
-            for inv in trimmed_metrics["agent_invocations"]:
-                trimmed_invocations.append({
-                    "usage": inv.get("usage"),
-                    "cycles": [
-                        {"event_loop_cycle_id": c.get("event_loop_cycle_id"), "usage": c.get("usage")}
-                        for c in inv.get("cycles", [])
-                    ],
-                })
-            trimmed_metrics["agent_invocations"] = trimmed_invocations
-
-    record = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "request_id": req_id,
-        "model": model,
-        "query": query[:500] if query else "",
-        "elapsed_s": elapsed,
-        "tool_events": [
-            {"tool": e.get("tool", ""), "input": e.get("input", "")[:200]}
-            for e in tool_events
-        ],
-        "metrics": trimmed_metrics,
-    }
-    try:
-        with open(_METRICS_LOG_PATH, "a") as f:
-            f.write(json.dumps(record, default=str) + "\n")
-    except Exception:
-        logger.warning("Failed to write metrics JSONL", exc_info=True)
-
-
-def _format_inline_log(tool_events: list[dict], elapsed: float, query: str = "", model: str = "", reasoning: str = "", metrics: dict | None = None) -> str:
-    """Format a detailed activity log as collapsible sections.
-
-    Renders:
-    1. Thinking — the model's full reasoning chain (inline, not collapsible)
-    2. Activity Log — tool execution timeline + metrics (collapsible)
-    """
-    from datetime import datetime, timezone
-
-    parts = []
-
-    # ── Thinking section (inline, not collapsible) ──
-    if reasoning and reasoning.strip():
-        parts.append(
-            f"\n\n---\n**💭 Thinking**\n\n{reasoning.strip()}"
+    """Write per-request metrics to JSONL.  Delegates to deep-search-portal module."""
+    if _HAS_OBSERVABILITY:
+        write_metrics_jsonl(req_id, model, query, elapsed, metrics_summary, tool_events)
+    else:
+        # Minimal fallback: just log a summary line
+        logger.info(
+            "[metrics] %s model=%s elapsed=%.1fs tools=%d",
+            req_id, model, elapsed, len(tool_events),
         )
 
-    # ── Activity log section ──
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    log_lines = [
-        f"=== Strands Agent Activity Log ===",
-        f"Timestamp : {ts}",
-        f"Model     : {model or 'unknown'}",
-        f"Elapsed   : {elapsed:.1f}s",
-        f"Tool calls: {len(tool_events)}",
-        f"Query     : {query[:200] if query else 'N/A'}",
-    ]
 
-    # ── Metrics from AgentResult ──
-    if metrics:
-        log_lines.append("")
-        log_lines.append("--- Performance Metrics ---")
-        usage = metrics.get("accumulated_usage") or {}
-        if usage:
-            log_lines.append(f"  Input tokens : {usage.get('inputTokens', 'N/A')}")
-            log_lines.append(f"  Output tokens: {usage.get('outputTokens', 'N/A')}")
-            log_lines.append(f"  Total tokens : {usage.get('totalTokens', 'N/A')}")
-            if usage.get("cacheReadInputTokens"):
-                log_lines.append(f"  Cache read   : {usage['cacheReadInputTokens']}")
-            if usage.get("cacheWriteInputTokens"):
-                log_lines.append(f"  Cache write  : {usage['cacheWriteInputTokens']}")
-        latency = metrics.get("accumulated_metrics") or {}
-        if latency.get("latencyMs"):
-            log_lines.append(f"  Model latency: {latency['latencyMs']}ms")
-        cycles = metrics.get("total_cycles")
-        if cycles is not None:
-            log_lines.append(f"  Agent cycles : {cycles}")
-        duration = metrics.get("total_duration")
-        if duration is not None:
-            log_lines.append(f"  Total duration: {duration:.2f}s")
+def _format_inline_log(tool_events: list[dict], elapsed: float, query: str = "",
+                       model: str = "", reasoning: str = "",
+                       metrics: dict | None = None) -> str:
+    """Format activity log for inline display.  Delegates to deep-search-portal module."""
+    if _HAS_OBSERVABILITY:
+        return format_inline_log(
+            tool_events, elapsed,
+            query=query, model=model, reasoning=reasoning, metrics=metrics,
+        )
+    # Minimal fallback: just a tool count summary
+    tool_names = [e.get("tool", "?") for e in tool_events]
+    summary = ", ".join(tool_names) if tool_names else "(no tools)"
+    return f"\n\n---\n*{len(tool_events)} tool calls in {elapsed:.1f}s: {summary}*"
 
-        # Tool-level metrics from AgentResult
-        tool_usage = metrics.get("tool_usage") or {}
-        if tool_usage:
-            log_lines.append("")
-            log_lines.append("--- Tool Metrics ---")
-            for tname, tstats in tool_usage.items():
-                calls = tstats.get("total_calls", "?")
-                success = tstats.get("successful_calls", "?")
-                errors = tstats.get("errors", "?")
-                avg_time = tstats.get("average_execution_time", 0)
-                log_lines.append(
-                    f"  {tname}: {calls} calls, {success} ok, {errors} err, avg {avg_time:.2f}s"
-                )
 
-    log_lines.append("")
-    log_lines.append("--- Tool Execution Timeline ---")
+def _store_log(req_id: str, entry: dict) -> None:
+    """Store per-request activity log.  Delegates to deep-search-portal module."""
+    if _HAS_OBSERVABILITY:
+        store_request_log(req_id, entry)
 
-    if not tool_events:
-        log_lines.append("  (no tool calls)")
-    else:
-        start_time = tool_events[0].get("time", 0) if tool_events else 0
-        for i, ev in enumerate(tool_events, 1):
-            tool_name = ev.get("tool", "unknown")
-            tool_input = ev.get("input", "")
-            t = ev.get("time", 0)
-            offset = f"+{t - start_time:.1f}s" if start_time else ""
-            log_lines.append(f"  [{i}] {offset:>8s}  {tool_name}")
-            if tool_input and tool_input != "{}":
-                for line in tool_input[:300].split("\n"):
-                    log_lines.append(f"              {line}")
-                if len(tool_input) > 300:
-                    log_lines.append(f"              ... (truncated)")
 
-    log_lines.append("")
-    log_lines.append("=== End of Log ===")
-    log_content = "\n".join(log_lines)
+def _get_log(req_id: str) -> dict | None:
+    """Retrieve a stored request log."""
+    if _HAS_OBSERVABILITY:
+        return get_request_log(req_id)
+    return None
 
-    parts.append(
-        f"\n\n<details>\n<summary>📄 agent-activity-log.txt ({len(tool_events)} tools, {elapsed:.1f}s)</summary>\n\n"
-        f"```\n{log_content}\n```\n\n</details>"
-    )
 
-    return "".join(parts)
+def _extract_usage(metrics_summary: dict | None) -> dict[str, int]:
+    """Extract OpenAI-compatible usage dict from metrics."""
+    if _HAS_OBSERVABILITY:
+        return extract_usage(metrics_summary)
+    usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    if metrics_summary and metrics_summary.get("accumulated_usage"):
+        u = metrics_summary["accumulated_usage"]
+        usage = {
+            "prompt_tokens": u.get("inputTokens", 0),
+            "completion_tokens": u.get("outputTokens", 0),
+            "total_tokens": u.get("totalTokens", 0),
+        }
+    return usage
 
 
 @asynccontextmanager
@@ -215,28 +141,11 @@ async def lifespan(app: FastAPI):
     )
 
     # ── Structured JSON logging for Strands SDK internals ──
-    _strands_log_path = "/var/log/strands-agent-debug.jsonl"
-    try:
-        class _JsonFormatter(logging.Formatter):
-            def format(self, record):
-                return json.dumps({
-                    "ts": self.formatTime(record),
-                    "level": record.levelname,
-                    "logger": record.name,
-                    "msg": record.getMessage(),
-                }, default=str)
-
-        _fh = logging.FileHandler(_strands_log_path)
-        _fh.setFormatter(_JsonFormatter())
-        _fh.setLevel(logging.DEBUG)
-        # Capture detailed Strands SDK logs
-        for _mod in ("strands", "strands.tools", "strands.event_loop", "strands.models"):
-            _logger = logging.getLogger(_mod)
-            _logger.setLevel(logging.DEBUG)
-            _logger.addHandler(_fh)
-        logger.info("Strands SDK debug logging → %s", _strands_log_path)
-    except Exception:
-        logger.warning("Could not set up Strands JSON logging", exc_info=True)
+    # Delegates to deep-search-portal's strands_observability module when available.
+    if _HAS_OBSERVABILITY:
+        setup_strands_sdk_logging()
+    else:
+        logger.info("strands_observability not available — SDK debug logging disabled")
 
     _setup_otel()
 
@@ -744,14 +653,7 @@ async def openai_chat_completions(body: ChatCompletionRequest):
     )
 
     # Extract token usage from metrics if available
-    usage_data = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    if metrics and metrics.get("accumulated_usage"):
-        u = metrics["accumulated_usage"]
-        usage_data = {
-            "prompt_tokens": u.get("inputTokens", 0),
-            "completion_tokens": u.get("outputTokens", 0),
-            "total_tokens": u.get("totalTokens", 0),
-        }
+    usage_data = _extract_usage(metrics)
 
     return JSONResponse(
         {
@@ -775,9 +677,9 @@ async def openai_chat_completions(body: ChatCompletionRequest):
 
 
 @app.get("/logs/{request_id}", response_class=HTMLResponse)
-async def get_request_log(request_id: str):
+async def get_request_log_page(request_id: str):
     """Human-readable HTML page showing what the agent did during a request."""
-    entry = _request_logs.get(request_id)
+    entry = _get_log(request_id)
     if entry is None:
         raise HTTPException(status_code=404, detail="Log not found")
 
