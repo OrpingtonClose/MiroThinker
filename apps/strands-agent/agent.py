@@ -111,8 +111,9 @@ class StreamCapture:
     """Thread-safe callback that captures streaming tokens to a queue.
 
     Activate before a request to start capturing; deactivate after.
-    When no queue is active, tokens are silently dropped (the
-    ``PrintingCallbackHandler`` still prints them to stdout).
+    When no queue is active, tokens are silently dropped.
+    ``PrintingCallbackHandler`` is included separately in the composite
+    handler so REPL users still see real-time stdout output.
     """
 
     def __init__(self):
@@ -170,8 +171,8 @@ stream_capture = StreamCapture()
 
 
 def _build_callback_handler():
-    """Build a composite callback handler: streaming capture + budget guardrail."""
-    return CompositeCallbackHandler(stream_capture, budget_callback)
+    """Build a composite callback handler: printing + streaming capture + budget guardrail."""
+    return CompositeCallbackHandler(PrintingCallbackHandler(), stream_capture, budget_callback)
 
 
 # ── OpenTelemetry setup ──────────────────────────────────────────────

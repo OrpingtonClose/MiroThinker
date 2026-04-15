@@ -282,25 +282,30 @@ async def openai_models():
     )
 
 
-def _run_agent(model: str, user_message: str) -> str:
-    """Dispatch to the correct agent based on model id. Runs under lock."""
+def _dispatch_agent(model: str, user_message: str) -> str:
+    """Run the appropriate agent.  **Caller must already hold _agent_lock**."""
     from agent import reset_budget
 
+    if model == _MODEL_MULTI:
+        if _multi_agent is None:
+            raise RuntimeError("Multi agent not initialised")
+        _multi_agent.messages.clear()
+        if _multi_researcher is not None:
+            _multi_researcher.messages.clear()
+        reset_budget()
+        return str(_multi_agent(user_message))
+    elif _single_agent is not None:
+        _single_agent.messages.clear()
+        reset_budget()
+        return str(_single_agent(user_message))
+    else:
+        raise RuntimeError("No agent initialised")
+
+
+def _run_agent(model: str, user_message: str) -> str:
+    """Dispatch to the correct agent under lock (convenience wrapper)."""
     with _agent_lock:
-        if model == _MODEL_MULTI:
-            if _multi_agent is None:
-                raise RuntimeError("Multi agent not initialised")
-            _multi_agent.messages.clear()
-            if _multi_researcher is not None:
-                _multi_researcher.messages.clear()
-            reset_budget()
-            return str(_multi_agent(user_message))
-        elif _single_agent is not None:
-            _single_agent.messages.clear()
-            reset_budget()
-            return str(_single_agent(user_message))
-        else:
-            raise RuntimeError("No agent initialised")
+        return _dispatch_agent(model, user_message)
 
 
 def _openai_chunk(req_id: str, model: str, content: str, finish: bool = False) -> str:
@@ -363,26 +368,42 @@ async def openai_chat_completions(body: ChatCompletionRequest):
 
     if stream:
         # ── Streaming mode ───────────────────────────────────────
-        # Run agent in background thread; stream tokens via SSE as
-        # they arrive from the model.  Heartbeat comments keep the
-        # connection alive during long tool calls.
-        token_queue = stream_capture.activate()
-        result_holder: dict = {"text": None, "error": None}
+        # activate() and deactivate() happen inside _agent_lock so
+        # no concurrent request can clear the capture state.
+        # A threading.Event signals the SSE generator once the queue
+        # is ready (i.e. the lock has been acquired).
+        result_holder: dict = {
+            "text": None, "error": None,
+            "tool_events": [], "streamed_text": "",
+        }
+        queue_holder: dict = {"q": None}
+        queue_ready = threading.Event()
 
         def _agent_thread():
-            try:
-                result_holder["text"] = _run_agent(model, user_message)
-            except Exception as exc:
-                logger.exception("Agent error in streaming [%s]", req_id)
-                result_holder["error"] = str(exc)
-            finally:
-                stream_capture.deactivate()
+            with _agent_lock:
+                token_q = stream_capture.activate()
+                queue_holder["q"] = token_q
+                queue_ready.set()
+                try:
+                    result_holder["text"] = _dispatch_agent(model, user_message)
+                except Exception as exc:
+                    logger.exception("Agent error in streaming [%s]", req_id)
+                    result_holder["error"] = str(exc)
+                finally:
+                    # Snapshot captured data while still under lock
+                    result_holder["tool_events"] = list(stream_capture.tool_events)
+                    result_holder["streamed_text"] = "".join(stream_capture.all_text)
+                    stream_capture.deactivate()
 
         thread = threading.Thread(target=_agent_thread, daemon=True)
         thread.start()
 
         async def _generate_sse():
             loop = asyncio.get_event_loop()
+            # Wait until agent thread has acquired the lock and created the queue
+            await loop.run_in_executor(None, queue_ready.wait)
+            token_queue = queue_holder["q"]
+
             while True:
                 try:
                     item = await loop.run_in_executor(
@@ -405,7 +426,7 @@ async def openai_chat_completions(body: ChatCompletionRequest):
                     yield f": tool {data['tool']}\n\n"
 
             # If agent errored and produced no streamed text, send error
-            if result_holder["error"] and not stream_capture.all_text:
+            if result_holder["error"] and not result_holder["streamed_text"]:
                 yield _openai_chunk(
                     req_id, model, f"\n\nError: {result_holder['error']}"
                 )
@@ -419,7 +440,7 @@ async def openai_chat_completions(body: ChatCompletionRequest):
             yield _openai_chunk(req_id, model, "", finish=True)
             yield "data: [DONE]\n\n"
 
-            # Store activity log
+            # Store activity log (reads from snapshot, not live capture)
             _store_log(
                 req_id,
                 {
@@ -427,8 +448,8 @@ async def openai_chat_completions(body: ChatCompletionRequest):
                     "model": model,
                     "response": result_holder.get("text", ""),
                     "error": result_holder.get("error"),
-                    "tool_events": list(stream_capture.tool_events),
-                    "streamed_text": "".join(stream_capture.all_text),
+                    "tool_events": result_holder["tool_events"],
+                    "streamed_text": result_holder["streamed_text"],
                     "elapsed": round(time.time() - start_time, 2),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 },
@@ -437,18 +458,21 @@ async def openai_chat_completions(body: ChatCompletionRequest):
         return StreamingResponse(_generate_sse(), media_type="text/event-stream")
 
     # ── Non-streaming mode ───────────────────────────────────────
-    # Activate capture so we still get tool events for the log.
-    stream_capture.activate()
-    try:
-        answer = _run_agent(model, user_message)
-    except Exception as exc:
-        logger.exception("Agent error in /v1/chat/completions [%s]", req_id)
-        stream_capture.deactivate()
-        return JSONResponse(
-            status_code=500,
-            content={"error": {"message": str(exc), "type": "server_error"}},
-        )
-    finally:
+    # activate/deactivate + data snapshot all happen under _agent_lock.
+    with _agent_lock:
+        stream_capture.activate()
+        try:
+            answer = _dispatch_agent(model, user_message)
+        except Exception as exc:
+            logger.exception("Agent error in /v1/chat/completions [%s]", req_id)
+            stream_capture.deactivate()
+            return JSONResponse(
+                status_code=500,
+                content={"error": {"message": str(exc), "type": "server_error"}},
+            )
+        # Snapshot captured data while still under lock
+        captured_tool_events = list(stream_capture.tool_events)
+        captured_all_text = "".join(stream_capture.all_text)
         stream_capture.deactivate()
 
     log_url = f"/logs/{req_id}"
@@ -461,8 +485,8 @@ async def openai_chat_completions(body: ChatCompletionRequest):
             "model": model,
             "response": answer,
             "error": None,
-            "tool_events": list(stream_capture.tool_events),
-            "streamed_text": "".join(stream_capture.all_text),
+            "tool_events": captured_tool_events,
+            "streamed_text": captured_all_text,
             "elapsed": round(time.time() - start_time, 2),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         },
