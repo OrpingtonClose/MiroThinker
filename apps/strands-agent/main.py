@@ -57,24 +57,51 @@ def _store_log(req_id: str, entry: dict) -> None:
         _request_logs.popitem(last=False)
 
 
-def _format_inline_log(tool_events: list[dict], elapsed: float) -> str:
-    """Format an inline activity log summary for embedding in the response."""
-    if not tool_events:
-        return f"\n\n---\n**Agent Activity** | {elapsed:.1f}s | no tool calls"
+def _format_inline_log(tool_events: list[dict], elapsed: float, query: str = "", model: str = "") -> str:
+    """Format a detailed activity log as a collapsible code block.
 
-    lines = ["\n\n---\n**Agent Activity**"]
-    for ev in tool_events:
-        tool_name = ev.get("tool", "unknown")
-        tool_input = ev.get("input", "")
-        # Trim input to keep it readable; skip empty/trivial inputs
-        if tool_input and tool_input != "{}":
-            if len(tool_input) > 80:
-                tool_input = tool_input[:77] + "..."
-            lines.append(f"- `{tool_name}` {tool_input}")
-        else:
-            lines.append(f"- `{tool_name}`")
-    lines.append(f"\n{len(tool_events)} tool calls | {elapsed:.1f}s elapsed")
-    return "\n".join(lines)
+    Renders as a clickable ``<details>`` section in LibreChat that expands
+    to show a full text-file-style log of the agent's activity.
+    """
+    from datetime import datetime, timezone
+
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    log_lines = [
+        f"=== Strands Agent Activity Log ===",
+        f"Timestamp : {ts}",
+        f"Model     : {model or 'unknown'}",
+        f"Elapsed   : {elapsed:.1f}s",
+        f"Tool calls: {len(tool_events)}",
+        f"Query     : {query[:200] if query else 'N/A'}",
+        f"",
+        f"--- Tool Execution Timeline ---",
+    ]
+
+    if not tool_events:
+        log_lines.append("  (no tool calls)")
+    else:
+        start_time = tool_events[0].get("time", 0) if tool_events else 0
+        for i, ev in enumerate(tool_events, 1):
+            tool_name = ev.get("tool", "unknown")
+            tool_input = ev.get("input", "")
+            t = ev.get("time", 0)
+            offset = f"+{t - start_time:.1f}s" if start_time else ""
+            log_lines.append(f"  [{i}] {offset:>8s}  {tool_name}")
+            if tool_input and tool_input != "{}":
+                # Wrap long inputs
+                for line in tool_input[:300].split("\n"):
+                    log_lines.append(f"              {line}")
+                if len(tool_input) > 300:
+                    log_lines.append(f"              ... (truncated)")
+
+    log_lines.append("")
+    log_lines.append("=== End of Log ===")
+    log_content = "\n".join(log_lines)
+
+    return (
+        f"\n\n<details>\n<summary>📄 agent-activity-log.txt ({len(tool_events)} tools, {elapsed:.1f}s)</summary>\n\n"
+        f"```\n{log_content}\n```\n\n</details>"
+    )
 
 
 @asynccontextmanager
@@ -470,7 +497,7 @@ async def openai_chat_completions(body: ChatCompletionRequest):
 
             # Append inline activity log at end of response
             elapsed = round(time.time() - start_time, 2)
-            inline_log = _format_inline_log(result_holder["tool_events"], elapsed)
+            inline_log = _format_inline_log(result_holder["tool_events"], elapsed, query=user_message, model=model)
             yield _openai_chunk(req_id, model, inline_log)
 
             yield _openai_chunk(req_id, model, "", finish=True)
@@ -522,7 +549,7 @@ async def openai_chat_completions(body: ChatCompletionRequest):
         )
 
     elapsed = round(time.time() - start_time, 2)
-    inline_log = _format_inline_log(captured_tool_events, elapsed)
+    inline_log = _format_inline_log(captured_tool_events, elapsed, query=user_message, model=model)
     answer_with_log = f"{answer}{inline_log}"
 
     _store_log(
