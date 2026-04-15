@@ -122,10 +122,19 @@ async def list_tools():
 
 
 @app.post("/query", response_model=QueryResponse)
-async def query_single(req: QueryRequest):
-    """Send a query to the single-agent (all tools directly available)."""
+def query_single(req: QueryRequest):
+    """Send a query to the single-agent (all tools directly available).
+
+    Uses plain ``def`` so FastAPI runs it in a threadpool, avoiding
+    event-loop blocking from synchronous agent / MCP calls.
+    Conversation history is cleared before each call so requests
+    are truly single-turn and never leak context between callers.
+    """
     if _single_agent is None:
         raise HTTPException(status_code=503, detail="Single agent not initialised")
+
+    # Reset conversation so each HTTP request is independent
+    _single_agent.messages.clear()
 
     start = time.time()
     try:
@@ -143,10 +152,19 @@ async def query_single(req: QueryRequest):
 
 
 @app.post("/query/multi", response_model=QueryResponse)
-async def query_multi(req: QueryRequest):
-    """Send a query to the multi-agent (planner delegates to researcher)."""
+def query_multi(req: QueryRequest):
+    """Send a query to the multi-agent (planner delegates to researcher).
+
+    Uses plain ``def`` so FastAPI runs it in a threadpool, avoiding
+    event-loop blocking from synchronous agent / MCP calls.
+    Conversation history is cleared before each call so requests
+    are truly single-turn and never leak context between callers.
+    """
     if _multi_agent is None:
         raise HTTPException(status_code=503, detail="Multi agent not initialised")
+
+    # Reset conversation so each HTTP request is independent
+    _multi_agent.messages.clear()
 
     start = time.time()
     try:
