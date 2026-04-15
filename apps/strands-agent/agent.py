@@ -50,6 +50,18 @@ _MAX_TOOL_CALLS = int(os.environ.get("MAX_TOOL_CALLS", "200"))
 _SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "3600"))
 
 
+def reset_budget() -> None:
+    """Reset per-request budget counters.
+
+    Call this before each HTTP request so that budget globals don't
+    accumulate across requests in a long-running server process.
+    """
+    global _session_start, _tool_call_count, _seen_tool_use_ids
+    _session_start = time.time()
+    _tool_call_count = 0
+    _seen_tool_use_ids = set()
+
+
 def budget_callback(**kwargs) -> None:
     """Callback-handler guardrail that counts actual tool invocations.
 

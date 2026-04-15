@@ -32,8 +32,7 @@ _single_agent = None
 _multi_agent = None
 _mcp_clients: list = []
 _multi_researcher = None
-_single_agent_lock = threading.Lock()
-_multi_agent_lock = threading.Lock()
+_agent_lock = threading.Lock()
 
 
 @asynccontextmanager
@@ -155,9 +154,12 @@ def query_single(req: QueryRequest):
         raise HTTPException(status_code=503, detail="Single agent not initialised")
 
     start = time.time()
-    with _single_agent_lock:
-        # Reset conversation so each HTTP request is independent
+    with _agent_lock:
+        # Reset conversation + budget so each HTTP request is independent
+        from agent import reset_budget
+
         _single_agent.messages.clear()
+        reset_budget()
         try:
             response = _single_agent(req.query)
         except Exception as exc:
@@ -185,11 +187,14 @@ def query_multi(req: QueryRequest):
         raise HTTPException(status_code=503, detail="Multi agent not initialised")
 
     start = time.time()
-    with _multi_agent_lock:
-        # Reset conversation so each HTTP request is independent
+    with _agent_lock:
+        # Reset conversation + budget so each HTTP request is independent
+        from agent import reset_budget
+
         _multi_agent.messages.clear()
         if _multi_researcher is not None:
             _multi_researcher.messages.clear()
+        reset_budget()
         try:
             response = _multi_agent(req.query)
         except Exception as exc:
