@@ -265,7 +265,9 @@ def _run_agent(model: str, user_message: str) -> str:
     from agent import reset_budget
 
     with _agent_lock:
-        if model == _MODEL_MULTI and _multi_agent is not None:
+        if model == _MODEL_MULTI:
+            if _multi_agent is None:
+                raise RuntimeError("Multi agent not initialised")
             _multi_agent.messages.clear()
             if _multi_researcher is not None:
                 _multi_researcher.messages.clear()
