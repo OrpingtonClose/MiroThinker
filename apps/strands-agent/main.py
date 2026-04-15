@@ -469,22 +469,32 @@ async def openai_chat_completions(body: ChatCompletionRequest):
         return StreamingResponse(_generate_sse(), media_type="text/event-stream")
 
     # ── Non-streaming mode ───────────────────────────────────────
-    # activate/deactivate + data snapshot all happen under _agent_lock.
-    with _agent_lock:
-        stream_capture.activate()
-        try:
-            answer = _dispatch_agent(model, user_message)
-        except Exception as exc:
-            logger.exception("Agent error in /v1/chat/completions [%s]", req_id)
+    # Offload to a thread so the asyncio event loop stays responsive
+    # for health checks, SSE heartbeats, and new request acceptance.
+    def _sync_non_streaming():
+        with _agent_lock:
+            stream_capture.activate()
+            try:
+                answer = _dispatch_agent(model, user_message)
+            except Exception as exc:
+                logger.exception("Agent error in /v1/chat/completions [%s]", req_id)
+                stream_capture.deactivate()
+                raise
+            # Snapshot captured data while still under lock
+            captured_tool_events = list(stream_capture.tool_events)
+            captured_all_text = "".join(stream_capture.all_text)
             stream_capture.deactivate()
-            return JSONResponse(
-                status_code=500,
-                content={"error": {"message": str(exc), "type": "server_error"}},
-            )
-        # Snapshot captured data while still under lock
-        captured_tool_events = list(stream_capture.tool_events)
-        captured_all_text = "".join(stream_capture.all_text)
-        stream_capture.deactivate()
+        return answer, captured_tool_events, captured_all_text
+
+    try:
+        answer, captured_tool_events, captured_all_text = await asyncio.to_thread(
+            _sync_non_streaming
+        )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"message": str(exc), "type": "server_error"}},
+        )
 
     log_url = f"/logs/{req_id}"
     answer_with_log = f"{answer}\n\n---\n[Agent activity log]({log_url})"
