@@ -484,12 +484,12 @@ async def openai_chat_completions(body: ChatCompletionRequest):
                 answer = _dispatch_agent(model, user_message)
             except Exception as exc:
                 logger.exception("Agent error in /v1/chat/completions [%s]", req_id)
-                stream_capture.deactivate()
                 raise
-            # Snapshot captured data while still under lock
-            captured_tool_events = list(stream_capture.tool_events)
-            captured_all_text = "".join(stream_capture.all_text)
-            stream_capture.deactivate()
+            finally:
+                # Snapshot captured data while still under lock
+                captured_tool_events = list(stream_capture.tool_events)
+                captured_all_text = "".join(stream_capture.all_text)
+                stream_capture.deactivate()
         return answer, captured_tool_events, captured_all_text
 
     try:
