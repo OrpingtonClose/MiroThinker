@@ -63,6 +63,24 @@ _METRICS_LOG_PATH = "/var/log/strands-metrics.jsonl"
 def _write_metrics_jsonl(req_id: str, model: str, query: str, elapsed: float,
                          metrics_summary: dict | None, tool_events: list[dict]) -> None:
     """Append a single JSON line to the metrics log file."""
+    # Strip bulky fields from metrics to keep JSONL compact.
+    # The 'traces' field contains full model outputs (can be 100s of KB).
+    trimmed_metrics = None
+    if metrics_summary:
+        trimmed_metrics = {k: v for k, v in metrics_summary.items() if k != "traces"}
+        # Also trim agent_invocations to just usage (drop per-cycle message bodies)
+        if "agent_invocations" in trimmed_metrics:
+            trimmed_invocations = []
+            for inv in trimmed_metrics["agent_invocations"]:
+                trimmed_invocations.append({
+                    "usage": inv.get("usage"),
+                    "cycles": [
+                        {"event_loop_cycle_id": c.get("event_loop_cycle_id"), "usage": c.get("usage")}
+                        for c in inv.get("cycles", [])
+                    ],
+                })
+            trimmed_metrics["agent_invocations"] = trimmed_invocations
+
     record = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "request_id": req_id,
@@ -73,7 +91,7 @@ def _write_metrics_jsonl(req_id: str, model: str, query: str, elapsed: float,
             {"tool": e.get("tool", ""), "input": e.get("input", "")[:200]}
             for e in tool_events
         ],
-        "metrics": metrics_summary,
+        "metrics": trimmed_metrics,
     }
     try:
         with open(_METRICS_LOG_PATH, "a") as f:
