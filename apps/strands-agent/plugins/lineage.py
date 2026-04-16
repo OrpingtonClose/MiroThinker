@@ -75,6 +75,7 @@ class LineagePlugin(Plugin):
             type=node_type,
             content=content[:2000],  # cap content size
             source_tool=source_tool,
+            source_url=source_url,
             parent_id=self._last_node_by_agent.get(agent_name),
             agent_name=agent_name,
             timestamp=time.time(),

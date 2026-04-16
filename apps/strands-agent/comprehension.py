@@ -47,7 +47,7 @@ def comprehend_query(query: str, tool_context) -> str:
     # This is a @tool so it has access to tool_context.agent
     agent = tool_context.agent
 
-    prompt = COMPREHENSION_PROMPT.replace("{query}", query[:2000])
+    prompt = COMPREHENSION_PROMPT.format(query=query[:2000])
 
     # Store comprehension in agent state for other plugins to access
     try:
