@@ -48,8 +48,12 @@ logger = logging.getLogger(__name__)
 _session_start = time.time()
 _tool_call_count = 0
 _seen_tool_use_ids: set[str] = set()
-_MAX_TOOL_CALLS = int(os.environ.get("MAX_TOOL_CALLS", "200"))
-_SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "3600"))
+_MAX_TOOL_CALLS = int(os.environ.get("MAX_TOOL_CALLS", "50"))
+_SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "600"))
+
+
+class BudgetExceededError(Exception):
+    """Raised when the agent exceeds its tool call or time budget."""
 
 
 def reset_budget() -> None:
@@ -86,17 +90,25 @@ def budget_callback(**kwargs) -> None:
 
     elapsed = time.time() - _session_start
     if elapsed > _SESSION_TIMEOUT:
-        logger.warning(
-            "Session timeout reached (%.0fs > %ds). Consider wrapping up.",
+        logger.error(
+            "Session timeout EXCEEDED (%.0fs > %ds). Forcing stop.",
             elapsed,
             _SESSION_TIMEOUT,
         )
+        raise BudgetExceededError(
+            f"Session timeout exceeded ({elapsed:.0f}s > {_SESSION_TIMEOUT}s). "
+            "Synthesize your answer from the data already collected."
+        )
 
     if _tool_call_count > _MAX_TOOL_CALLS:
-        logger.warning(
-            "Tool call budget exceeded (%d > %d). Consider wrapping up.",
+        logger.error(
+            "Tool call budget EXCEEDED (%d > %d). Forcing stop.",
             _tool_call_count,
             _MAX_TOOL_CALLS,
+        )
+        raise BudgetExceededError(
+            f"Tool call budget exceeded ({_tool_call_count} > {_MAX_TOOL_CALLS}). "
+            "Synthesize your answer from the data already collected."
         )
 
     if _tool_call_count % 10 == 0:

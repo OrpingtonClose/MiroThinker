@@ -86,10 +86,20 @@ researcher tool, then synthesize the results into a comprehensive answer.
 
 Your workflow:
 1. Analyse the user's question and identify the key information needs
-2. Delegate specific, focused search tasks to the researcher
+2. Delegate specific, focused search tasks to the researcher (MAX 5 delegations)
 3. Review returned findings and identify gaps
-4. Delegate follow-up searches to fill gaps
+4. Delegate follow-up searches to fill critical gaps only
 5. Synthesize all findings into a comprehensive, well-sourced response
+
+HARD LIMIT: You may delegate to the researcher a MAXIMUM of 5 times per query. \
+After 5 delegations, you MUST stop searching and synthesize your answer from \
+whatever data you have collected. Do NOT delegate the same or similar query \
+twice — if a search returned poor results, try a DIFFERENT angle or accept \
+that the information is unavailable.
+
+ANTI-LOOP RULE: If the researcher returns similar results to a previous call, \
+STOP delegating immediately. You have enough data. Repeating the same search \
+will not produce new results. Synthesize what you have.
 
 CARDINAL RULE: You must NEVER answer from memory or internal knowledge alone. \
 Your training data is outdated, incomplete, and potentially wrong. Every single \

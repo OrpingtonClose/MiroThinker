@@ -379,10 +379,14 @@ def _dispatch_agent(model: str, user_message: str) -> tuple[str, dict | None]:
     Returns (text_answer, metrics_summary).  If the agent result has no text
     content (e.g. it ended on a tool call), falls back to the captured
     streamed text via ``stream_capture.response_text``.
+
+    If the agent exceeds its budget (tool calls or time), the BudgetExceededError
+    is caught and we return whatever text was captured so far.
     """
-    from agent import reset_budget, stream_capture
+    from agent import BudgetExceededError, reset_budget, stream_capture
 
     metrics_summary = None
+    budget_exceeded = False
 
     if model == _MODEL_MULTI:
         if _multi_agent is None:
@@ -391,28 +395,46 @@ def _dispatch_agent(model: str, user_message: str) -> tuple[str, dict | None]:
         if _multi_researcher is not None:
             _multi_researcher.messages.clear()
         reset_budget()
-        agent_result = _multi_agent(user_message)
-        result = str(agent_result)
         try:
-            metrics_summary = agent_result.metrics.get_summary()
-        except Exception:
-            pass
+            agent_result = _multi_agent(user_message)
+            result = str(agent_result)
+            try:
+                metrics_summary = agent_result.metrics.get_summary()
+            except Exception:
+                pass
+        except BudgetExceededError as exc:
+            logger.warning("Budget exceeded in multi-agent: %s", exc)
+            budget_exceeded = True
+            result = ""
     elif _single_agent is not None:
         _single_agent.messages.clear()
         reset_budget()
-        agent_result = _single_agent(user_message)
-        result = str(agent_result)
         try:
-            metrics_summary = agent_result.metrics.get_summary()
-        except Exception:
-            pass
+            agent_result = _single_agent(user_message)
+            result = str(agent_result)
+            try:
+                metrics_summary = agent_result.metrics.get_summary()
+            except Exception:
+                pass
+        except BudgetExceededError as exc:
+            logger.warning("Budget exceeded in single-agent: %s", exc)
+            budget_exceeded = True
+            result = ""
     else:
         raise RuntimeError("No agent initialised")
 
-    # Fallback: if the agent result has no text (e.g. ended on a tool call),
-    # use only the response text (not reasoning/thinking tokens).
+    # Fallback: if the agent result has no text (e.g. ended on a tool call
+    # or budget was exceeded), use only the response text (not reasoning/thinking tokens).
     if not result.strip() and stream_capture.response_text:
         result = "".join(stream_capture.response_text)
+
+    if budget_exceeded and not result.strip():
+        result = (
+            "I reached the maximum search budget for this query. "
+            "Here is what I found before the limit was reached — "
+            "please rephrase or narrow your question for deeper results."
+        )
+
     return result, metrics_summary
 
 
