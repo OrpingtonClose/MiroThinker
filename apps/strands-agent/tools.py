@@ -59,7 +59,7 @@ def duckduckgo_search(query: str, max_results: int = 10) -> str:
     Returns:
         Formatted search results with titles, URLs, and snippets.
     """
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
 
     with DDGS() as ddgs:
         results = list(ddgs.text(query, max_results=max_results))
