@@ -283,6 +283,7 @@ def _build_tool_list(mcp_tools):
     native = get_native_tools()
     from tools import (
         NATIVE_TOOLS_TIER1,
+        NATIVE_TOOLS_TIER3,
         NATIVE_TOOLS_DEEP_RESEARCH,
         NATIVE_TOOLS_RESEARCH_MGMT,
     )
@@ -291,21 +292,24 @@ def _build_tool_list(mcp_tools):
         return t.tool_name if hasattr(t, "tool_name") else t.__name__
 
     tier1_names = {_tool_name(t) for t in NATIVE_TOOLS_TIER1}
+    tier3_names = {_tool_name(t) for t in NATIVE_TOOLS_TIER3}
     deep_names = {_tool_name(t) for t in NATIVE_TOOLS_DEEP_RESEARCH}
     mgmt_names = {_tool_name(t) for t in NATIVE_TOOLS_RESEARCH_MGMT}
-    special_names = tier1_names | deep_names | mgmt_names
+    special_names = tier1_names | tier3_names | deep_names | mgmt_names
 
     native_first = [t for t in native if _tool_name(t) in tier1_names]
-    native_mid = [t for t in native if _tool_name(t) not in special_names]  # Tier 2-3
+    native_mid = [t for t in native if _tool_name(t) not in special_names]  # Tier 2 only
     native_deep = [t for t in native if _tool_name(t) in deep_names]
     native_mgmt = [t for t in native if _tool_name(t) in mgmt_names]
+    native_last = [t for t in native if _tool_name(t) in tier3_names]
 
     return [
         *native_first,   # Tier 1: duckduckgo_search, mojeek_search
         *mcp_tools,      # MCP: Brave, Exa, Semantic Scholar, arXiv, Wikipedia, etc.
-        *native_mid,     # Tier 2-3: jina_read_url, google_search
+        *native_mid,     # Tier 2: jina_read_url
         *native_deep,    # Deep research: perplexity, grok, tavily, exa_multi
         *native_mgmt,    # Research mgmt: findings store, knowledge graph
+        *native_last,    # Tier 3: google_search (censored fallback — always last)
     ]
 
 
