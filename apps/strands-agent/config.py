@@ -22,8 +22,15 @@ VENICE_API_BASE = os.environ.get("VENICE_API_BASE", "https://api.venice.ai/api/v
 VENICE_MODEL = os.environ.get("VENICE_MODEL", "olafangensan-glm-4.7-flash-heretic")
 
 
-def build_model():
-    """Build Strands model provider pointing at Venice AI."""
+def build_model(temperature: float | None = None):
+    """Build Strands model provider pointing at Venice AI.
+
+    Args:
+        temperature: Optional sampling temperature override.  When *None*
+            the API default is used.  Higher values (e.g. 1.2) make the
+            model more creative/divergent — useful for breaking out of
+            repetitive search patterns.
+    """
     from strands.models.openai import OpenAIModel
 
     api_key = os.environ.get("VENICE_API_KEY", "")
@@ -33,16 +40,20 @@ def build_model():
             "Copy .env.example to .env and add your Venice API key."
         )
 
+    params: dict = {
+        "extra_body": {
+            "venice_parameters": {"include_venice_system_prompt": False},
+            "reasoning": {"effort": "high"},
+        }
+    }
+    if temperature is not None:
+        params["temperature"] = temperature
+
     return OpenAIModel(
         client_args={
             "api_key": api_key,
             "base_url": VENICE_API_BASE,
         },
         model_id=VENICE_MODEL,
-        params={
-            "extra_body": {
-                "venice_parameters": {"include_venice_system_prompt": False},
-                "reasoning": {"effort": "high"},
-            }
-        },
+        params=params,
     )

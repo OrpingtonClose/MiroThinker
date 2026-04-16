@@ -280,33 +280,24 @@ def query_single(req: QueryRequest):
     start = time.time()
     req_id = f"query-{uuid.uuid4().hex[:12]}"
     with _agent_lock:
-        from agent import BudgetExceededError, reset_budget
+        from agent import reset_budget
 
         _single_agent.messages.clear()
         reset_budget()
         response = None
         metrics = None
-        budget_exceeded = False
         try:
             response = _single_agent(req.query)
             try:
                 metrics = response.metrics.get_summary()
             except Exception:
                 pass
-        except BudgetExceededError as exc:
-            logger.warning("Budget exceeded in /query single: %s", exc)
-            budget_exceeded = True
         except Exception as exc:
             logger.exception("Agent error")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     elapsed = round(time.time() - start, 2)
     result_text = str(response) if response is not None else ""
-    if budget_exceeded and not result_text.strip():
-        result_text = (
-            "I reached the maximum search budget for this query. "
-            "Please rephrase or narrow your question for deeper results."
-        )
     _write_metrics_jsonl(req_id, _MODEL_SINGLE, req.query, elapsed, metrics, [])
 
     return QueryResponse(
@@ -326,7 +317,7 @@ def query_multi(req: QueryRequest):
     start = time.time()
     req_id = f"query-{uuid.uuid4().hex[:12]}"
     with _agent_lock:
-        from agent import BudgetExceededError, reset_budget
+        from agent import reset_budget
 
         _multi_agent.messages.clear()
         if _multi_researcher is not None:
@@ -334,27 +325,18 @@ def query_multi(req: QueryRequest):
         reset_budget()
         response = None
         metrics = None
-        budget_exceeded = False
         try:
             response = _multi_agent(req.query)
             try:
                 metrics = response.metrics.get_summary()
             except Exception:
                 pass
-        except BudgetExceededError as exc:
-            logger.warning("Budget exceeded in /query/multi: %s", exc)
-            budget_exceeded = True
         except Exception as exc:
             logger.exception("Agent error")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     elapsed = round(time.time() - start, 2)
     result_text = str(response) if response is not None else ""
-    if budget_exceeded and not result_text.strip():
-        result_text = (
-            "I reached the maximum search budget for this query. "
-            "Please rephrase or narrow your question for deeper results."
-        )
     _write_metrics_jsonl(req_id, _MODEL_MULTI, req.query, elapsed, metrics, [])
 
     return QueryResponse(
@@ -402,13 +384,12 @@ def _dispatch_agent(model: str, user_message: str) -> tuple[str, dict | None]:
     content (e.g. it ended on a tool call), falls back to the captured
     streamed text via ``stream_capture.response_text``.
 
-    If the agent exceeds its budget (tool calls or time), the BudgetExceededError
-    is caught and we return whatever text was captured so far.
+    Loop prevention is handled by AdaptiveResearcherTool (temperature
+    escalation + query deduplication) — no budget exceptions are raised.
     """
-    from agent import BudgetExceededError, reset_budget, stream_capture
+    from agent import reset_budget, stream_capture
 
     metrics_summary = None
-    budget_exceeded = False
 
     if model == _MODEL_MULTI:
         if _multi_agent is None:
@@ -417,45 +398,28 @@ def _dispatch_agent(model: str, user_message: str) -> tuple[str, dict | None]:
         if _multi_researcher is not None:
             _multi_researcher.messages.clear()
         reset_budget()
+        agent_result = _multi_agent(user_message)
+        result = str(agent_result)
         try:
-            agent_result = _multi_agent(user_message)
-            result = str(agent_result)
-            try:
-                metrics_summary = agent_result.metrics.get_summary()
-            except Exception:
-                pass
-        except BudgetExceededError as exc:
-            logger.warning("Budget exceeded in multi-agent: %s", exc)
-            budget_exceeded = True
-            result = ""
+            metrics_summary = agent_result.metrics.get_summary()
+        except Exception:
+            pass
     elif _single_agent is not None:
         _single_agent.messages.clear()
         reset_budget()
+        agent_result = _single_agent(user_message)
+        result = str(agent_result)
         try:
-            agent_result = _single_agent(user_message)
-            result = str(agent_result)
-            try:
-                metrics_summary = agent_result.metrics.get_summary()
-            except Exception:
-                pass
-        except BudgetExceededError as exc:
-            logger.warning("Budget exceeded in single-agent: %s", exc)
-            budget_exceeded = True
-            result = ""
+            metrics_summary = agent_result.metrics.get_summary()
+        except Exception:
+            pass
     else:
         raise RuntimeError("No agent initialised")
 
-    # Fallback: if the agent result has no text (e.g. ended on a tool call
-    # or budget was exceeded), use only the response text (not reasoning/thinking tokens).
+    # Fallback: if the agent result has no text (e.g. ended on a tool call),
+    # use only the response text (not reasoning/thinking tokens).
     if not result.strip() and stream_capture.response_text:
         result = "".join(stream_capture.response_text)
-
-    if budget_exceeded and not result.strip():
-        result = (
-            "I reached the maximum search budget for this query. "
-            "Here is what I found before the limit was reached — "
-            "please rephrase or narrow your question for deeper results."
-        )
 
     return result, metrics_summary
 
