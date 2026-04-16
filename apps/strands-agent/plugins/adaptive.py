@@ -130,9 +130,10 @@ class AdaptiveLoopPlugin(Plugin):
             self._base_temp + (similar_count * self._temp_step),
             self._max_temp,
         )
-        self._old_params = copy.deepcopy(
-            dict(self._researcher_model.config.get("params", {}))
-        )
+        if self._old_params is None:
+            self._old_params = copy.deepcopy(
+                dict(self._researcher_model.config.get("params", {}))
+            )
         new_params = copy.deepcopy(self._old_params)
         new_params["temperature"] = new_temp
         self._researcher_model.config["params"] = new_params
