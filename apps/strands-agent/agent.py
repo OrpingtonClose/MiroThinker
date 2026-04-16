@@ -11,8 +11,8 @@ Features used:
 - Conversation memory (SlidingWindowConversationManager)
 - Agent loop with automatic tool dispatch
 - Multi-agent orchestration (planner + researcher via agent-as-tool)
-- Guardrails (callback-based pre/post processing with budget limits)
-- OpenTelemetry observability (OTEL_EXPORTER_OTLP_ENDPOINT)
+- Adaptive loop prevention (Strands Plugin + hooks, temperature escalation)
+- Observability (tool call counter, OpenTelemetry)
 """
 
 from __future__ import annotations
@@ -52,6 +52,10 @@ _MAX_TOOL_CALLS = int(os.environ.get("MAX_TOOL_CALLS", "200"))
 _SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "3600"))
 
 
+# Global reference to the adaptive loop plugin (set in create_multi_agent).
+_adaptive_plugin = None
+
+
 def reset_budget() -> None:
     """Reset per-request budget counters.
 
@@ -62,6 +66,8 @@ def reset_budget() -> None:
     _session_start = time.time()
     _tool_call_count = 0
     _seen_tool_use_ids = set()
+    if _adaptive_plugin is not None:
+        _adaptive_plugin.reset()
 
 
 def budget_callback(**kwargs) -> None:
@@ -300,12 +306,18 @@ def create_single_agent(tool_list=None, mcp_clients=None):
 
 
 def create_multi_agent(tool_list=None, mcp_clients=None):
-    """Create a planner + researcher multi-agent setup.
+    """Create a planner + researcher multi-agent setup with adaptive loop prevention.
 
     The researcher agent has direct access to all MCP tools and handles
     web search/scraping.  The planner agent delegates to the researcher
-    via the agent-as-tool pattern and handles strategic decomposition
-    and synthesis.
+    via the agent-as-tool pattern.
+
+    Loop prevention uses the AdaptiveLoopPlugin (Strands Plugin + hooks)
+    imported from deep-search-portal's ``strands_adaptive`` module.  The
+    plugin intercepts researcher calls on the planner, detects repeated
+    queries via Jaccard similarity, escalates the researcher's sampling
+    temperature on repeats, and returns cached results after too many
+    near-identical queries.
 
     Args:
         tool_list: Pre-built list of MCP tools.  When *None* the
@@ -316,20 +328,21 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
     Returns:
         Tuple of (planner_agent, researcher_agent, mcp_clients).
     """
-    model = build_model()
+    global _adaptive_plugin
+
+    # Separate model instances so temperature changes on the researcher
+    # don't affect the planner's reasoning quality.
+    planner_model = build_model()
+    researcher_model = build_model(temperature=float(os.environ.get("BASE_TEMPERATURE", "0.7")))
+
     owns_clients = tool_list is None
     if owns_clients:
         mcp_clients = get_all_mcp_clients()
         tool_list = _enter_mcp_clients(mcp_clients)
 
-    conversation_manager = SlidingWindowConversationManager(
-        window_size=20,
-        should_truncate_results=True,
-    )
-
     # Researcher: tool-capable agent that does the actual searching
     researcher = Agent(
-        model=model,
+        model=researcher_model,
         system_prompt=RESEARCHER_PROMPT,
         tools=tool_list,
         conversation_manager=SlidingWindowConversationManager(
@@ -339,21 +352,41 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
         callback_handler=_build_callback_handler(),
     )
 
+    researcher_tool = researcher.as_tool(
+        name="researcher",
+        description=(
+            "Deep web research agent with access to Brave Search, "
+            "Firecrawl, Exa, and Kagi. Delegate any web search, "
+            "scrape, or data retrieval task to this tool."
+        ),
+    )
+
+    # Try to load the adaptive loop plugin from deep-search-portal.
+    # Falls back to no loop prevention if the module is unavailable.
+    plugins = []
+    try:
+        from strands_adaptive import AdaptiveLoopPlugin
+
+        plugin = AdaptiveLoopPlugin(researcher_model)
+        _adaptive_plugin = plugin
+        plugins.append(plugin)
+        logger.info("Adaptive loop prevention enabled (Strands Plugin + hooks)")
+    except ImportError:
+        logger.warning(
+            "strands_adaptive not available — adaptive loop prevention disabled. "
+            "Ensure deep-search-portal/proxies is on PYTHONPATH."
+        )
+
     # Planner: strategic agent that delegates to the researcher
     planner = Agent(
-        model=model,
+        model=planner_model,
         system_prompt=PLANNER_PROMPT,
-        tools=[
-            researcher.as_tool(
-                name="researcher",
-                description=(
-                    "Deep web research agent with access to Brave Search, "
-                    "Firecrawl, Exa, and Kagi. Delegate any web search, "
-                    "scrape, or data retrieval task to this tool."
-                ),
-            ),
-        ],
-        conversation_manager=conversation_manager,
+        tools=[researcher_tool],
+        plugins=plugins,
+        conversation_manager=SlidingWindowConversationManager(
+            window_size=20,
+            should_truncate_results=True,
+        ),
         callback_handler=_build_callback_handler(),
     )
     return planner, researcher, mcp_clients or []
