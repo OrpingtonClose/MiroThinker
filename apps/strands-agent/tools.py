@@ -503,6 +503,8 @@ def exa_multi_search(queries: str, num_results_per_query: int = 5) -> str:
     if not isinstance(query_list, list):
         query_list = [str(query_list)]
     query_list = query_list[:10]
+    if not query_list:
+        return json.dumps({"error": "No queries provided. Pass a JSON array of search strings."})
     num_results_per_query = min(num_results_per_query, 8)
 
     def _search_one(q: str) -> dict:
@@ -696,6 +698,10 @@ def load_knowledge_graph() -> None:
         elif obj.get("_t") == "edge":
             obj.pop("_t")
             _kg_edges.append(obj)
+
+
+# Reload persisted graph at import time (matches _FINDINGS_DIR.mkdir pattern).
+load_knowledge_graph()
 
 
 @tool
