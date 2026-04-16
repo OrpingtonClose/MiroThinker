@@ -97,7 +97,7 @@ def mojeek_search(query: str, max_results: int = 10) -> str:
         return "Mojeek API key not configured. Set MOJEEK_API_KEY in .env."
 
     resp = httpx.get(
-        "https://www.mojeek.com/search",
+        "https://api.mojeek.com/search",
         params={"q": query, "fmt": "json", "t": max_results, "api_key": api_key},
         timeout=30,
     )
