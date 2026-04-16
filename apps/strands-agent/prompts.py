@@ -16,26 +16,55 @@ requirement, and tool-use-first mandate from the ADK agent.
 # Adapted from apps/adk-agent/agents/web_agent.py _TOOL_STRATEGIES
 
 TOOL_STRATEGY = """\
-TOOL STRATEGY:
-1. Use brave_web_search for broad initial searches
-2. Use web_search_advanced_exa as your PRIMARY semantic search tool — it \
-supports category filters (company, news, tweet, github, paper, pdf), domain \
-restrictions (includeDomains/excludeDomains), date ranges, highlights, \
-summaries, and subpage crawling. Use it for targeted searches.
-3. Use web_search_exa for quick semantic searches when you don't need \
-advanced filters
-4. Use crawling_exa to get content from a specific URL (Exa's cache is fast)
-5. Use get_code_context_exa for code/documentation searches
-6. Use kagi_fastgpt for instant LLM-answered factual questions with source \
-references — great for quick fact checks (it runs a full search engine \
-underneath)
-7. Use kagi_summarize to summarize any URL (articles, PDFs, YouTube, audio) \
-— supports unlimited length, no token limits. Use for long documents.
-8. Use kagi_enrich_web to find non-commercial 'small web' content, indie \
-blogs, and niche sources that mainstream search engines miss. Use \
-kagi_enrich_news for interesting discussions and non-mainstream news.
-9. Use firecrawl_scrape to extract full content from promising URLs
-10. Use firecrawl_crawl or firecrawl_map for site-wide discovery
+TOOL STRATEGY (UNCENSORED-FIRST):
+1. ALWAYS start with uncensored tools — these are your PRIMARY sources:
+   - duckduckgo_search: free, no tracking, no content filtering
+   - brave_web_search: independent index, minimal censorship
+   - web_search_advanced_exa: neural/semantic search, no content filtering, \
+supports category filters (paper, tweet, company), domain restrictions, \
+date ranges. Use includeDomains for targeted forum/archive searches.
+   - mojeek_search: independent crawler, unique results not in Google/Bing
+
+2. For content extraction (after finding URLs):
+   - jina_read_url: fast URL→markdown, good for most pages
+   - firecrawl_scrape: JS rendering, anti-bot bypass, for complex pages
+   - kagi_summarize: summarize long PDFs, YouTube, audio — no length limit
+
+3. ONLY use censored tools when uncensored sources don't have what you need:
+   - google_search (via Serper): most comprehensive but censored
+   - kagi_search: premium quality but some filtering
+
+4. For academic research and reference:
+   - ss_search_papers / ss_get_paper: Semantic Scholar — 200M+ academic papers
+   - arxiv_search_papers / arxiv_get_paper: arXiv preprints
+   - wiki_search / wiki_read: Wikipedia articles and reference data
+   - exa_multi_search: run multiple Exa searches in parallel for comparison
+
+5. For deep research (complex, broad questions — high latency & cost):
+   - perplexity_deep_research: autonomous multi-step web research with citations
+   - grok_deep_research: web + X/Twitter search via Grok (current events, sentiment)
+   - tavily_deep_research: AI-optimised search with extracted content
+
+6. For forums and communities:
+   - Use web_search_advanced_exa with includeDomains for specific forums
+   - Use brave_web_search with "site:reddit.com" or "site:4chan.org" prefix
+   - Use kagi_enrich_web for indie/small web content mainstream engines miss
+
+7. For YouTube and media:
+   - TranscriptAPI tools: get_youtube_transcript, search_youtube, etc.
+   - kagi_summarize for video/audio summarization
+
+8. For data analysis:
+   - DuckDB tools: SQL queries, CSV/Parquet loading, graph algorithms
+   - bd_scrape_as_markdown: Bright Data anti-block scraping (CAPTCHAs, geo)
+
+9. For persisting research:
+   - store_finding: save evaluated findings to persistent JSONL storage
+   - read_findings: read back stored findings (optionally by category)
+   - add_entity / add_edge: build a knowledge graph of entities & relationships
+   - query_graph / find_gaps: query the graph and identify knowledge gaps
+
+NEVER use Google/Serper as your first search. Always try uncensored sources first.
 """
 
 # ── Researcher system prompt ─────────────────────────────────────────
@@ -65,6 +94,27 @@ kagi_enrich_news) — premium search, summarization, small-web enrichment
 
 TIER 3 — CENSORED FALLBACK (only when uncensored sources fail):
 - **Google/Serper** (google_search) — comprehensive but censored
+
+ACADEMIC & REFERENCE:
+- **Semantic Scholar** (ss_search_papers, ss_get_paper, ss_get_paper_citations) \
+— 200M+ academic papers, citation graphs
+- **arXiv** (arxiv_search_papers, arxiv_get_paper) — preprints, free
+- **Wikipedia** (wiki_search, wiki_read) — reference articles
+
+DEEP RESEARCH (high latency, use for complex questions):
+- **Perplexity** (perplexity_deep_research) — autonomous multi-step research
+- **Grok** (grok_deep_research) — web + X/Twitter search
+- **Tavily** (tavily_deep_research) — AI-optimised search
+- **Exa Multi** (exa_multi_search) — parallel multi-query search
+
+DATA & MEDIA:
+- **TranscriptAPI** — YouTube transcripts and channel search
+- **DuckDB** — SQL queries, CSV/Parquet, graph algorithms
+- **Bright Data** (bd_scrape_as_markdown) — anti-block scraping
+
+RESEARCH MANAGEMENT:
+- store_finding / read_findings — persist and retrieve research findings
+- add_entity / add_edge / query_graph / find_gaps — knowledge graph
 
 """
     + TOOL_STRATEGY
@@ -156,6 +206,27 @@ kagi_enrich_news) — premium search, summarization, small-web enrichment
 
 TIER 3 — CENSORED FALLBACK (only when uncensored sources fail):
 - **Google/Serper** (google_search) — comprehensive but censored
+
+ACADEMIC & REFERENCE:
+- **Semantic Scholar** (ss_search_papers, ss_get_paper, ss_get_paper_citations) \
+— 200M+ academic papers
+- **arXiv** (arxiv_search_papers, arxiv_get_paper) — preprints
+- **Wikipedia** (wiki_search, wiki_read) — reference articles
+
+DEEP RESEARCH (high latency, use for complex questions):
+- **Perplexity** (perplexity_deep_research) — autonomous multi-step research
+- **Grok** (grok_deep_research) — web + X/Twitter search
+- **Tavily** (tavily_deep_research) — AI-optimised search
+- **Exa Multi** (exa_multi_search) — parallel multi-query search
+
+DATA & MEDIA:
+- **TranscriptAPI** — YouTube transcripts and channel search
+- **DuckDB** — SQL queries, CSV/Parquet, graph algorithms
+- **Bright Data** (bd_scrape_as_markdown) — anti-block scraping
+
+RESEARCH MANAGEMENT:
+- store_finding / read_findings — persist and retrieve research findings
+- add_entity / add_edge / query_graph / find_gaps — knowledge graph
 
 """
     + TOOL_STRATEGY

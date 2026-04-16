@@ -270,8 +270,9 @@ def _build_tool_list(mcp_tools):
     """Assemble the full tool list with uncensored-first ordering.
 
     Tool ordering matters — LLMs naturally prefer tools listed earlier.
-    We put Tier 1 (uncensored) native tools first, then MCP tools
-    (Brave, Exa, Firecrawl, Kagi), then Tier 2/3 native tools last.
+    Order: Tier 1 uncensored natives → MCP tools (Brave, Exa, Semantic
+    Scholar, arXiv, Wikipedia, etc.) → Tier 2 extraction → Deep research
+    → Research management → Tier 3 censored fallback.
 
     Args:
         mcp_tools: Tools collected from MCP clients via list_tools_sync().
@@ -280,17 +281,31 @@ def _build_tool_list(mcp_tools):
         Combined tool list ordered for uncensored-first preference.
     """
     native = get_native_tools()
-    # Split native tools: Tier 1 uncensored go first, rest go after MCP tools
-    from tools import NATIVE_TOOLS_TIER1
+    from tools import (
+        NATIVE_TOOLS_TIER1,
+        NATIVE_TOOLS_DEEP_RESEARCH,
+        NATIVE_TOOLS_RESEARCH_MGMT,
+    )
 
-    tier1_names = {t.tool_name if hasattr(t, "tool_name") else t.__name__ for t in NATIVE_TOOLS_TIER1}
-    native_first = [t for t in native if (t.tool_name if hasattr(t, "tool_name") else t.__name__) in tier1_names]
-    native_rest = [t for t in native if (t.tool_name if hasattr(t, "tool_name") else t.__name__) not in tier1_names]
+    def _tool_name(t):
+        return t.tool_name if hasattr(t, "tool_name") else t.__name__
+
+    tier1_names = {_tool_name(t) for t in NATIVE_TOOLS_TIER1}
+    deep_names = {_tool_name(t) for t in NATIVE_TOOLS_DEEP_RESEARCH}
+    mgmt_names = {_tool_name(t) for t in NATIVE_TOOLS_RESEARCH_MGMT}
+    special_names = tier1_names | deep_names | mgmt_names
+
+    native_first = [t for t in native if _tool_name(t) in tier1_names]
+    native_mid = [t for t in native if _tool_name(t) not in special_names]  # Tier 2-3
+    native_deep = [t for t in native if _tool_name(t) in deep_names]
+    native_mgmt = [t for t in native if _tool_name(t) in mgmt_names]
 
     return [
         *native_first,   # Tier 1: duckduckgo_search, mojeek_search
-        *mcp_tools,      # MCP: Brave, Exa, Firecrawl, Kagi
-        *native_rest,    # Tier 2-3: jina_read_url, google_search
+        *mcp_tools,      # MCP: Brave, Exa, Semantic Scholar, arXiv, Wikipedia, etc.
+        *native_mid,     # Tier 2-3: jina_read_url, google_search
+        *native_deep,    # Deep research: perplexity, grok, tavily, exa_multi
+        *native_mgmt,    # Research mgmt: findings store, knowledge graph
     ]
 
 
@@ -380,8 +395,13 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
                     "Deep web research agent with uncensored-first tool "
                     "priority: DuckDuckGo, Brave, Exa, Mojeek for search; "
                     "Jina Reader, Firecrawl, Kagi for extraction; "
-                    "Google/Serper as censored fallback. Delegate any web "
-                    "search, scrape, or data retrieval task to this tool."
+                    "Semantic Scholar, arXiv for academic papers; "
+                    "Wikipedia, DuckDB for reference data; "
+                    "Perplexity, Grok, Tavily for deep research; "
+                    "store_finding/read_findings + knowledge graph for "
+                    "persisting research; Google/Serper as censored fallback. "
+                    "Delegate any web search, scrape, or data retrieval task "
+                    "to this tool."
                 ),
             ),
         ],
