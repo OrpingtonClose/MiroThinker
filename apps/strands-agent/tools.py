@@ -295,7 +295,8 @@ def get_all_mcp_clients():
 
 # ── Native tool list (always available) ──────────────────────────────
 
-# Tier 1 uncensored tools — always included
+# Tier 1 uncensored tools — duckduckgo is always available (no key needed),
+# mojeek requires MOJEEK_API_KEY so it is gated in get_native_tools().
 NATIVE_TOOLS_TIER1 = [duckduckgo_search, mojeek_search]
 
 # Tier 2 content extraction tools — always included
@@ -308,10 +309,14 @@ NATIVE_TOOLS_TIER3 = [google_search]
 def get_native_tools():
     """Return native @tool functions, ordered uncensored-first.
 
-    Tier 3 tools (Google/Serper) are only included when their API key
-    is configured, since they are useless without it.
+    Tools that require an API key (Mojeek, Google/Serper) are only
+    included when their key is configured, so the LLM won't waste
+    a tool call on a guaranteed error.
     """
-    tools = list(NATIVE_TOOLS_TIER1) + list(NATIVE_TOOLS_TIER2)
+    tools = [duckduckgo_search]  # always available (no key needed)
+    if os.environ.get("MOJEEK_API_KEY"):
+        tools.append(mojeek_search)
+    tools.extend(NATIVE_TOOLS_TIER2)
     if os.environ.get("SERPER_API_KEY"):
         tools.extend(NATIVE_TOOLS_TIER3)
     return tools
