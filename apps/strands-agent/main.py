@@ -552,8 +552,11 @@ async def openai_chat_completions(body: ChatCompletionRequest):
                     # Emit tool call as SSE comment (visible in logs)
                     yield f": tool {data['tool']}\n\n"
 
-            # If agent errored and produced no streamed text, send error
-            if result_holder["error"] and not result_holder["streamed_text"]:
+            # If agent errored and produced no streamed text, send error.
+            # Check both response_text and reasoning_text since Venice GLM
+            # may send the answer entirely as reasoning tokens.
+            has_streamed = result_holder["streamed_text"] or result_holder.get("reasoning_text", "")
+            if result_holder["error"] and not has_streamed:
                 yield _openai_chunk(
                     req_id, model, f"\n\nError: {result_holder['error']}"
                 )
