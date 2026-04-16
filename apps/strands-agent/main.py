@@ -601,6 +601,15 @@ async def openai_chat_completions(body: ChatCompletionRequest):
                     req_id, model, f"\n\nError: {result_holder['error']}"
                 )
 
+            # If budget was exceeded and no text was streamed, emit the fallback
+            # message from _dispatch_agent (stored in result_holder["text"])
+            if (
+                not result_holder["streamed_text"]
+                and not result_holder["error"]
+                and result_holder.get("text")
+            ):
+                yield _openai_chunk(req_id, model, result_holder["text"])
+
             # Append inline activity log at end of response
             elapsed = round(time.time() - start_time, 2)
             inline_log = _format_inline_log(
