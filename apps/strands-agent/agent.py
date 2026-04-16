@@ -34,7 +34,7 @@ from strands.agent.conversation_manager import SlidingWindowConversationManager
 
 from config import build_model
 from prompts import PLANNER_PROMPT, RESEARCHER_PROMPT, SYSTEM_PROMPT
-from tools import get_all_mcp_clients
+from tools import get_all_mcp_clients, get_native_tools
 
 logger = logging.getLogger(__name__)
 
@@ -266,15 +266,43 @@ def _enter_mcp_clients(mcp_clients):
     return tool_list
 
 
+def _build_tool_list(mcp_tools):
+    """Assemble the full tool list with uncensored-first ordering.
+
+    Tool ordering matters — LLMs naturally prefer tools listed earlier.
+    We put Tier 1 (uncensored) native tools first, then MCP tools
+    (Brave, Exa, Firecrawl, Kagi), then Tier 2/3 native tools last.
+
+    Args:
+        mcp_tools: Tools collected from MCP clients via list_tools_sync().
+
+    Returns:
+        Combined tool list ordered for uncensored-first preference.
+    """
+    native = get_native_tools()
+    # Split native tools: Tier 1 uncensored go first, rest go after MCP tools
+    from tools import NATIVE_TOOLS_TIER1
+
+    tier1_names = {t.tool_name if hasattr(t, "tool_name") else t.__name__ for t in NATIVE_TOOLS_TIER1}
+    native_first = [t for t in native if (t.tool_name if hasattr(t, "tool_name") else t.__name__) in tier1_names]
+    native_rest = [t for t in native if (t.tool_name if hasattr(t, "tool_name") else t.__name__) not in tier1_names]
+
+    return [
+        *native_first,   # Tier 1: duckduckgo_search, mojeek_search
+        *mcp_tools,      # MCP: Brave, Exa, Firecrawl, Kagi
+        *native_rest,    # Tier 2-3: jina_read_url, google_search
+    ]
+
+
 def create_single_agent(tool_list=None, mcp_clients=None):
     """Create a single-agent setup with all tools directly available.
 
     Use this for simple interactive sessions where one agent handles
-    both search and synthesis.
+    both search and synthesis.  Tools are ordered uncensored-first.
 
     Args:
-        tool_list: Pre-built list of MCP tools.  When *None* the
-            function enters its own MCP clients (REPL use-case).
+        tool_list: Pre-built list of tools.  When *None* the function
+            enters its own MCP clients and builds the list (REPL use-case).
         mcp_clients: MCP clients that were entered to produce
             *tool_list*.  Returned as-is for the caller to manage.
     """
@@ -282,7 +310,8 @@ def create_single_agent(tool_list=None, mcp_clients=None):
     owns_clients = tool_list is None
     if owns_clients:
         mcp_clients = get_all_mcp_clients()
-        tool_list = _enter_mcp_clients(mcp_clients)
+        mcp_tools = _enter_mcp_clients(mcp_clients)
+        tool_list = _build_tool_list(mcp_tools)
 
     conversation_manager = SlidingWindowConversationManager(
         window_size=20,
@@ -302,14 +331,14 @@ def create_single_agent(tool_list=None, mcp_clients=None):
 def create_multi_agent(tool_list=None, mcp_clients=None):
     """Create a planner + researcher multi-agent setup.
 
-    The researcher agent has direct access to all MCP tools and handles
-    web search/scraping.  The planner agent delegates to the researcher
-    via the agent-as-tool pattern and handles strategic decomposition
-    and synthesis.
+    The researcher agent has direct access to all tools (ordered
+    uncensored-first) and handles web search/scraping.  The planner
+    agent delegates to the researcher via the agent-as-tool pattern
+    and handles strategic decomposition and synthesis.
 
     Args:
-        tool_list: Pre-built list of MCP tools.  When *None* the
-            function enters its own MCP clients (REPL use-case).
+        tool_list: Pre-built list of tools.  When *None* the function
+            enters its own MCP clients and builds the list (REPL use-case).
         mcp_clients: MCP clients that were entered to produce
             *tool_list*.  Returned as-is for the caller to manage.
 
@@ -320,7 +349,8 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
     owns_clients = tool_list is None
     if owns_clients:
         mcp_clients = get_all_mcp_clients()
-        tool_list = _enter_mcp_clients(mcp_clients)
+        mcp_tools = _enter_mcp_clients(mcp_clients)
+        tool_list = _build_tool_list(mcp_tools)
 
     conversation_manager = SlidingWindowConversationManager(
         window_size=20,
@@ -347,9 +377,11 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
             researcher.as_tool(
                 name="researcher",
                 description=(
-                    "Deep web research agent with access to Brave Search, "
-                    "Firecrawl, Exa, and Kagi. Delegate any web search, "
-                    "scrape, or data retrieval task to this tool."
+                    "Deep web research agent with uncensored-first tool "
+                    "priority: DuckDuckGo, Brave, Exa, Mojeek for search; "
+                    "Jina Reader, Firecrawl, Kagi for extraction; "
+                    "Google/Serper as censored fallback. Delegate any web "
+                    "search, scrape, or data retrieval task to this tool."
                 ),
             ),
         ],
