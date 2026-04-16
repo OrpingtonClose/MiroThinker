@@ -415,12 +415,12 @@ def main():
             if query.lower() in ("quit", "exit", "q"):
                 break
 
+            reset_budget()
             try:
                 response = agent(query)
                 print(f"\nAgent: {response}\n")
             except BudgetExceededError:
                 print("\nBudget limit reached. Starting fresh for next query.\n")
-                reset_budget()
     except KeyboardInterrupt:
         print("\nInterrupted.")
     finally:
