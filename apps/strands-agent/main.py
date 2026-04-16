@@ -409,10 +409,10 @@ def _dispatch_agent(model: str, user_message: str) -> tuple[str, dict | None]:
     else:
         raise RuntimeError("No agent initialised")
 
-    # Fallback: if the agent result has no text (e.g. ended on a tool call),
-    # use only the response text (not reasoning/thinking tokens).
-    if not result.strip() and stream_capture.response_text:
-        result = "".join(stream_capture.response_text)
+    # Fallback: if the agent result has no text, use captured text.
+    # Venice GLM with reasoning:high may send answer as reasoningText only.
+    if not result.strip() and (stream_capture.response_text or stream_capture.reasoning_text):
+        result = "".join(stream_capture.response_text) or "".join(stream_capture.reasoning_text)
     return result, metrics_summary
 
 
@@ -545,8 +545,9 @@ async def openai_chat_completions(body: ChatCompletionRequest):
                 if event_type == "text":
                     yield _openai_chunk(req_id, model, data)
                 elif event_type == "thinking":
-                    # Skip reasoning tokens — not shown to user
-                    pass
+                    # Venice GLM with reasoning:high sends answer as reasoningText;
+                    # stream it as content so the user sees the response.
+                    yield _openai_chunk(req_id, model, data)
                 elif event_type == "tool":
                     # Emit tool call as SSE comment (visible in logs)
                     yield f": tool {data['tool']}\n\n"
