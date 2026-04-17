@@ -6,14 +6,17 @@ Tool wiring for the Strands Venice agent.
 
 Combines:
 - MCP servers (Brave, Firecrawl, Exa, Kagi, Semantic Scholar, arXiv,
-  Wikipedia, DuckDB, TranscriptAPI, Bright Data) for rich tool ecosystems
+  Wikipedia, DuckDB, TranscriptAPI, Bright Data, Reddit) for rich tool
+  ecosystems
 - Native @tool-decorated functions for direct API providers and research
-  management (DuckDuckGo, Mojeek, Jina Reader, Google/Serper, Perplexity,
-  Grok, Tavily, Exa multi-search, findings store, knowledge graph)
+  management (DuckDuckGo, Mojeek, Stract, Yandex, Wayback Machine,
+  Jina Reader, Google/Serper, Perplexity, Grok, Tavily, Exa multi-search,
+  findings store, knowledge graph)
 
 Tools are organised into tiers:
-  Tier 1 — Uncensored search: DuckDuckGo, Brave, Exa, Mojeek
-  Tier 2 — Content extraction: Jina Reader, Firecrawl, Kagi
+  Tier 1 — Uncensored search: DuckDuckGo, Brave, Exa, Mojeek, Stract,
+            Yandex, Reddit
+  Tier 2 — Content extraction: Jina Reader, Firecrawl, Kagi, Wayback Machine
   Tier 3 — Censored fallback: Google/Serper
   Deep Research — Perplexity, Grok, Tavily, Exa multi-search
   Research Mgmt — store/read findings, knowledge graph
@@ -126,6 +129,154 @@ def mojeek_search(query: str, max_results: int = 10) -> str:
     return "\n\n".join(formatted)
 
 
+@tool
+def stract_search(query: str, max_results: int = 10) -> str:
+    """Search using Stract — an independent, open-source web search engine.
+
+    Stract has its own crawler and index, completely independent from
+    Google/Bing. Free API in beta. No API key needed. Surfaces content
+    that mainstream engines miss.
+
+    Args:
+        query: The search query string.
+        max_results: Maximum number of results to return (default 10).
+
+    Returns:
+        Formatted search results with titles, URLs, and snippets.
+    """
+    import httpx
+
+    try:
+        resp = httpx.post(
+            "https://stract.com/beta/api/search",
+            json={"query": query, "numResults": max_results},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        return f"[TOOL_ERROR] Stract search failed: {exc}"
+
+    results = data.get("webpages", [])
+    if not results:
+        return f"No Stract results for: {query}"
+
+    formatted = []
+    for i, r in enumerate(results[:max_results], 1):
+        title = r.get("title", "")
+        url = r.get("url", "")
+        snippet = r.get("snippet", r.get("body", ""))
+        formatted.append(f"{i}. [{title}]({url})\n   {snippet}")
+    return "\n\n".join(formatted)
+
+
+@tool
+def yandex_search(query: str, max_results: int = 10) -> str:
+    """Search using Yandex — the dominant search engine in Eastern Europe and Russia.
+
+    Yandex has its own crawler/index and is especially strong for results
+    in Polish, Russian, Ukrainian, and other Eastern European languages.
+    Excellent for finding local vendors, forums, and content that Western
+    engines miss. Requires YANDEX_SEARCH_API_KEY and YANDEX_FOLDER_ID.
+
+    Args:
+        query: The search query string.
+        max_results: Maximum number of results to return (default 10).
+
+    Returns:
+        Formatted search results with titles, URLs, and snippets.
+    """
+    import httpx
+
+    api_key = os.environ.get("YANDEX_SEARCH_API_KEY", "")
+    folder_id = os.environ.get("YANDEX_FOLDER_ID", "")
+    if not api_key or not folder_id:
+        return (
+            "[TOOL_ERROR] Yandex Search unavailable: "
+            "YANDEX_SEARCH_API_KEY and YANDEX_FOLDER_ID not set."
+        )
+
+    try:
+        resp = httpx.get(
+            "https://searchapi.api.cloud.yandex.net/v2/web/searchAsync",
+            params={
+                "query": query,
+                "folderId": folder_id,
+                "maxPassages": 2,
+                "groupBy.groupsOnPage": max_results,
+            },
+            headers={"Authorization": f"Api-Key {api_key}"},
+            timeout=30,
+        )
+
+        # Yandex async API returns an operation — poll for results
+        if resp.status_code == 200:
+            op_data = resp.json()
+            op_id = op_data.get("id", "")
+            if op_id:
+                # Poll up to 10 seconds for completion
+                import time as _time
+
+                for _ in range(10):
+                    _time.sleep(1)
+                    poll_resp = httpx.get(
+                        f"https://operation.api.cloud.yandex.net/operations/{op_id}",
+                        headers={"Authorization": f"Api-Key {api_key}"},
+                        timeout=15,
+                    )
+                    if poll_resp.status_code == 200:
+                        poll_data = poll_resp.json()
+                        if poll_data.get("done"):
+                            if "error" in poll_data:
+                                err = poll_data["error"]
+                                return f"[TOOL_ERROR] Yandex search failed: {err.get('message', err)}"
+                            data = poll_data.get("response", {})
+                            break
+                else:
+                    return f"Yandex search timed out for: {query}"
+            else:
+                data = op_data
+        else:
+            # Try synchronous fallback
+            resp.raise_for_status()
+            data = resp.json()
+
+    except Exception as exc:
+        return f"[TOOL_ERROR] Yandex search failed: {exc}"
+
+    # Parse XML-like response structure from Yandex
+    gbr = data.get("groupByResponses")
+    groups = gbr[0].get("groups", []) if isinstance(gbr, list) and gbr else []
+
+    if not groups:
+        # Try flat result list
+        results = data.get("results", [])
+        if not results:
+            return f"No Yandex results for: {query}"
+        formatted = []
+        for i, r in enumerate(results[:max_results], 1):
+            title = r.get("title", "")
+            url = r.get("url", "")
+            snippet = r.get("snippet", "")
+            formatted.append(f"{i}. [{title}]({url})\n   {snippet}")
+        return "\n\n".join(formatted)
+
+    formatted = []
+    count = 0
+    for group in groups[:max_results]:
+        docs = group.get("documents", [])
+        if not docs:
+            continue
+        count += 1
+        doc = docs[0]
+        title = doc.get("title", "")
+        url = doc.get("url", "")
+        passages = doc.get("passages", [])
+        snippet = passages[0] if passages else ""
+        formatted.append(f"{count}. [{title}]({url})\n   {snippet}")
+    return "\n\n".join(formatted) if formatted else f"No Yandex results for: {query}"
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # TIER 2 — Content extraction native tools
 # ═══════════════════════════════════════════════════════════════════════
@@ -159,6 +310,186 @@ def jina_read_url(url: str) -> str:
     )
     resp.raise_for_status()
     return resp.text[:15000]
+
+
+@tool
+def wayback_search(url: str, limit: int = 5) -> str:
+    """Search the Wayback Machine (Internet Archive) for cached/archived pages.
+
+    Use this to find pages that have been taken down, changed, or blocked.
+    Especially useful for finding cached versions of vendor sites, forums,
+    and content that may have been removed. No API key needed.
+
+    Args:
+        url: The URL or domain to search for archived snapshots.
+        limit: Maximum number of snapshots to return (default 5).
+
+    Returns:
+        List of archived snapshots with timestamps and archive URLs.
+    """
+    import httpx
+
+    try:
+        # CDX API for searching archived URLs
+        resp = httpx.get(
+            "https://web.archive.org/cdx/search/cdx",
+            params={
+                "url": url,
+                "output": "json",
+                "limit": limit,
+                "fl": "timestamp,original,statuscode,mimetype",
+                "filter": "statuscode:200",
+                "collapse": "timestamp:8",  # One per day
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        return f"[TOOL_ERROR] Wayback Machine search failed: {exc}"
+
+    if not data or len(data) <= 1:
+        return f"No Wayback Machine snapshots for: {url}"
+
+    # First row is header
+    header = data[0]
+    rows = data[1:]
+
+    formatted = []
+    for i, row in enumerate(rows[:limit], 1):
+        record = dict(zip(header, row))
+        ts = record.get("timestamp", "")
+        original = record.get("original", "")
+        # Format timestamp as readable date
+        date_str = f"{ts[:4]}-{ts[4:6]}-{ts[6:8]}" if len(ts) >= 8 else ts
+        archive_url = f"https://web.archive.org/web/{ts}/{original}"
+        formatted.append(f"{i}. [{original}]({archive_url})\n   Archived: {date_str}")
+
+    return "\n\n".join(formatted)
+
+
+@tool
+def wayback_fetch(url: str, timestamp: str = "") -> str:
+    """Fetch an archived page from the Wayback Machine.
+
+    Retrieves the content of a specific archived snapshot. Use wayback_search
+    first to find available snapshots, then use this to read the content.
+
+    Args:
+        url: The original URL to fetch from the archive.
+        timestamp: Specific timestamp (YYYYMMDD format). If empty, fetches
+            the most recent snapshot.
+
+    Returns:
+        The archived page content (truncated to 15000 chars).
+    """
+    import httpx
+
+    if timestamp:
+        archive_url = f"https://web.archive.org/web/{timestamp}id_/{url}"
+    else:
+        archive_url = f"https://web.archive.org/web/id_/{url}"
+
+    try:
+        resp = httpx.get(
+            archive_url,
+            timeout=30,
+            follow_redirects=True,
+        )
+        resp.raise_for_status()
+        return resp.text[:15000]
+    except Exception as exc:
+        return f"[TOOL_ERROR] Wayback Machine fetch failed: {exc}"
+
+
+@tool
+def archive_today_fetch(url: str) -> str:
+    """Fetch a cached page from archive.today (archive.ph).
+
+    Alternative to the Wayback Machine. archive.today takes independent
+    snapshots of web pages and is often available when the Wayback Machine
+    is down or blocked. No API key needed.
+
+    If no existing snapshot is found, returns a message indicating no
+    cached version is available.
+
+    Args:
+        url: The URL to look up in archive.today's cache.
+
+    Returns:
+        The cached page content (truncated to 15000 chars), or error message.
+    """
+    import httpx
+
+    try:
+        # archive.today's lookup endpoint — returns the most recent snapshot
+        search_url = f"https://archive.ph/newest/{url}"
+        resp = httpx.get(
+            search_url,
+            timeout=30,
+            follow_redirects=True,
+        )
+        if resp.status_code == 404:
+            return f"No archive.today snapshot found for: {url}"
+        resp.raise_for_status()
+        return resp.text[:15000]
+    except Exception as exc:
+        return f"[TOOL_ERROR] archive.today fetch failed: {exc}"
+
+
+@tool
+def similar_sites_search(domain: str) -> str:
+    """Find websites similar to a given domain.
+
+    Uses the SimilarSites API to discover competitor and related websites
+    programmatically. Useful for OSINT snowball sampling — once you find
+    one vendor/source, use this to find related ones. Free tier allows
+    5000 queries/day. Requires SIMILARSITES_API_KEY.
+
+    Args:
+        domain: The domain to find similar sites for (e.g. "sterydysklep.com").
+
+    Returns:
+        List of similar/related domains with similarity scores.
+    """
+    import httpx
+
+    api_key = os.environ.get("SIMILARSITES_API_KEY", "")
+    if not api_key:
+        return (
+            "[TOOL_ERROR] SimilarSites API key not configured. "
+            "Set SIMILARSITES_API_KEY in .env. "
+            "Get a free key at https://rapidapi.com/similarsitecheck/api/similarsites"
+        )
+
+    try:
+        resp = httpx.get(
+            "https://similarsites.p.rapidapi.com/similarsites",
+            params={"url": domain},
+            headers={
+                "X-RapidAPI-Key": api_key,
+                "X-RapidAPI-Host": "similarsites.p.rapidapi.com",
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        return f"[TOOL_ERROR] SimilarSites search failed: {exc}"
+
+    sites = data.get("similarSites", data.get("sites", []))
+    if not sites:
+        return f"No similar sites found for: {domain}"
+
+    formatted = []
+    for i, site in enumerate(sites[:20], 1):
+        if isinstance(site, dict):
+            name = site.get("url", site.get("name", ""))
+            score = site.get("score", site.get("similarity", ""))
+            formatted.append(f"{i}. {name} (similarity: {score})")
+        else:
+            formatted.append(f"{i}. {site}")
+    return "\n".join(formatted)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -313,7 +644,7 @@ def grok_deep_research(query: str, search_type: str = "both") -> str:
         return "[TOOL_ERROR] Grok deep research unavailable: XAI_API_KEY not set."
 
     api_base = os.environ.get("GROK_RESPONSES_API_BASE", "https://api.x.ai")
-    grok_model = os.environ.get("GROK_SEARCH_MODEL", "grok-3")
+    grok_model = os.environ.get("GROK_SEARCH_MODEL", "grok-4")
 
     tools_list = []
     if search_type in ("web", "both"):
@@ -1051,6 +1382,25 @@ brightdata_mcp = MCPClient(
 )
 
 
+# ── Reddit MCP ────────────────────────────────────────────────────────
+# pip: reddit-no-auth-mcp-server  (MIT, eliasbiondo/reddit-mcp-server)
+# Zero-config — no API key, no authentication needed.
+# Tools: reddit_search, reddit_get_subreddit_posts, reddit_get_post_details,
+#   reddit_get_user_activity, reddit_get_user_posts
+# Critical for forum mining — real user discussions, vendor reviews, community
+# recommendations that search engines don't surface.
+reddit_mcp = MCPClient(
+    lambda: stdio_client(
+        StdioServerParameters(
+            command="uvx",
+            args=["reddit-no-auth-mcp-server"],
+            env=_full_env(),
+        )
+    ),
+    startup_timeout=_MCP_STARTUP_TIMEOUT,
+)
+
+
 def _streamablehttp_transport(url: str, headers: dict):
     """Create a StreamableHTTP transport for remote MCP servers."""
     from mcp.client.streamable_http import streamablehttp_client
@@ -1072,6 +1422,7 @@ _MCP_REGISTRY = {
 
 # MCP servers that are free / don't require API keys — always loaded
 _FREE_MCP_SERVERS = [
+    reddit_mcp,
     semantic_scholar_mcp,
     arxiv_mcp,
     wikipedia_mcp,
@@ -1091,12 +1442,13 @@ def get_all_mcp_clients():
 
 # ── Native tool tier lists ───────────────────────────────────────────
 
-# Tier 1 uncensored tools — duckduckgo is always available (no key needed),
-# mojeek requires MOJEEK_API_KEY so it is gated in get_native_tools().
-NATIVE_TOOLS_TIER1 = [duckduckgo_search, mojeek_search]
+# Tier 1 uncensored tools — duckduckgo + stract are always available (no key),
+# mojeek requires MOJEEK_API_KEY, yandex requires YANDEX_SEARCH_API_KEY —
+# both gated in get_native_tools().
+NATIVE_TOOLS_TIER1 = [duckduckgo_search, mojeek_search, stract_search, yandex_search]
 
-# Tier 2 content extraction tools — always included
-NATIVE_TOOLS_TIER2 = [jina_read_url]
+# Tier 2 content extraction tools — jina always included, wayback + archive.today always included
+NATIVE_TOOLS_TIER2 = [jina_read_url, wayback_search, wayback_fetch, archive_today_fetch]
 
 # Tier 3 censored fallback — only if API key is set
 NATIVE_TOOLS_TIER3 = [google_search]
@@ -1126,10 +1478,20 @@ def get_native_tools():
     Tools that require an API key are only included when their key is
     configured, so the LLM won't waste a tool call on a guaranteed error.
     """
-    tools = [duckduckgo_search]  # always available (no key needed)
+    # Tier 1 — uncensored search
+    tools = [duckduckgo_search, stract_search]  # always available (no key needed)
     if os.environ.get("MOJEEK_API_KEY"):
         tools.append(mojeek_search)
+    if os.environ.get("YANDEX_SEARCH_API_KEY") and os.environ.get("YANDEX_FOLDER_ID"):
+        tools.append(yandex_search)
+
+    # Tier 2 — content extraction (jina + wayback + archive.today always available)
     tools.extend(NATIVE_TOOLS_TIER2)
+    # similar_sites_search — gated on SIMILARSITES_API_KEY
+    if os.environ.get("SIMILARSITES_API_KEY"):
+        tools.append(similar_sites_search)
+
+    # Tier 3 — censored fallback
     if os.environ.get("SERPER_API_KEY"):
         tools.extend(NATIVE_TOOLS_TIER3)
 
@@ -1145,4 +1507,26 @@ def get_native_tools():
 
     # Research management — always available
     tools.extend(NATIVE_TOOLS_RESEARCH_MGMT)
+
+    # Persistent cache tools — always available
+    try:
+        from cache import CACHE_TOOLS
+        tools.extend(CACHE_TOOLS)
+    except ImportError:
+        logger.debug("Cache module not available — cache tools skipped")
+
+    # YouTube intelligence tools — always available (yt-dlp checked at runtime)
+    try:
+        from youtube_tools import YOUTUBE_TOOLS
+        tools.extend(YOUTUBE_TOOLS)
+    except ImportError:
+        logger.debug("YouTube tools module not available — YouTube tools skipped")
+
+    # Scientific document & book acquisition tools — always available
+    try:
+        from document_tools import DOCUMENT_TOOLS
+        tools.extend(DOCUMENT_TOOLS)
+    except ImportError:
+        logger.debug("Document tools module not available — document tools skipped")
+
     return tools
