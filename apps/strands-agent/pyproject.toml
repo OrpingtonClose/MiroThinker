@@ -15,6 +15,9 @@ dependencies = [
     "httpx",
     "pdfplumber",
     "yt-dlp",
+    "EbookLib",
+    "beautifulsoup4",
+    "lxml",
 ]
 
 [build-system]
