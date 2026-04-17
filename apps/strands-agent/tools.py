@@ -259,16 +259,18 @@ def yandex_search(query: str, max_results: int = 10) -> str:
         return "\n\n".join(formatted)
 
     formatted = []
-    for i, group in enumerate(groups[:max_results], 1):
+    count = 0
+    for group in groups[:max_results]:
         docs = group.get("documents", [])
         if not docs:
             continue
+        count += 1
         doc = docs[0]
         title = doc.get("title", "")
         url = doc.get("url", "")
         passages = doc.get("passages", [])
         snippet = passages[0] if passages else ""
-        formatted.append(f"{i}. [{title}]({url})\n   {snippet}")
+        formatted.append(f"{count}. [{title}]({url})\n   {snippet}")
     return "\n\n".join(formatted) if formatted else f"No Yandex results for: {query}"
 
 
