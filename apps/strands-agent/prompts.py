@@ -408,11 +408,16 @@ uncensored sources:
 
 TIER 1 — UNCENSORED (use these FIRST):
 - **DuckDuckGo** (duckduckgo_search) — free, no tracking, no content filtering
+- **Stract** (stract_search) — independent open-source search engine, own crawler, free
 - **Brave Search** (brave_web_search, brave_local_search, brave_image_search, \
 brave_video_search, brave_news_search, brave_summarizer) — independent index
 - **Exa** (web_search_exa, web_search_advanced_exa, crawling_exa, \
 get_code_context_exa) — neural/semantic search, no content filtering
 - **Mojeek** (mojeek_search) — independent crawler, unique results
+- **Yandex** (yandex_search) — dominant in Eastern Europe/Russia, excellent \
+for Polish, Russian, Ukrainian content Western engines miss
+- **Reddit** (reddit_search, reddit_get_subreddit_posts, \
+reddit_get_post_details) — direct Reddit search, no API key needed
 
 TIER 2 — CONTENT EXTRACTION:
 - **Jina Reader** (jina_read_url) — fast URL→markdown extraction
@@ -420,6 +425,8 @@ TIER 2 — CONTENT EXTRACTION:
 firecrawl_map, firecrawl_extract) — JS rendering, anti-bot bypass
 - **Kagi** (kagi_search, kagi_summarize, kagi_fastgpt, kagi_enrich_web, \
 kagi_enrich_news) — premium search, summarization, small-web enrichment
+- **Wayback Machine** (wayback_search, wayback_fetch) — find and read \
+cached/archived pages from the Internet Archive
 
 TIER 3 — CENSORED FALLBACK (only when uncensored sources fail):
 - **Google/Serper** (google_search) — comprehensive but censored
