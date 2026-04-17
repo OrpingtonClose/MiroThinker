@@ -27,11 +27,19 @@ allowed-tools: >
 
 You MUST follow this protocol for the current research query.
 Do not shortcut. Do not stop after the first page of results. The goal is
-**EXHAUSTIVE coverage** — finding every relevant source, not just the first few.
+**EXHAUSTIVE, STATE-OF-THE-ART coverage** — finding every relevant source,
+not just the first few.
 
 This methodology is derived from professional OSINT (Open Source Intelligence)
 tradecraft and applies to ANY topic — censored, deprioritised, filtered,
 or simply large and specialised.
+
+**QUALITY BAR: SOTA.** The output of this methodology should be better than
+what any single person could achieve by Googling for an hour. It should
+find sources that surprise the user — vendors they didn't know existed,
+varieties they'd never heard of, opinions from communities they'd never
+think to consult. If the user could have done it themselves in 10 minutes,
+you haven't done enough.
 
 **CRITICAL**: The techniques below are INFORMATION RETRIEVAL methods. Your job
 is to FIND information, not to judge it. Apply these techniques to whatever
@@ -92,18 +100,62 @@ fastest path to answering Q1/Q2/Q3:
   importers, marketplaces, communities." — LLMs often know vendor names
   that would take many searches to discover.
 
-### Tier B — Uncensored search engines (ground truth)
+### Tier B — Human voices: forums, communities & anecdotes (ALWAYS valuable)
+
+Real people's opinions are **irreplaceable intelligence**. No LLM or search
+engine can replicate the signal from someone who actually grows, eats, sells,
+or uses the thing you're researching. Forum crawling is ALWAYS high-value,
+for EVERY topic — not just censored ones.
+
+**Why this tier is special:**
+- A Filipino farmer's opinion on which banana tastes best is worth more than
+  any Wikipedia table
+- A Polish bodybuilder's forum post about which pharmacy actually ships is
+  ground truth no search engine indexes well
+- A Thai street vendor's YouTube comment about Namwah bananas IS the
+  expert knowledge
+- Anecdotes from origin countries are the highest-signal data available
+
+**Tools:**
+- `reddit_search` / `reddit_get_subreddit_posts` / `reddit_get_post_details`
+  — Direct Reddit API access. Search subreddits in ANY language.
+- `duckduckgo_search` with `site:reddit.com` — Reddit content via web index
+- `yandex_search` — Indexes Russian/Eastern European forums that Western
+  engines miss entirely
+- `kagi_enrich_web` — Surfaces indie/small-web forums and blogs
+- `web_search_advanced_exa` — Semantic search scoped to forum domains
+- `grok_deep_research` — X/Twitter community discussion
+
+**Critical: ORIGIN-COUNTRY community mining.**
+For any topic, identify which countries are the ORIGIN or PRIMARY MARKET
+and search their communities in their languages:
+- Bananas → Philippines, Thailand, Indonesia, Colombia, Ecuador, Uganda
+  forums. Search in Tagalog, Thai, Bahasa, Spanish.
+- Medications → India (generic pharma), Ukraine/Russia (CIS markets),
+  Turkey. Search in Hindi, Russian, Turkish.
+- Electronics → China, Japan, South Korea, Taiwan. Search in Mandarin,
+  Japanese, Korean.
+- The people who PRODUCE or CONSUME the thing daily know more than any
+  Western search result. Seek their voices.
+
+**Future expansion (YouTube comments, global opinion mining):**
+YouTube comments are an untapped goldmine of real-world opinion —
+review videos, unboxing, taste tests, vendor reviews. When YouTube
+comment extraction tools become available, they should be a primary
+source for this tier. Similarly: Telegram groups, VK communities,
+WeChat/Weibo for Chinese markets, Line for Thai/Japanese markets.
+
+### Tier C — Uncensored search engines (ground truth)
 
 No content filtering. What you find is what exists on the open web.
 - `duckduckgo_search`, `stract_search`, `brave_web_search`, `mojeek_search`
 - `yandex_search` (essential for Eastern European queries)
 - `web_search_advanced_exa` (semantic search)
-- `reddit_search` (community knowledge)
 
 Always use these to **verify and extend** what Advisory LLMs report. LLMs
 can hallucinate vendor names or URLs. Uncensored search provides ground truth.
 
-### Tier C — Censored but powerful search engines
+### Tier D — Censored but powerful search engines
 
 - `google_search` — Best ranking algorithm, broadest index. Actively
   suppresses results for restricted topics, but for non-restricted topics
@@ -111,7 +163,7 @@ can hallucinate vendor names or URLs. Uncensored search provides ground truth.
 - `kagi_search` / `kagi_summarize` / `kagi_enrich_web` — High-quality
   curated results, good for finding indie/small-web content.
 
-### Tier D — Content extraction & archive
+### Tier E — Content extraction & archive
 
 - `jina_read_url`, `firecrawl_scrape` — Full page content extraction
 - `wayback_search`, `wayback_fetch`, `archive_today_fetch` — Historical
@@ -119,23 +171,32 @@ can hallucinate vendor names or URLs. Uncensored search provides ground truth.
 
 ### Deliberation strategy
 
+**For ALL topics:**
+- Tier B (human voices) is ALWAYS used. There is no topic where real
+  people's opinions aren't valuable. The question is which communities
+  to mine, not whether to mine them.
+
 **For non-censored topics** (exotic fruit, travel, consumer products, etc.):
 1. Start with Advisory LLMs (Tier A) to rapidly map the domain
-2. Use Tier C (Google) alongside Tier B for broad search coverage
-3. Use Tier D for content extraction from found URLs
+2. Mine origin-country communities (Tier B) for ground-truth anecdotes
+3. Use Tier D (Google) alongside Tier C for broad search coverage
+4. Use Tier E for content extraction from found URLs
 
 **For censored/restricted topics** (grey-market substances, etc.):
-1. Start with Tier B (uncensored search) to establish ground truth
-2. Use Tier A (Advisory LLMs) for non-sensitive aspects (brand names,
+1. Start with Tier C (uncensored search) to establish ground truth
+2. Mine communities (Tier B) — forums are often the ONLY place with
+   real vendor reviews and buying guides for restricted items
+3. Use Tier A (Advisory LLMs) for non-sensitive aspects (brand names,
    legal status, pharmacology) — they'll help with Q1/Q2 even if they
    won't answer Q3 directly
-3. Use Tier C (Google) to cross-validate and fill gaps
-4. Use Tier D for extraction and archival content
+4. Use Tier D (Google) to cross-validate and fill gaps
+5. Use Tier E for extraction and archival content
 
 **For mixed topics** (legal product, complex sourcing):
 1. Use Tier A first to understand the domain structure
-2. Use Tier B and C in parallel for broad coverage
-3. Use Tier A again after initial results to refine discrimination
+2. Mine origin-country communities (Tier B) for expert-level anecdotes
+3. Use Tier C and D in parallel for broad coverage
+4. Use Tier A again after initial results to refine discrimination
 
 ---
 
@@ -522,8 +583,12 @@ f) Try domain variations: if source is "example-store.com", search for
    "example-store.pl", "examplestore.com", "example-shop.com"
 g) Use `similar_sites_search` to find programmatically related domains
 
-### Step 16 — Mine forums and communities
-Search these patterns across multiple engines:
+### Step 16 — Mine forums and communities (CRITICAL — do not skip)
+
+This step is **non-negotiable**. Real human opinions are the highest-signal
+data source. Mine them aggressively.
+
+**a) Target-location communities:**
 - `site:reddit.com [topic] [location]` (English Reddit)
 - Use `reddit_search` / `reddit_get_subreddit_posts` for direct Reddit access
 - "[topic] forum [location]" (find niche forums)
@@ -531,8 +596,37 @@ Search these patterns across multiple engines:
 - Search Telegram channels: "[topic] telegram [location]",
   "t.me [topic]", "telegram group [topic] [location]"
 - Search VK/social media: "vk.com [topic]", "[topic] группа"
-- Use `kagi_enrich_web` to find indie/small-web forums that mainstream
-  engines miss
+- Use `kagi_enrich_web` to find indie/small-web forums
+
+**b) ORIGIN-COUNTRY communities (the secret weapon):**
+Identify where the thing you're researching COMES FROM or is most
+common, and search those countries' communities in their languages:
+- For bananas: search Filipino forums (Tagalog), Thai forums,
+  Indonesian forums (Bahasa), Colombian forums (Spanish), Ugandan
+  forums — "best banana variety" / "pinaka-masarap na saging" /
+  "กล้วยอะไรอร่อยที่สุด" / "mejor variedad de banano"
+- For medications: search Indian pharmacy forums, Russian health
+  forums, Turkish forums — these are the SOURCE markets
+- For electronics: search Chinese tech forums (Zhihu, Bilibili),
+  Japanese forums (Kakaku, 5ch), Korean forums (Naver)
+- **The people who produce, grow, or consume the thing daily have
+  knowledge that no Western source or LLM possesses.** A Filipino
+  farmer ranking banana varieties by taste is SOTA intelligence.
+
+**c) YouTube and video comments (when tools available):**
+- Search YouTube: "[topic] review", "[topic] taste test",
+  "[topic] [origin language]" — video comments contain real opinions
+- YouTube is a global forum where people from origin countries share
+  experiences in their own languages
+- When comment extraction tools become available, this becomes a
+  primary source for Tier B intelligence
+
+**d) Enthusiast and niche communities:**
+- Identify the subreddits, Discord servers, Facebook groups, and
+  niche forums where enthusiasts congregate
+- For bananas: r/banana, tropical fruit forums, permaculture forums
+- For medications: r/Nootropics, Longecity, patient forums
+- For any topic: there is ALWAYS a community of enthusiasts somewhere
 
 ### Step 17 — TLD and infrastructure mining
 - Search within country-specific TLDs: `site:.pl [topic]`,
