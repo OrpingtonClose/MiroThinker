@@ -853,7 +853,7 @@ def download_book(
         return "[ERROR] Provide at least one of: url, md5, or doi"
 
     # Build a cache key
-    cache_key = url or f"md5://{md5}" or f"doi://{doi}"
+    cache_key = url or (f"md5://{md5}" if md5 else "") or (f"doi://{doi}" if doi else "")
 
     # Check cache first
     cached = _cache_lookup_book(cache_key)
