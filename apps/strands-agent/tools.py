@@ -383,7 +383,7 @@ def wayback_fetch(url: str, timestamp: str = "") -> str:
     if timestamp:
         archive_url = f"https://web.archive.org/web/{timestamp}id_/{url}"
     else:
-        archive_url = f"https://web.archive.org/web/{url}"
+        archive_url = f"https://web.archive.org/web/2id_/{url}"
 
     try:
         resp = httpx.get(
