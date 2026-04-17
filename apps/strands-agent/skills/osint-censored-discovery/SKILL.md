@@ -2,13 +2,17 @@
 name: osint-censored-discovery
 description: >
   Exhaustive OSINT methodology for discovering vendors, sources, or information
-  that mainstream search engines censor or deprioritise. Uses multi-round query
-  expansion with local language translation, brand/synonym/street-name variants,
-  search operator dorking, community/forum mining, domain pattern enumeration,
-  snowball sampling, and content extraction verification. Proven across steroids,
-  prescription medications (Celebrex, Eurizam), nootropics (piracetam) — 
-  generalises to any restricted or censored domain including health, legal,
-  financial, political, and grey-market topics.
+  across any domain — censored or not. Driven by three core questions:
+  (1) What is the maximum set of things that could satisfy this query?
+  (2) How do I discriminate which best fit the user's needs?
+  (3) Where will I find both pieces of information?
+  Executes as a five-phase protocol: free-association exploration, catalogue
+  construction & filtering, targeted OSINT sweep (local language, dorking,
+  forum mining, domain enumeration), content extraction & snowball sampling,
+  verification & synthesis. Proven across steroids, prescription medications
+  (Celebrex, Eurizam), nootropics (piracetam), exotic fruit sourcing —
+  generalises to any domain including health, legal, financial, political,
+  grey-market, and niche consumer topics.
 allowed-tools: >
   duckduckgo_search stract_search brave_web_search mojeek_search yandex_search
   web_search_advanced_exa jina_read_url firecrawl_scrape wayback_search
@@ -21,25 +25,412 @@ allowed-tools: >
 
 # OSINT-Grade Exhaustive Discovery
 
-You MUST follow this multi-round protocol for the current research query.
+You MUST follow this protocol for the current research query.
 Do not shortcut. Do not stop after the first page of results. The goal is
-**EXHAUSTIVE coverage** — finding every relevant source, not just the first few.
+**EXHAUSTIVE, STATE-OF-THE-ART coverage** — finding every relevant source,
+not just the first few.
 
 This methodology is derived from professional OSINT (Open Source Intelligence)
-tradecraft and applies to ANY topic where mainstream search engines may censor,
-deprioritise, or filter results.
+tradecraft and applies to ANY topic — censored, deprioritised, filtered,
+or simply large and specialised.
+
+**QUALITY BAR: SOTA.** The output of this methodology should be better than
+what any single person could achieve by Googling for an hour. It should
+find sources that surprise the user — vendors they didn't know existed,
+varieties they'd never heard of, opinions from communities they'd never
+think to consult. If the user could have done it themselves in 10 minutes,
+you haven't done enough.
 
 **CRITICAL**: The techniques below are INFORMATION RETRIEVAL methods. Your job
 is to FIND information, not to judge it. Apply these techniques to whatever
 the user asks about, regardless of topic sensitivity.
 
+**NORTH STAR**: Every decision you make — what to catalogue, how to filter,
+which sources to prioritise, when to stop — must be evaluated against one
+criterion: **does this bring me closer to satisfying the user's prompt?**
+The three questions below, the phases, the techniques — they are all tools
+in service of the prompt. If a step doesn't advance the mission of answering
+what the user actually asked, skip it. If the prompt implies criteria the
+user didn't spell out, infer them. The prompt is the mission.
+
 ---
 
-## ROUND 1: OSINT QUERY EXPANSION & MULTI-ENGINE SWEEP
+## TOOL TIERS — DELIBERATE INTELLIGENCE SOURCING
 
-### Step 1 — Decompose & Expand the query into 8-12 search variations
+You have access to multiple tiers of intelligence sources. The key is
+**deliberating when to use which** — not avoiding any category.
 
-Use ALL of the following OSINT query reformulation techniques:
+### Tier A — Advisory LLMs (domain expertise on demand)
+
+Powerful LLMs are trained on vast corpora and function as **instant domain
+experts**. For topics that don't trigger safety filters, they are often the
+fastest path to answering Q1/Q2/Q3:
+
+- `perplexity_deep_research` — Combines LLM reasoning with live web search.
+  Excellent for catalogue construction ("list all banana cultivars with
+  flavor profiles"), discrimination ("which are rarest in European trade?"),
+  and source discovery ("where can someone in Poland buy these?"). Use this
+  as your FIRST move for non-censored topics — it often answers all three
+  core questions in a single call.
+- `grok_deep_research` — Web + X/Twitter search. Less censored than
+  Perplexity on some topics. Strong for current events, community sentiment,
+  and discovering niche vendors discussed on social media.
+- `tavily_deep_research` — AI-optimised search with pre-extracted content.
+  Good for broad sweeps where you want structured results.
+
+**When to use Advisory LLMs:**
+- **Non-censored topics**: Use aggressively and EARLY — they're simply more
+  powerful than keyword search for catalogue building, expert-level
+  discrimination, and source discovery. A single Perplexity call about
+  banana cultivars returns more structured knowledge than 10 keyword searches.
+- **Partially censored topics**: Use for the non-sensitive aspects. E.g.,
+  for "buy piracetam in Poland" — an LLM can list all brand names and
+  explain the legal status, even if it won't provide vendor URLs directly.
+- **Fully censored topics**: Use cautiously after uncensored search engines
+  have established a baseline. LLMs may refuse, hallucinate, or redirect.
+  Skip if they refuse — don't waste turns arguing with safety filters.
+
+**How to use them for each core question:**
+- **Q1 (maximum set)**: "List every [X] that exists, with classification
+  and key attributes" — LLMs excel at this for well-documented domains.
+- **Q2 (discrimination)**: "Among these [X], which are the rarest / most
+  exotic / most [criteria]? Rank them." — LLMs can apply expert judgement
+  that keyword searches cannot.
+- **Q3 (sources)**: "Where can someone in [location] buy [X]? List vendors,
+  importers, marketplaces, communities." — LLMs often know vendor names
+  that would take many searches to discover.
+
+### Tier B — Human voices: forums, communities & anecdotes (ALWAYS valuable)
+
+Real people's opinions are **irreplaceable intelligence**. No LLM or search
+engine can replicate the signal from someone who actually grows, eats, sells,
+or uses the thing you're researching. Forum crawling is ALWAYS high-value,
+for EVERY topic — not just censored ones.
+
+**Why this tier is special:**
+- A Filipino farmer's opinion on which banana tastes best is worth more than
+  any Wikipedia table
+- A Polish bodybuilder's forum post about which pharmacy actually ships is
+  ground truth no search engine indexes well
+- A Thai street vendor's YouTube comment about Namwah bananas IS the
+  expert knowledge
+- Anecdotes from origin countries are the highest-signal data available
+
+**Tools:**
+- `reddit_search` / `reddit_get_subreddit_posts` / `reddit_get_post_details`
+  — Direct Reddit API access. Search subreddits in ANY language.
+- `duckduckgo_search` with `site:reddit.com` — Reddit content via web index
+- `yandex_search` — Indexes Russian/Eastern European forums that Western
+  engines miss entirely
+- `kagi_enrich_web` — Surfaces indie/small-web forums and blogs
+- `web_search_advanced_exa` — Semantic search scoped to forum domains
+- `grok_deep_research` — X/Twitter community discussion
+
+**Critical: ORIGIN-COUNTRY community mining.**
+For any topic, identify which countries are the ORIGIN or PRIMARY MARKET
+and search their communities in their languages:
+- Bananas → Philippines, Thailand, Indonesia, Colombia, Ecuador, Uganda
+  forums. Search in Tagalog, Thai, Bahasa, Spanish.
+- Medications → India (generic pharma), Ukraine/Russia (CIS markets),
+  Turkey. Search in Hindi, Russian, Turkish.
+- Electronics → China, Japan, South Korea, Taiwan. Search in Mandarin,
+  Japanese, Korean.
+- The people who PRODUCE or CONSUME the thing daily know more than any
+  Western search result. Seek their voices.
+
+**Future expansion (YouTube comments, global opinion mining):**
+YouTube comments are an untapped goldmine of real-world opinion —
+review videos, unboxing, taste tests, vendor reviews. When YouTube
+comment extraction tools become available, they should be a primary
+source for this tier. Similarly: Telegram groups, VK communities,
+WeChat/Weibo for Chinese markets, Line for Thai/Japanese markets.
+
+### Tier C — Uncensored search engines (ground truth)
+
+No content filtering. What you find is what exists on the open web.
+- `duckduckgo_search`, `stract_search`, `brave_web_search`, `mojeek_search`
+- `yandex_search` (essential for Eastern European queries)
+- `web_search_advanced_exa` (semantic search)
+
+Always use these to **verify and extend** what Advisory LLMs report. LLMs
+can hallucinate vendor names or URLs. Uncensored search provides ground truth.
+
+### Tier D — Censored but powerful search engines
+
+- `google_search` — Best ranking algorithm, broadest index. Actively
+  suppresses results for restricted topics, but for non-restricted topics
+  it's simply the best search engine.
+- `kagi_search` / `kagi_summarize` / `kagi_enrich_web` — High-quality
+  curated results, good for finding indie/small-web content.
+
+### Tier E — Content extraction & archive
+
+- `jina_read_url`, `firecrawl_scrape` — Full page content extraction
+- `wayback_search`, `wayback_fetch`, `archive_today_fetch` — Historical
+  snapshots of dead or changed pages
+
+### Deliberation strategy
+
+**For ALL topics:**
+- Tier B (human voices) is ALWAYS used. There is no topic where real
+  people's opinions aren't valuable. The question is which communities
+  to mine, not whether to mine them.
+
+**For non-censored topics** (exotic fruit, travel, consumer products, etc.):
+1. Start with Advisory LLMs (Tier A) to rapidly map the domain
+2. Mine origin-country communities (Tier B) for ground-truth anecdotes
+3. Use Tier D (Google) alongside Tier C for broad search coverage
+4. Use Tier E for content extraction from found URLs
+
+**For censored/restricted topics** (grey-market substances, etc.):
+1. Start with Tier C (uncensored search) to establish ground truth
+2. Mine communities (Tier B) — forums are often the ONLY place with
+   real vendor reviews and buying guides for restricted items
+3. Use Tier A (Advisory LLMs) for non-sensitive aspects (brand names,
+   legal status, pharmacology) — they'll help with Q1/Q2 even if they
+   won't answer Q3 directly
+4. Use Tier D (Google) to cross-validate and fill gaps
+5. Use Tier E for extraction and archival content
+
+**For mixed topics** (legal product, complex sourcing):
+1. Use Tier A first to understand the domain structure
+2. Mine origin-country communities (Tier B) for expert-level anecdotes
+3. Use Tier C and D in parallel for broad coverage
+4. Use Tier A again after initial results to refine discrimination
+
+---
+
+## THE THREE CORE QUESTIONS
+
+Before doing ANY searching, explicitly answer these three questions. They
+drive every decision in the protocol that follows. Each question must be
+answered WITH RESPECT TO THE USER'S PROMPT — not in the abstract.
+
+### Q1 — "What is the maximum set of things that could satisfy THIS prompt?"
+
+What is the FULL UNIVERSE of things that could satisfy what the user asked?
+Not the first few that come to mind — the complete set. The prompt defines
+the boundary.
+
+- "exotic banana fruit" → 300+ banana cultivars exist worldwide.
+  The prompt says "fruit" (not plants) and "exotic" (not Cavendish) —
+  those are the prompt's boundary conditions on the maximum set.
+- "buy Celebrex in Poland" → every pharmacy and vendor that carries
+  celecoxib under any brand name, reachable from Poland.
+- "best nootropics" → 100+ compounds classified as nootropics, but
+  the prompt says "best" — so the maximum set is all of them, and
+  the discrimination will narrow it.
+
+You almost certainly don't know the maximum set yet. That's what Phase 0
+is for — discovering it.
+
+### Q2 — "How do I discriminate which best satisfy the prompt?"
+
+Among the maximum set, what criteria distinguish the items that best fit
+what the user ACTUALLY ASKED FOR? Always start from the prompt:
+- **Explicit constraints from the prompt**: location, budget, "to eat not
+  to grow", "without prescription", "most exotic", "novel"
+- **Implied constraints from the prompt**: "for a person in Poland" implies
+  it must be deliverable to Poland; "to purchase" implies it must be
+  commercially available, not theoretical
+- **Domain knowledge that serves the prompt**: rarity rankings, flavor
+  uniqueness, legal status in the target jurisdiction, seasonal availability
+- The prompt is the arbiter. If you're unsure whether a criterion matters,
+  re-read the prompt.
+
+### Q3 — "Where will I find both pieces of information?"
+
+What sources will tell you BOTH what exists (the catalogue) AND where to
+obtain it (the vendors/sources)? These are often different:
+- Wikipedia tells you what banana cultivars exist, but not where to buy them
+- A vendor's product page tells you where to buy, but only what they stock
+- A community forum may tell you both — what's worth seeking AND where
+  people actually found it
+
+Your search strategy must cover sources for BOTH the catalogue and the
+availability — and recognise that the best results come from sources that
+answer both questions simultaneously (enthusiast communities, specialist
+review sites, trade directories).
+
+**Always circle back to the prompt**: the sources you need are determined
+by what the user asked. "Buy exotic banana fruit in Poland" needs both
+a cultivar catalogue AND Polish/EU vendor discovery. "Find Celebrex
+without prescription" needs a brand-name catalogue AND pharmacy discovery.
+The prompt tells you what "both pieces" are.
+
+---
+
+## PHASE 0: FREE-ASSOCIATION EXPLORATION
+
+**Purpose**: Answer the three core questions well enough to proceed
+systematically. You don't know what you don't know yet.
+
+### Step 1 — Broad exploratory searches (2-4 searches + Advisory LLM)
+
+Run a few open-ended searches to orient yourself. You are NOT trying to
+find vendors or sources yet. You are trying to discover:
+- What does this domain look like? What are the main categories?
+- What terminology do insiders use? What jargon exists?
+- What are the key subdivisions, taxonomies, or classification systems?
+- Are there authoritative reference sources (Wikipedia lists, databases,
+  industry directories, academic catalogues, government registries)?
+- What adjacent domains or communities are relevant?
+
+**Advisory LLM consultation (do this FIRST for non-censored topics):**
+Ask `perplexity_deep_research` or `grok_deep_research`:
+- "What is the complete taxonomy/classification of [topic]? How many
+  types/varieties/categories exist? What are the key reference sources?"
+This single call often maps the entire domain faster than multiple keyword
+searches. Verify the LLM's answer with search engine results.
+
+**Search patterns for exploration:**
+- `[topic] types varieties categories list`
+- `[topic] classification taxonomy`
+- `[topic] Wikipedia` or `[topic] complete list`
+- `[topic] guide beginner overview`
+- `[topic] [location] community forum`
+- `[topic] reddit guide` or `[topic] best [year]`
+
+### Step 2 — Answer Q1, Q2, Q3
+
+From the exploratory results, explicitly write down:
+
+**Q1 answer** — The maximum set:
+- What is the taxonomy? (e.g., banana cultivars classified by genome group)
+- How large is the full universe? (tens, hundreds, thousands)
+- Where is the authoritative catalogue? (Wikipedia list, database, registry)
+- Did the Advisory LLM provide a useful overview? Cross-check it.
+
+**Q2 answer** — Discrimination criteria (derived from the prompt):
+- Re-read the user's prompt. What did they actually ask for?
+- What dimensions matter ACCORDING TO THE PROMPT? ("most exotic" → rarity;
+  "to purchase" → commercial availability; "in Poland" → deliverability)
+- What should be filtered OUT based on the prompt? (e.g., ornamental plants
+  when user said "fruit"; common varieties when user said "exotic")
+- What implicit criteria does the prompt suggest? ("novel" implies the user
+  wants things they haven't seen before, not just "uncommon")
+
+**Q3 answer** — Source strategy:
+- Advisory LLMs: can they answer Q1/Q2/Q3 directly for this topic?
+  (If non-censored: yes, use them heavily. If censored: use for Q1/Q2 only.)
+- Catalogue sources: where to learn what exists (Wikipedia, ProMusa,
+  WHO Essential Medicines List, etc.)
+- Availability sources: where to find purchase/access options (vendors,
+  forums, marketplaces, specialist importers)
+- Dual-purpose sources: communities/forums that discuss both what's
+  desirable AND where to get it
+
+### Step 3 — Decide on approach
+
+Based on your answers:
+- **If authoritative catalogues exist** → proceed to Phase 1 (Catalogue
+  Construction). This is the case for most domains (drug types, plant
+  varieties, product categories, legal jurisdictions, etc.).
+- **If no catalogue exists** (truly uncharted territory) → skip to Phase 2
+  (Targeted Search) but use the terminology and structure you discovered
+  to craft much better queries than you would have without Phase 0.
+- **If the domain is small** (< 20 items total) → you may not need a
+  separate catalogue phase; just list what you found and proceed to
+  targeted searching for each item.
+
+---
+
+## PHASE 1: CATALOGUE CONSTRUCTION & FILTERING
+
+**Purpose**: Answer Q1 (maximum set) definitively, then apply Q2
+(discrimination criteria) to produce a focused shortlist. This prevents the
+common failure mode of searching for the first few items that come to mind
+and missing the long tail.
+
+### Step 4 — Extract the full catalogue from authoritative sources
+
+Use MULTIPLE source types to build the most complete catalogue possible:
+
+**a) Advisory LLM synthesis (fastest for non-censored topics):**
+Ask `perplexity_deep_research`: "List every known [X] with key attributes
+(name, classification, distinguishing features, rarity, availability).
+Be exhaustive — I want the complete set, not just the well-known ones."
+This often produces a well-structured catalogue in a single call. But
+ALWAYS cross-reference — LLMs may miss obscure items or hallucinate.
+
+**b) Authoritative reference extraction (ground truth):**
+Visit the authoritative sources identified in Phase 0 and extract the
+complete list. Use `jina_read_url` or `firecrawl_scrape` to get full
+content from:
+- Wikipedia "List of..." pages
+- Industry databases and directories
+- Academic/scientific catalogues
+- Government registries
+- Enthusiast community wikis
+- Trade association directories
+
+**c) Merge and deduplicate:**
+Combine what the LLM reported with what the reference sources contain.
+Items that appear in BOTH are high-confidence. Items that appear only
+in the LLM output need verification. Items that appear only in the
+reference sources may be obscure gems the LLM missed.
+
+**You want the COMPLETE list**, not a sample. If the Wikipedia page has
+200 entries, extract all 200. If a database has pagination, follow it.
+
+### Step 5 — Organise the raw catalogue
+
+Structure what you found into a working list with key attributes:
+- **Name** (including all synonyms, aliases, local-language names)
+- **Category/Classification** (using the domain's own taxonomy)
+- **Key attributes** relevant to the user's query (e.g., for bananas:
+  edible vs ornamental, flavor profile, rarity; for medications: active
+  ingredient, brand names by country, prescription status by jurisdiction)
+- **Rarity/novelty signal** — is this item common, uncommon, rare, or
+  extremely rare? (based on how frequently it appears in sources, whether
+  it's commercially produced, etc.)
+
+### Step 6 — Filter by the prompt's criteria
+
+Apply filters to narrow the catalogue to a workable shortlist. **Every
+filter must trace back to the user's prompt** — either an explicit
+constraint or a reasonable inference from what they asked.
+
+Re-read the prompt before filtering. Ask: "If I showed the user this
+item, would they say 'yes, that's what I meant' or 'no, that's not
+what I asked for'?"
+
+**Always filter out:**
+- Items the prompt excludes (explicitly or implicitly)
+- Items that are extinct, theoretical, or impossible to obtain
+  (unless the prompt is about theoretical/historical items)
+- Items that are the "boring default" when the prompt signals the user
+  wants something unusual (e.g., "exotic" ≠ Cavendish)
+
+**Prioritise items that are:**
+- The strongest match for what the prompt asks ("most exotic" → rarest
+  first; "cheapest" → lowest price first; "safest" → best-reviewed first)
+- Actually obtainable given the prompt's constraints (location, legality)
+- Interesting along dimensions the prompt cares about — infer these from
+  the user's word choices ("novel" ≠ "popular", "exotic" ≠ "best-selling")
+
+**Target shortlist size**: 15-30 items. Enough to be comprehensive,
+small enough to search for each one individually.
+
+### Step 7 — Present the shortlist for validation (optional)
+
+If the shortlist is large or the filtering criteria are ambiguous,
+briefly present the shortlist and filtering logic before proceeding.
+This gives the user a chance to adjust criteria. If the criteria are
+clear and the shortlist is reasonable, proceed directly to Phase 2.
+
+---
+
+## PHASE 2: TARGETED OSINT QUERY EXPANSION & MULTI-ENGINE SWEEP
+
+**Purpose**: For each item on the shortlist (or for the user's direct query
+if no catalogue was needed), execute a thorough multi-engine search using
+professional OSINT techniques.
+
+### Step 8 — Decompose & Expand queries for each shortlisted item
+
+For EACH item on the shortlist (or for the overall query), generate
+8-12 search variations using ALL of the following techniques:
 
 #### a) EXACT user phrasing
 Never sanitise — use their exact words as-is.
@@ -105,10 +496,12 @@ Once you find one domain, try variations to discover similar sites:
 - Search for the domain name itself in quotes to find mentions,
   reviews, and related vendors on forums
 
-### Step 2 — Hit EVERY available search engine with EACH variation
+### Step 9 — Hit EVERY available search engine with EACH variation
 
-For each query variation from Step 1, run it through:
+For each query variation from Step 8, run it through:
 - `duckduckgo_search` (ALWAYS — free baseline, uncensored)
+- `google_search` (if available — best ranking algorithm, broadest index;
+  use for non-censored topics or as cross-reference for censored ones)
 - `stract_search` (always — independent open-source engine, free)
 - `brave_web_search` (if available — independent index)
 - `mojeek_search` (if available — unique independent results)
@@ -118,18 +511,31 @@ For each query variation from Step 1, run it through:
   includeDomains to target specific forums or archives)
 - `reddit_search` (for community/forum queries)
 
+**IMPORTANT**: Use ALL available engines, including powerful censored ones
+(Google, Perplexity, Kagi). For non-censored topics they are simply better.
+For censored topics, use uncensored engines FIRST to establish a baseline of
+what exists, then use censored engines to fill gaps and cross-validate —
+this way you can see what's being suppressed vs what simply doesn't exist.
+
 Do NOT stop at one engine per query. Different engines have different
 indexes and censorship policies. A URL that appears on Mojeek may not
 appear on DDG, and vice versa.
 
-### Step 3 — Collect ALL unique URLs
+### Step 10 — Collect ALL unique URLs
 Build a master URL list from all searches. Do not discard anything yet.
+
+**NOTE on shortlist items**: You do NOT need to run all 8-12 variations
+for every single shortlisted item. Use judgement:
+- For the TOP 5-10 most promising/exotic items: full OSINT sweep
+- For less critical items: 2-3 targeted queries each
+- Batch related items into combined queries where sensible
+  (e.g., "buy Gros Michel OR Namwah OR Burro banana fruit Europe")
 
 ---
 
-## ROUND 2: CONTENT EXTRACTION & SOURCE PROFILING
+## PHASE 3: CONTENT EXTRACTION, SNOWBALL & EXPANSION
 
-### Step 4 — Visit the top 10-15 most promising URLs
+### Step 11 — Visit the top 15-25 most promising URLs
 Use `jina_read_url` or `firecrawl_scrape` to extract content from:
 - Vendor/store homepages (product listings, pricing, shipping info)
 - Forum threads mentioning vendors (real user reviews, warnings)
@@ -141,7 +547,7 @@ If a URL is dead or blocked:
 - Use `archive_today_fetch` as an alternative archive source
 - Search for the URL in quotes on DuckDuckGo to find cached/mirrored copies
 
-### Step 5 — For EVERY source/vendor found, extract and store:
+### Step 12 — For EVERY source/vendor found, extract and store:
 - Name and URL
 - Products/services available (names, categories, specifics)
 - Pricing (in local currency AND USD/EUR)
@@ -151,7 +557,7 @@ If a URL is dead or blocked:
 - Contact information if visible
 - Language(s) the site operates in
 
-### Step 6 — Store each source as a finding
+### Step 13 — Store each source as a finding
 Use `store_finding` for each vendor/source with:
 - name: source name
 - url: their homepage
@@ -159,17 +565,13 @@ Use `store_finding` for each vendor/source with:
 - summary: one-paragraph profile with key details
 - rating: 1-10 based on evidence quality
 
-### Step 7 — Build the knowledge graph
+### Step 14 — Build the knowledge graph
 Use `add_entity` for each vendor, product, forum, person.
 Use `add_edge` to connect them: vendor→sells→product, forum→mentions→vendor,
 vendor→ships_to→country, user_review→reviews→vendor, vendor→similar_to→vendor.
 
----
-
-## ROUND 3: SNOWBALL SAMPLING & OSINT EXPANSION
-
-### Step 8 — Snowball from found results (OSINT link analysis)
-For each source found in Round 2:
+### Step 15 — Snowball from found results (OSINT link analysis)
+For each source found:
 a) Search for "[source name] review" and "[source name] legit"
 b) Search for "[source name] alternative" and "sites like [source name]"
 c) Look at forum threads that mention the source — other sources are
@@ -181,8 +583,12 @@ f) Try domain variations: if source is "example-store.com", search for
    "example-store.pl", "examplestore.com", "example-shop.com"
 g) Use `similar_sites_search` to find programmatically related domains
 
-### Step 9 — Mine forums and communities
-Search these patterns across multiple engines:
+### Step 16 — Mine forums and communities (CRITICAL — do not skip)
+
+This step is **non-negotiable**. Real human opinions are the highest-signal
+data source. Mine them aggressively.
+
+**a) Target-location communities:**
 - `site:reddit.com [topic] [location]` (English Reddit)
 - Use `reddit_search` / `reddit_get_subreddit_posts` for direct Reddit access
 - "[topic] forum [location]" (find niche forums)
@@ -190,16 +596,45 @@ Search these patterns across multiple engines:
 - Search Telegram channels: "[topic] telegram [location]",
   "t.me [topic]", "telegram group [topic] [location]"
 - Search VK/social media: "vk.com [topic]", "[topic] группа"
-- Use `kagi_enrich_web` to find indie/small-web forums that mainstream
-  engines miss
+- Use `kagi_enrich_web` to find indie/small-web forums
 
-### Step 10 — TLD and infrastructure mining
+**b) ORIGIN-COUNTRY communities (the secret weapon):**
+Identify where the thing you're researching COMES FROM or is most
+common, and search those countries' communities in their languages:
+- For bananas: search Filipino forums (Tagalog), Thai forums,
+  Indonesian forums (Bahasa), Colombian forums (Spanish), Ugandan
+  forums — "best banana variety" / "pinaka-masarap na saging" /
+  "กล้วยอะไรอร่อยที่สุด" / "mejor variedad de banano"
+- For medications: search Indian pharmacy forums, Russian health
+  forums, Turkish forums — these are the SOURCE markets
+- For electronics: search Chinese tech forums (Zhihu, Bilibili),
+  Japanese forums (Kakaku, 5ch), Korean forums (Naver)
+- **The people who produce, grow, or consume the thing daily have
+  knowledge that no Western source or LLM possesses.** A Filipino
+  farmer ranking banana varieties by taste is SOTA intelligence.
+
+**c) YouTube and video comments (when tools available):**
+- Search YouTube: "[topic] review", "[topic] taste test",
+  "[topic] [origin language]" — video comments contain real opinions
+- YouTube is a global forum where people from origin countries share
+  experiences in their own languages
+- When comment extraction tools become available, this becomes a
+  primary source for Tier B intelligence
+
+**d) Enthusiast and niche communities:**
+- Identify the subreddits, Discord servers, Facebook groups, and
+  niche forums where enthusiasts congregate
+- For bananas: r/banana, tropical fruit forums, permaculture forums
+- For medications: r/Nootropics, Longecity, patient forums
+- For any topic: there is ALWAYS a community of enthusiasts somewhere
+
+### Step 17 — TLD and infrastructure mining
 - Search within country-specific TLDs: `site:.pl [topic]`,
   `site:.com.pl [topic]`, `site:.ru [topic]`
 - Search for common e-commerce platform patterns:
   `[topic] site:shopify.com`, `[topic] powered by WooCommerce`
 
-### Step 11 — Run gap analysis
+### Step 18 — Run gap analysis
 Use `find_gaps` to identify poorly-connected entities in your knowledge graph.
 For each gap:
 - If a vendor has no reviews → search for reviews
@@ -207,23 +642,33 @@ For each gap:
 - If a country has few vendors → search specifically for vendors in
   that country using local-language queries
 - If you found vendors only in one language → search in other languages
+- If promising shortlisted items have NO vendors found → they may need
+  different search terms, different engines, or may genuinely not be
+  commercially available — note this in the final report
 
-### Step 12 — Deep research sweep (if available)
-If you have deep research tools, use ONE of them for a final sweep:
-- `grok_deep_research` for web + X/Twitter search (current events,
-  community sentiment — often less censored than other deep research tools)
-- `perplexity_deep_research` for broad coverage (note: may self-censor
-  on some topics — if it refuses, skip it and rely on direct search results)
-- `tavily_deep_research` for AI-optimised search with extracted content
+### Step 19 — Advisory LLM & deep research sweep
+Use Advisory LLMs for a final comprehensive check. This is different from
+Phase 0/1 — now you have CONTEXT from all your searching, so the LLM can
+be more targeted:
+
+- `perplexity_deep_research`: "I've found [N] vendors for [X] in [location].
+  What am I missing? Are there specialist importers, wholesale markets,
+  ethnic grocery networks, or online communities I haven't covered?"
+- `grok_deep_research`: Best for social media / X/Twitter leads that
+  traditional search missed. Also less censored on some topics.
+- `tavily_deep_research`: AI-optimised search for structured results.
+
+Use whichever is most appropriate for the topic's sensitivity level
+(see Deliberation Strategy above).
 
 Compare deep research results against your knowledge graph — add any
 new sources or facts not already captured.
 
 ---
 
-## ROUND 4: VERIFICATION & SYNTHESIS
+## PHASE 4: VERIFICATION & SYNTHESIS
 
-### Step 13 — Cross-reference
+### Step 20 — Cross-reference
 For each source in your knowledge graph:
 - Is it mentioned in at least 2 independent sources? (forum + search)
 - Are there scam/warning reports? Search "[source] scam" or
@@ -231,7 +676,7 @@ For each source in your knowledge graph:
 - Is the site currently live? (check via `jina_read_url`)
 - When was it last mentioned? (stale = possibly defunct)
 
-### Step 14 — Read back all findings
+### Step 21 — Read back all findings
 Use `read_findings` to get your complete source list.
 Use `query_graph` to get entity relationships.
 Verify completeness — you should have found sources across:
@@ -241,11 +686,24 @@ Verify completeness — you should have found sources across:
 - Both domestic (local) and international sources
 - Both English and local-language sources
 
-### Step 15 — Synthesize final output
+### Step 22 — Map shortlist items to results
+Go back to your filtered shortlist from Phase 1 and annotate each item:
+- **Found**: vendor(s) identified, price range, availability
+- **Partially found**: exists but limited availability or unclear purchasing
+- **Not found**: no vendor identified — note why (too rare, not
+  commercially produced, regional only, etc.)
+This mapping is essential — it shows both what you found AND what
+gaps remain, which is more useful than just listing hits.
+
+### Step 23 — Synthesize final output
 Present findings as a structured intelligence report with:
+- **Catalogue summary**: how many items exist in the domain, how many
+  you filtered to, how many you found purchase sources for
 - Source table (name, URL, products/services, prices, shipping,
   payment, reputation score)
-- Source categorisation (domestic vs international, verified vs unverified)
+- Source categorisation (domestic vs international, verified vs unverified,
+  specialty vs general, online vs physical retail)
+- Items ranked by the user's criteria (novelty, price, availability, etc.)
 - Community consensus (what forums recommend and warn about)
 - All source URLs cited inline
 - Gaps identified (what you could NOT find and where to look next)
@@ -255,14 +713,15 @@ Present findings as a structured intelligence report with:
 ## MINIMUM EFFORT THRESHOLDS
 
 Do NOT synthesize until you have met ALL of these:
-- At least 15 search tool calls executed
-- At least 8 URLs visited and content extracted
+- At least 20 search tool calls executed
+- At least 10 URLs visited and content extracted
 - At least 5 findings stored
 - Searched in at least 2 languages (if location-specific)
 - Used search operator dorking (site:, inurl:, intitle:)
 - Tried domain pattern enumeration for found sources
+- Consulted at least one authoritative catalogue/reference source
 - If you have found fewer than 5 distinct sources, you have NOT searched
-  enough — go back to Step 1 and try more query variations
+  enough — go back to Phase 2 and try more query variations
 
 ---
 
@@ -320,14 +779,37 @@ These examples demonstrate the methodology's effectiveness across domains:
 - 40 queries across 3 rounds → **26 vendors confirmed**
 - Cheapest: DOZ.pl at ~10 zł ($2.50) for 1200mg × 60 tabs
 
+### Case Study 5: Exotic Banana Fruit for Poland (non-censored domain)
+**Query**: "find the most exotic, novel banana fruit to purchase in Poland"
+**Why Phase 0 & 1 matter here**: This query is NOT censored — mainstream
+search engines return good results. The challenge is COMPLETENESS. Without
+the catalogue phase, a naive search finds Red Banana, Plantain, and maybe
+Lady Finger from 2-3 vendors. With the catalogue phase:
+- Phase 0 exploration discovered Wikipedia's "List of banana cultivars"
+  (300+ cultivars across 10 genome groups)
+- Phase 1 catalogue extraction identified ~50 edible non-Cavendish varieties
+- Phase 1 filtering narrowed to ~20 genuinely exotic/obtainable varieties
+  (Gros Michel, Namwah, Blue Java, Manzano, Praying Hands, Ae Ae, Fe'i,
+  Red Dacca, Burro, Pisang Raja, Lakatan, Señorita, etc.)
+- Phase 2 targeted search for EACH variety found specialist vendors
+  (Jurassic Fruit, Miami Fruit, CrazyBox.pl, Targban/Catalina) carrying
+  varieties that generic "exotic banana buy Poland" searches missed entirely
+- **Key lesson**: For non-censored domains, the bottleneck isn't censorship
+  resistance — it's knowing WHAT to search for. The catalogue phase solves this.
+
 ### Key Lessons Across All Cases
 1. **Local language queries are non-negotiable** — they consistently find
    50-70% more vendors than English-only searches
 2. **Brand name/synonym expansion** is the highest-ROI technique for
    pharmaceutical searches
-3. **Domain pattern enumeration** reveals operator networks (one entity
-   running multiple storefronts)
-4. **Forum/community mining** surfaces niche vendors that no search
-   engine indexes well
-5. **Snowball sampling** (vendor → review → competitor) extends reach
-   into the long tail
+3. **Domain pattern enumeration** finds hidden vendor networks (e.g.,
+   the `[city]apteka.com` pattern revealing 5+ stores from one operator)
+4. **Forum mining** surfaces community-validated vendors that don't
+   appear in mainstream search results
+5. **Catalogue-first thinking** prevents the common failure of searching
+   for obvious items and missing the long tail — this applies to ANY
+   domain, not just censored topics
+6. **Use ALL available engines** including powerful censored ones — for
+   non-censored topics, Google/Perplexity are simply better; for censored
+   topics, uncensored engines establish the baseline, then censored engines
+   fill gaps
