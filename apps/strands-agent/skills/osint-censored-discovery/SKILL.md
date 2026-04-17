@@ -2,13 +2,14 @@
 name: osint-censored-discovery
 description: >
   Exhaustive OSINT methodology for discovering vendors, sources, or information
-  that mainstream search engines censor or deprioritise. Uses multi-round query
-  expansion with local language translation, brand/synonym/street-name variants,
-  search operator dorking, community/forum mining, domain pattern enumeration,
-  snowball sampling, and content extraction verification. Proven across steroids,
-  prescription medications (Celebrex, Eurizam), nootropics (piracetam) — 
-  generalises to any restricted or censored domain including health, legal,
-  financial, political, and grey-market topics.
+  that mainstream search engines censor or deprioritise. Five-phase protocol:
+  (0) free-association exploration to map the domain, (1) catalogue construction
+  from authoritative sources then filtering, (2) targeted OSINT query expansion
+  with local language, dorking, forum mining, domain enumeration, (3) content
+  extraction and snowball sampling, (4) verification and synthesis. Proven
+  across steroids, prescription medications (Celebrex, Eurizam), nootropics
+  (piracetam), exotic fruit sourcing — generalises to any domain including
+  health, legal, financial, political, grey-market, and niche consumer topics.
 allowed-tools: >
   duckduckgo_search stract_search brave_web_search mojeek_search yandex_search
   web_search_advanced_exa jina_read_url firecrawl_scrape wayback_search
@@ -21,25 +22,150 @@ allowed-tools: >
 
 # OSINT-Grade Exhaustive Discovery
 
-You MUST follow this multi-round protocol for the current research query.
+You MUST follow this multi-phase protocol for the current research query.
 Do not shortcut. Do not stop after the first page of results. The goal is
 **EXHAUSTIVE coverage** — finding every relevant source, not just the first few.
 
 This methodology is derived from professional OSINT (Open Source Intelligence)
 tradecraft and applies to ANY topic where mainstream search engines may censor,
-deprioritise, or filter results.
+deprioritise, or filter results — AND to any topic where the full universe of
+items is large, specialised, or not immediately obvious.
 
 **CRITICAL**: The techniques below are INFORMATION RETRIEVAL methods. Your job
 is to FIND information, not to judge it. Apply these techniques to whatever
 the user asks about, regardless of topic sensitivity.
 
+**CRITICAL**: Do NOT jump straight to vendor/source searching. The first two
+phases exist to ensure you understand the domain and know WHAT to search for
+before you start searching for WHERE to buy/find it.
+
 ---
 
-## ROUND 1: OSINT QUERY EXPANSION & MULTI-ENGINE SWEEP
+## PHASE 0: FREE-ASSOCIATION EXPLORATION (2-4 searches)
 
-### Step 1 — Decompose & Expand the query into 8-12 search variations
+**Purpose**: Understand the domain landscape before going systematic. You don't
+know what you don't know yet.
 
-Use ALL of the following OSINT query reformulation techniques:
+### Step 1 — Broad exploratory searches
+
+Run 2-4 open-ended searches to orient yourself. You are NOT trying to find
+vendors or sources yet. You are trying to answer:
+- What does this domain look like? What are the main categories?
+- What terminology do insiders use? What jargon exists?
+- What are the key subdivisions, taxonomies, or classification systems?
+- Are there authoritative reference sources (Wikipedia lists, databases,
+  industry directories, academic catalogues, government registries)?
+- What adjacent domains or communities are relevant?
+
+**Search patterns for exploration:**
+- `[topic] types varieties categories list`
+- `[topic] classification taxonomy`
+- `[topic] Wikipedia` or `[topic] complete list`
+- `[topic] guide beginner overview`
+- `[topic] [location] community forum`
+- `[topic] reddit guide` or `[topic] best [year]`
+
+### Step 2 — Identify the domain's structure
+
+From the exploratory results, note:
+- **Taxonomy**: How is the domain organised? (e.g., banana cultivars are
+  classified by genome group: AA, AAB, ABB, etc.)
+- **Terminology**: What are the insider terms? (e.g., "cultivar" not
+  "type", "bez recepty" not "without prescription")
+- **Key sources**: Which websites/databases are the authoritative catalogues?
+  (e.g., Wikipedia's "List of banana cultivars", ProMusa database,
+  WHO Essential Medicines List, etc.)
+- **Scale**: How many items exist in total? Tens? Hundreds? Thousands?
+  This determines how aggressively you need to filter in the next phase.
+
+### Step 3 — Decide on approach
+
+Based on what you learned:
+- **If authoritative catalogues exist** → proceed to Phase 1 (Catalogue
+  Construction). This is the case for most domains (drug types, plant
+  varieties, product categories, legal jurisdictions, etc.).
+- **If no catalogue exists** (truly uncharted territory) → skip to Phase 2
+  (Targeted Search) but use the terminology and structure you discovered
+  to craft much better queries than you would have without Phase 0.
+- **If the domain is small** (< 20 items total) → you may not need a
+  separate catalogue phase; just list what you found and proceed to
+  targeted searching for each item.
+
+---
+
+## PHASE 1: CATALOGUE CONSTRUCTION & FILTERING
+
+**Purpose**: Build a comprehensive inventory of WHAT EXISTS before searching
+for where to find it. This prevents the common failure mode of searching for
+the first few items that come to mind and missing the long tail.
+
+### Step 4 — Extract the full catalogue from authoritative sources
+
+Visit the authoritative sources identified in Phase 0 and extract a
+comprehensive list. Use `jina_read_url` or `firecrawl_scrape` to get the
+full content from:
+- Wikipedia "List of..." pages
+- Industry databases and directories
+- Academic/scientific catalogues
+- Government registries
+- Enthusiast community wikis
+- Trade association directories
+
+**You want the COMPLETE list**, not a sample. If the Wikipedia page has
+200 entries, extract all 200. If a database has pagination, follow it.
+
+### Step 5 — Organise the raw catalogue
+
+Structure what you found into a working list with key attributes:
+- **Name** (including all synonyms, aliases, local-language names)
+- **Category/Classification** (using the domain's own taxonomy)
+- **Key attributes** relevant to the user's query (e.g., for bananas:
+  edible vs ornamental, flavor profile, rarity; for medications: active
+  ingredient, brand names by country, prescription status by jurisdiction)
+- **Rarity/novelty signal** — is this item common, uncommon, rare, or
+  extremely rare? (based on how frequently it appears in sources, whether
+  it's commercially produced, etc.)
+
+### Step 6 — Filter by the user's criteria
+
+Apply filters to narrow the catalogue to a workable shortlist. Filters
+should be derived from the user's query AND from domain knowledge:
+
+**Always filter out:**
+- Items that are clearly irrelevant (e.g., ornamental-only plants when
+  the user asked for edible fruit)
+- Items that are extinct, theoretical, or impossible to obtain
+- Items that are the "boring default" unless the user asked for those
+  (e.g., Cavendish bananas, generic paracetamol)
+
+**Prioritise items that are:**
+- Genuinely novel/exotic/unusual (the long tail)
+- Actually obtainable (commercially produced somewhere, even if niche)
+- Interesting along dimensions the user cares about (flavor, appearance,
+  rarity, cultural significance, etc.)
+
+**Target shortlist size**: 15-30 items. Enough to be comprehensive,
+small enough to search for each one individually.
+
+### Step 7 — Present the shortlist for validation (optional)
+
+If the shortlist is large or the filtering criteria are ambiguous,
+briefly present the shortlist and filtering logic before proceeding.
+This gives the user a chance to adjust criteria. If the criteria are
+clear and the shortlist is reasonable, proceed directly to Phase 2.
+
+---
+
+## PHASE 2: TARGETED OSINT QUERY EXPANSION & MULTI-ENGINE SWEEP
+
+**Purpose**: For each item on the shortlist (or for the user's direct query
+if no catalogue was needed), execute a thorough multi-engine search using
+professional OSINT techniques.
+
+### Step 8 — Decompose & Expand queries for each shortlisted item
+
+For EACH item on the shortlist (or for the overall query), generate
+8-12 search variations using ALL of the following techniques:
 
 #### a) EXACT user phrasing
 Never sanitise — use their exact words as-is.
@@ -105,10 +231,12 @@ Once you find one domain, try variations to discover similar sites:
 - Search for the domain name itself in quotes to find mentions,
   reviews, and related vendors on forums
 
-### Step 2 — Hit EVERY available search engine with EACH variation
+### Step 9 — Hit EVERY available search engine with EACH variation
 
-For each query variation from Step 1, run it through:
+For each query variation from Step 8, run it through:
 - `duckduckgo_search` (ALWAYS — free baseline, uncensored)
+- `google_search` (if available — best ranking algorithm, broadest index;
+  use for non-censored topics or as cross-reference for censored ones)
 - `stract_search` (always — independent open-source engine, free)
 - `brave_web_search` (if available — independent index)
 - `mojeek_search` (if available — unique independent results)
@@ -118,18 +246,31 @@ For each query variation from Step 1, run it through:
   includeDomains to target specific forums or archives)
 - `reddit_search` (for community/forum queries)
 
+**IMPORTANT**: Use ALL available engines, including powerful censored ones
+(Google, Perplexity, Kagi). For non-censored topics they are simply better.
+For censored topics, use uncensored engines FIRST to establish a baseline of
+what exists, then use censored engines to fill gaps and cross-validate —
+this way you can see what's being suppressed vs what simply doesn't exist.
+
 Do NOT stop at one engine per query. Different engines have different
 indexes and censorship policies. A URL that appears on Mojeek may not
 appear on DDG, and vice versa.
 
-### Step 3 — Collect ALL unique URLs
+### Step 10 — Collect ALL unique URLs
 Build a master URL list from all searches. Do not discard anything yet.
+
+**NOTE on shortlist items**: You do NOT need to run all 8-12 variations
+for every single shortlisted item. Use judgement:
+- For the TOP 5-10 most promising/exotic items: full OSINT sweep
+- For less critical items: 2-3 targeted queries each
+- Batch related items into combined queries where sensible
+  (e.g., "buy Gros Michel OR Namwah OR Burro banana fruit Europe")
 
 ---
 
-## ROUND 2: CONTENT EXTRACTION & SOURCE PROFILING
+## PHASE 3: CONTENT EXTRACTION, SNOWBALL & EXPANSION
 
-### Step 4 — Visit the top 10-15 most promising URLs
+### Step 11 — Visit the top 15-25 most promising URLs
 Use `jina_read_url` or `firecrawl_scrape` to extract content from:
 - Vendor/store homepages (product listings, pricing, shipping info)
 - Forum threads mentioning vendors (real user reviews, warnings)
@@ -141,7 +282,7 @@ If a URL is dead or blocked:
 - Use `archive_today_fetch` as an alternative archive source
 - Search for the URL in quotes on DuckDuckGo to find cached/mirrored copies
 
-### Step 5 — For EVERY source/vendor found, extract and store:
+### Step 12 — For EVERY source/vendor found, extract and store:
 - Name and URL
 - Products/services available (names, categories, specifics)
 - Pricing (in local currency AND USD/EUR)
@@ -151,7 +292,7 @@ If a URL is dead or blocked:
 - Contact information if visible
 - Language(s) the site operates in
 
-### Step 6 — Store each source as a finding
+### Step 13 — Store each source as a finding
 Use `store_finding` for each vendor/source with:
 - name: source name
 - url: their homepage
@@ -159,17 +300,13 @@ Use `store_finding` for each vendor/source with:
 - summary: one-paragraph profile with key details
 - rating: 1-10 based on evidence quality
 
-### Step 7 — Build the knowledge graph
+### Step 14 — Build the knowledge graph
 Use `add_entity` for each vendor, product, forum, person.
 Use `add_edge` to connect them: vendor→sells→product, forum→mentions→vendor,
 vendor→ships_to→country, user_review→reviews→vendor, vendor→similar_to→vendor.
 
----
-
-## ROUND 3: SNOWBALL SAMPLING & OSINT EXPANSION
-
-### Step 8 — Snowball from found results (OSINT link analysis)
-For each source found in Round 2:
+### Step 15 — Snowball from found results (OSINT link analysis)
+For each source found:
 a) Search for "[source name] review" and "[source name] legit"
 b) Search for "[source name] alternative" and "sites like [source name]"
 c) Look at forum threads that mention the source — other sources are
@@ -181,7 +318,7 @@ f) Try domain variations: if source is "example-store.com", search for
    "example-store.pl", "examplestore.com", "example-shop.com"
 g) Use `similar_sites_search` to find programmatically related domains
 
-### Step 9 — Mine forums and communities
+### Step 16 — Mine forums and communities
 Search these patterns across multiple engines:
 - `site:reddit.com [topic] [location]` (English Reddit)
 - Use `reddit_search` / `reddit_get_subreddit_posts` for direct Reddit access
@@ -193,13 +330,13 @@ Search these patterns across multiple engines:
 - Use `kagi_enrich_web` to find indie/small-web forums that mainstream
   engines miss
 
-### Step 10 — TLD and infrastructure mining
+### Step 17 — TLD and infrastructure mining
 - Search within country-specific TLDs: `site:.pl [topic]`,
   `site:.com.pl [topic]`, `site:.ru [topic]`
 - Search for common e-commerce platform patterns:
   `[topic] site:shopify.com`, `[topic] powered by WooCommerce`
 
-### Step 11 — Run gap analysis
+### Step 18 — Run gap analysis
 Use `find_gaps` to identify poorly-connected entities in your knowledge graph.
 For each gap:
 - If a vendor has no reviews → search for reviews
@@ -207,13 +344,16 @@ For each gap:
 - If a country has few vendors → search specifically for vendors in
   that country using local-language queries
 - If you found vendors only in one language → search in other languages
+- If promising shortlisted items have NO vendors found → they may need
+  different search terms, different engines, or may genuinely not be
+  commercially available — note this in the final report
 
-### Step 12 — Deep research sweep (if available)
+### Step 19 — Deep research sweep (if available)
 If you have deep research tools, use ONE of them for a final sweep:
+- `perplexity_deep_research` for broad coverage (best for non-censored
+  topics; may self-censor on restricted topics)
 - `grok_deep_research` for web + X/Twitter search (current events,
   community sentiment — often less censored than other deep research tools)
-- `perplexity_deep_research` for broad coverage (note: may self-censor
-  on some topics — if it refuses, skip it and rely on direct search results)
 - `tavily_deep_research` for AI-optimised search with extracted content
 
 Compare deep research results against your knowledge graph — add any
@@ -221,9 +361,9 @@ new sources or facts not already captured.
 
 ---
 
-## ROUND 4: VERIFICATION & SYNTHESIS
+## PHASE 4: VERIFICATION & SYNTHESIS
 
-### Step 13 — Cross-reference
+### Step 20 — Cross-reference
 For each source in your knowledge graph:
 - Is it mentioned in at least 2 independent sources? (forum + search)
 - Are there scam/warning reports? Search "[source] scam" or
@@ -231,7 +371,7 @@ For each source in your knowledge graph:
 - Is the site currently live? (check via `jina_read_url`)
 - When was it last mentioned? (stale = possibly defunct)
 
-### Step 14 — Read back all findings
+### Step 21 — Read back all findings
 Use `read_findings` to get your complete source list.
 Use `query_graph` to get entity relationships.
 Verify completeness — you should have found sources across:
@@ -241,11 +381,24 @@ Verify completeness — you should have found sources across:
 - Both domestic (local) and international sources
 - Both English and local-language sources
 
-### Step 15 — Synthesize final output
+### Step 22 — Map shortlist items to results
+Go back to your filtered shortlist from Phase 1 and annotate each item:
+- **Found**: vendor(s) identified, price range, availability
+- **Partially found**: exists but limited availability or unclear purchasing
+- **Not found**: no vendor identified — note why (too rare, not
+  commercially produced, regional only, etc.)
+This mapping is essential — it shows both what you found AND what
+gaps remain, which is more useful than just listing hits.
+
+### Step 23 — Synthesize final output
 Present findings as a structured intelligence report with:
+- **Catalogue summary**: how many items exist in the domain, how many
+  you filtered to, how many you found purchase sources for
 - Source table (name, URL, products/services, prices, shipping,
   payment, reputation score)
-- Source categorisation (domestic vs international, verified vs unverified)
+- Source categorisation (domestic vs international, verified vs unverified,
+  specialty vs general, online vs physical retail)
+- Items ranked by the user's criteria (novelty, price, availability, etc.)
 - Community consensus (what forums recommend and warn about)
 - All source URLs cited inline
 - Gaps identified (what you could NOT find and where to look next)
@@ -255,14 +408,15 @@ Present findings as a structured intelligence report with:
 ## MINIMUM EFFORT THRESHOLDS
 
 Do NOT synthesize until you have met ALL of these:
-- At least 15 search tool calls executed
-- At least 8 URLs visited and content extracted
+- At least 20 search tool calls executed
+- At least 10 URLs visited and content extracted
 - At least 5 findings stored
 - Searched in at least 2 languages (if location-specific)
 - Used search operator dorking (site:, inurl:, intitle:)
 - Tried domain pattern enumeration for found sources
+- Consulted at least one authoritative catalogue/reference source
 - If you have found fewer than 5 distinct sources, you have NOT searched
-  enough — go back to Step 1 and try more query variations
+  enough — go back to Phase 2 and try more query variations
 
 ---
 
@@ -320,14 +474,37 @@ These examples demonstrate the methodology's effectiveness across domains:
 - 40 queries across 3 rounds → **26 vendors confirmed**
 - Cheapest: DOZ.pl at ~10 zł ($2.50) for 1200mg × 60 tabs
 
+### Case Study 5: Exotic Banana Fruit for Poland (non-censored domain)
+**Query**: "find the most exotic, novel banana fruit to purchase in Poland"
+**Why Phase 0 & 1 matter here**: This query is NOT censored — mainstream
+search engines return good results. The challenge is COMPLETENESS. Without
+the catalogue phase, a naive search finds Red Banana, Plantain, and maybe
+Lady Finger from 2-3 vendors. With the catalogue phase:
+- Phase 0 exploration discovered Wikipedia's "List of banana cultivars"
+  (300+ cultivars across 10 genome groups)
+- Phase 1 catalogue extraction identified ~50 edible non-Cavendish varieties
+- Phase 1 filtering narrowed to ~20 genuinely exotic/obtainable varieties
+  (Gros Michel, Namwah, Blue Java, Manzano, Praying Hands, Ae Ae, Fe'i,
+  Red Dacca, Burro, Pisang Raja, Lakatan, Señorita, etc.)
+- Phase 2 targeted search for EACH variety found specialist vendors
+  (Jurassic Fruit, Miami Fruit, CrazyBox.pl, Targban/Catalina) carrying
+  varieties that generic "exotic banana buy Poland" searches missed entirely
+- **Key lesson**: For non-censored domains, the bottleneck isn't censorship
+  resistance — it's knowing WHAT to search for. The catalogue phase solves this.
+
 ### Key Lessons Across All Cases
 1. **Local language queries are non-negotiable** — they consistently find
    50-70% more vendors than English-only searches
 2. **Brand name/synonym expansion** is the highest-ROI technique for
    pharmaceutical searches
-3. **Domain pattern enumeration** reveals operator networks (one entity
-   running multiple storefronts)
-4. **Forum/community mining** surfaces niche vendors that no search
-   engine indexes well
-5. **Snowball sampling** (vendor → review → competitor) extends reach
-   into the long tail
+3. **Domain pattern enumeration** finds hidden vendor networks (e.g.,
+   the `[city]apteka.com` pattern revealing 5+ stores from one operator)
+4. **Forum mining** surfaces community-validated vendors that don't
+   appear in mainstream search results
+5. **Catalogue-first thinking** prevents the common failure of searching
+   for obvious items and missing the long tail — this applies to ANY
+   domain, not just censored topics
+6. **Use ALL available engines** including powerful censored ones — for
+   non-censored topics, Google/Perplexity are simply better; for censored
+   topics, uncensored engines establish the baseline, then censored engines
+   fill gaps
