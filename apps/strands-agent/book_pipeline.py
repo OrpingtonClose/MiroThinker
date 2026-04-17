@@ -862,6 +862,7 @@ def download_book(
 
     content = None
     filename = ""
+    http_content_type = ""
 
     # Strategy 1: Direct URL download
     if url and source in ("auto", "direct"):
@@ -874,7 +875,7 @@ def download_book(
                 cd = resp.headers.get("content-disposition", "")
                 fn_match = re.search(r'filename="?([^";\n]+)', cd)
                 filename = fn_match.group(1).strip() if fn_match else url.split("/")[-1].split("?")[0]
-                ct = resp.headers.get("content-type", "")
+                http_content_type = resp.headers.get("content-type", "")
         except Exception as exc:
             logger.debug("Direct download failed: %s", exc)
 
@@ -912,11 +913,9 @@ def download_book(
             + "\n".join(hints)
         )
 
-    # Extract text
-    ct = ""
-    if filename:
-        ct = filename  # _extract_text uses filename for format detection
-    text = _extract_text(content, filename=filename, content_type=ct)
+    # Extract text — filename handles extension-based detection,
+    # http_content_type carries the MIME type from direct URL downloads
+    text = _extract_text(content, filename=filename, content_type=http_content_type)
 
     if not text or text.startswith("[ERROR]") or text.startswith("[No text"):
         return f"[EXTRACTION FAILED] Downloaded {len(content):,} bytes but could not extract text.\nFilename: {filename}"
