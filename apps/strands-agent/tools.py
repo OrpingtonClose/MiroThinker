@@ -402,6 +402,96 @@ def wayback_fetch(url: str, timestamp: str = "") -> str:
         return f"[TOOL_ERROR] Wayback Machine fetch failed: {exc}"
 
 
+@tool
+def archive_today_fetch(url: str) -> str:
+    """Fetch a cached page from archive.today (archive.ph).
+
+    Alternative to the Wayback Machine. archive.today takes independent
+    snapshots of web pages and is often available when the Wayback Machine
+    is down or blocked. No API key needed.
+
+    If no existing snapshot is found, returns a message indicating no
+    cached version is available.
+
+    Args:
+        url: The URL to look up in archive.today's cache.
+
+    Returns:
+        The cached page content (truncated to 15000 chars), or error message.
+    """
+    import httpx
+
+    try:
+        # archive.today's lookup endpoint — returns the most recent snapshot
+        search_url = f"https://archive.ph/newest/{url}"
+        resp = httpx.get(
+            search_url,
+            timeout=30,
+            follow_redirects=True,
+        )
+        if resp.status_code == 404:
+            return f"No archive.today snapshot found for: {url}"
+        resp.raise_for_status()
+        return resp.text[:15000]
+    except Exception as exc:
+        return f"[TOOL_ERROR] archive.today fetch failed: {exc}"
+
+
+@tool
+def similar_sites_search(domain: str) -> str:
+    """Find websites similar to a given domain.
+
+    Uses the SimilarSites API to discover competitor and related websites
+    programmatically. Useful for OSINT snowball sampling — once you find
+    one vendor/source, use this to find related ones. Free tier allows
+    5000 queries/day. Requires SIMILARSITES_API_KEY.
+
+    Args:
+        domain: The domain to find similar sites for (e.g. "sterydysklep.com").
+
+    Returns:
+        List of similar/related domains with similarity scores.
+    """
+    import httpx
+
+    api_key = os.environ.get("SIMILARSITES_API_KEY", "")
+    if not api_key:
+        return (
+            "[TOOL_ERROR] SimilarSites API key not configured. "
+            "Set SIMILARSITES_API_KEY in .env. "
+            "Get a free key at https://rapidapi.com/similarsitecheck/api/similarsites"
+        )
+
+    try:
+        resp = httpx.get(
+            "https://similarsites.p.rapidapi.com/similarsites",
+            params={"url": domain},
+            headers={
+                "X-RapidAPI-Key": api_key,
+                "X-RapidAPI-Host": "similarsites.p.rapidapi.com",
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        return f"[TOOL_ERROR] SimilarSites search failed: {exc}"
+
+    sites = data.get("similarSites", data.get("sites", []))
+    if not sites:
+        return f"No similar sites found for: {domain}"
+
+    formatted = []
+    for i, site in enumerate(sites[:20], 1):
+        if isinstance(site, dict):
+            name = site.get("url", site.get("name", ""))
+            score = site.get("score", site.get("similarity", ""))
+            formatted.append(f"{i}. {name} (similarity: {score})")
+        else:
+            formatted.append(f"{i}. {site}")
+    return "\n".join(formatted)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # TIER 3 — Censored fallback native tools
 # ═══════════════════════════════════════════════════════════════════════
@@ -1357,8 +1447,8 @@ def get_all_mcp_clients():
 # both gated in get_native_tools().
 NATIVE_TOOLS_TIER1 = [duckduckgo_search, mojeek_search, stract_search, yandex_search]
 
-# Tier 2 content extraction tools — jina always included, wayback always included
-NATIVE_TOOLS_TIER2 = [jina_read_url, wayback_search, wayback_fetch]
+# Tier 2 content extraction tools — jina always included, wayback + archive.today always included
+NATIVE_TOOLS_TIER2 = [jina_read_url, wayback_search, wayback_fetch, archive_today_fetch]
 
 # Tier 3 censored fallback — only if API key is set
 NATIVE_TOOLS_TIER3 = [google_search]
@@ -1395,8 +1485,11 @@ def get_native_tools():
     if os.environ.get("YANDEX_SEARCH_API_KEY") and os.environ.get("YANDEX_FOLDER_ID"):
         tools.append(yandex_search)
 
-    # Tier 2 — content extraction (jina + wayback always available)
+    # Tier 2 — content extraction (jina + wayback + archive.today always available)
     tools.extend(NATIVE_TOOLS_TIER2)
+    # similar_sites_search — gated on SIMILARSITES_API_KEY
+    if os.environ.get("SIMILARSITES_API_KEY"):
+        tools.append(similar_sites_search)
 
     # Tier 3 — censored fallback
     if os.environ.get("SERPER_API_KEY"):
