@@ -554,7 +554,7 @@ def grok_deep_research(query: str, search_type: str = "both") -> str:
         return "[TOOL_ERROR] Grok deep research unavailable: XAI_API_KEY not set."
 
     api_base = os.environ.get("GROK_RESPONSES_API_BASE", "https://api.x.ai")
-    grok_model = os.environ.get("GROK_SEARCH_MODEL", "grok-3")
+    grok_model = os.environ.get("GROK_SEARCH_MODEL", "grok-4")
 
     tools_list = []
     if search_type in ("web", "both"):
