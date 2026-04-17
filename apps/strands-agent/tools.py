@@ -227,6 +227,9 @@ def yandex_search(query: str, max_results: int = 10) -> str:
                     if poll_resp.status_code == 200:
                         poll_data = poll_resp.json()
                         if poll_data.get("done"):
+                            if "error" in poll_data:
+                                err = poll_data["error"]
+                                return f"[TOOL_ERROR] Yandex search failed: {err.get('message', err)}"
                             data = poll_data.get("response", {})
                             break
                 else:
