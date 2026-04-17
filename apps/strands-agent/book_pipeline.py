@@ -267,7 +267,7 @@ def _get_http_client(timeout: int = 30, use_proxy: bool = False):
         timeout=httpx.Timeout(timeout, connect=15 if use_proxy else 10),
         follow_redirects=True,
         proxy=proxy_url,
-        verify=not use_proxy,  # proxies may use self-signed certs
+        verify=True,  # keep SSL verification even with proxies
         headers={"User-Agent": _BROWSER_UA},
     )
 
@@ -1180,6 +1180,21 @@ def download_book_by_doi(
                             url=pdf_url, doi=doi, title=title, author=author, source="direct"
                         )
                         if "[DOWNLOAD FAILED]" not in result and "[ERROR]" not in result:
+                            # Also cache under doi:// key so future DOI lookups hit cache
+                            try:
+                                from cache import cache_put
+                                cache_put(
+                                    url=cache_key,
+                                    content=result,
+                                    content_type="text/plain",
+                                    source_type="book",
+                                    title=title or "Unknown",
+                                    summary=result[:500],
+                                    tags=["book", "doi"],
+                                    ttl=10 * 365 * 24 * 3600,
+                                )
+                            except ImportError:
+                                pass
                             return result
     except Exception:
         pass
