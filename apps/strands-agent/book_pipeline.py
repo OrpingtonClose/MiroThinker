@@ -349,6 +349,8 @@ def _cache_store_book(url: str, content: bytes, text: str, title: str,
             tag_list.append("book")
 
         # Store extracted text (main entry — what the agent reads)
+        # Books are static content — use 10-year TTL to avoid silent expiry
+        book_ttl = 10 * 365 * 24 * 3600
         cache_put(
             url=url,
             content=text,
@@ -358,6 +360,7 @@ def _cache_store_book(url: str, content: bytes, text: str, title: str,
             summary=text[:500],
             tags=tag_list,
             metadata=metadata or {},
+            ttl=book_ttl,
         )
 
         # Store raw binary (for re-extraction or format conversion)
@@ -370,6 +373,7 @@ def _cache_store_book(url: str, content: bytes, text: str, title: str,
                 title=f"[RAW] {title}",
                 summary=f"Raw binary, {len(content):,} bytes",
                 tags=tag_list,
+                ttl=book_ttl,
             )
 
         logger.info("Cached book: %s (%d chars text, %d bytes raw)",
