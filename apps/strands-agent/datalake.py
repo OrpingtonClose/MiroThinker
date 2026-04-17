@@ -392,10 +392,9 @@ def store_artifact(
     )
     ok_meta = _upload_bytes(meta_json, meta_key, content_type="application/ld+json")
 
-    # Update catalog index
-    _append_to_catalog(sha, metadata)
-
     if ok_raw and ok_text and ok_meta:
+        # Only index after all uploads succeed to avoid phantom catalog entries
+        _append_to_catalog(sha, metadata)
         logger.info(
             "Datalake stored RO-Crate: %s/%s (%s, %d bytes raw, %d chars text)",
             category, sha[:16], metadata.get("title", "?")[:50],
