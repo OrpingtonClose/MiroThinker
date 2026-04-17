@@ -16,6 +16,11 @@ dependencies = [
     "httpx",
     "pdfplumber",
     "yt-dlp",
+    "EbookLib",
+    "beautifulsoup4",
+    "lxml",
+    "b2sdk",
+    "rocrate",
 ]
 
 [build-system]
@@ -23,5 +28,5 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["main", "agent", "config", "tools", "prompts", "native_tools", "comprehension", "cache", "youtube_tools", "document_tools"]
+py-modules = ["main", "agent", "config", "tools", "prompts", "native_tools", "comprehension", "cache", "youtube_tools", "document_tools", "book_pipeline", "datalake"]
 packages = ["plugins"]

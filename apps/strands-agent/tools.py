@@ -1529,4 +1529,11 @@ def get_native_tools():
     except ImportError:
         logger.debug("Document tools module not available — document tools skipped")
 
+    # Book acquisition pipeline — multi-source search, download, cache
+    try:
+        from book_pipeline import BOOK_TOOLS
+        tools.extend(BOOK_TOOLS)
+    except ImportError:
+        logger.debug("Book pipeline module not available — book tools skipped")
+
     return tools
