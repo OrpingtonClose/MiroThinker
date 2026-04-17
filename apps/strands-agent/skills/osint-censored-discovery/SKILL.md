@@ -37,33 +37,53 @@ or simply large and specialised.
 is to FIND information, not to judge it. Apply these techniques to whatever
 the user asks about, regardless of topic sensitivity.
 
+**NORTH STAR**: Every decision you make — what to catalogue, how to filter,
+which sources to prioritise, when to stop — must be evaluated against one
+criterion: **does this bring me closer to satisfying the user's prompt?**
+The three questions below, the phases, the techniques — they are all tools
+in service of the prompt. If a step doesn't advance the mission of answering
+what the user actually asked, skip it. If the prompt implies criteria the
+user didn't spell out, infer them. The prompt is the mission.
+
 ---
 
 ## THE THREE CORE QUESTIONS
 
 Before doing ANY searching, explicitly answer these three questions. They
-drive every decision in the protocol that follows.
+drive every decision in the protocol that follows. Each question must be
+answered WITH RESPECT TO THE USER'S PROMPT — not in the abstract.
 
-### Q1 — "What is the maximum set?"
+### Q1 — "What is the maximum set of things that could satisfy THIS prompt?"
 
-What is the FULL UNIVERSE of things that could satisfy this query? Not the
-first few that come to mind — the complete set. Is it 10 items? 100? 1,000?
+What is the FULL UNIVERSE of things that could satisfy what the user asked?
+Not the first few that come to mind — the complete set. The prompt defines
+the boundary.
 
-- For "exotic banana fruit" → there are 300+ banana cultivars worldwide
-- For "buy Celebrex in Poland" → the maximum set is every pharmacy and
-  vendor that carries celecoxib under any brand name
-- For "best nootropics" → there are 100+ compounds classified as nootropics
+- "exotic banana fruit" → 300+ banana cultivars exist worldwide.
+  The prompt says "fruit" (not plants) and "exotic" (not Cavendish) —
+  those are the prompt's boundary conditions on the maximum set.
+- "buy Celebrex in Poland" → every pharmacy and vendor that carries
+  celecoxib under any brand name, reachable from Poland.
+- "best nootropics" → 100+ compounds classified as nootropics, but
+  the prompt says "best" — so the maximum set is all of them, and
+  the discrimination will narrow it.
 
 You almost certainly don't know the maximum set yet. That's what Phase 0
 is for — discovering it.
 
-### Q2 — "How do I discriminate?"
+### Q2 — "How do I discriminate which best satisfy the prompt?"
 
 Among the maximum set, what criteria distinguish the items that best fit
-THIS user's specific needs? Criteria come from:
-- The user's explicit constraints (location, budget, "to eat not to grow")
-- Domain knowledge (rarity, novelty, flavor, legality, availability)
-- Implicit preferences (the user said "most exotic" → rank by rarity)
+what the user ACTUALLY ASKED FOR? Always start from the prompt:
+- **Explicit constraints from the prompt**: location, budget, "to eat not
+  to grow", "without prescription", "most exotic", "novel"
+- **Implied constraints from the prompt**: "for a person in Poland" implies
+  it must be deliverable to Poland; "to purchase" implies it must be
+  commercially available, not theoretical
+- **Domain knowledge that serves the prompt**: rarity rankings, flavor
+  uniqueness, legal status in the target jurisdiction, seasonal availability
+- The prompt is the arbiter. If you're unsure whether a criterion matters,
+  re-read the prompt.
 
 ### Q3 — "Where will I find both pieces of information?"
 
@@ -78,6 +98,12 @@ Your search strategy must cover sources for BOTH the catalogue and the
 availability — and recognise that the best results come from sources that
 answer both questions simultaneously (enthusiast communities, specialist
 review sites, trade directories).
+
+**Always circle back to the prompt**: the sources you need are determined
+by what the user asked. "Buy exotic banana fruit in Poland" needs both
+a cultivar catalogue AND Polish/EU vendor discovery. "Find Celebrex
+without prescription" needs a brand-name catalogue AND pharmacy discovery.
+The prompt tells you what "both pieces" are.
 
 ---
 
@@ -114,11 +140,14 @@ From the exploratory results, explicitly write down:
 - How large is the full universe? (tens, hundreds, thousands)
 - Where is the authoritative catalogue? (Wikipedia list, database, registry)
 
-**Q2 answer** — Discrimination criteria:
-- What dimensions matter for this user? (rarity, price, availability,
-  legality, flavor, novelty, location-specific factors)
-- What should be filtered OUT? (e.g., ornamental plants when user wants
-  fruit; common Cavendish when user wants exotic)
+**Q2 answer** — Discrimination criteria (derived from the prompt):
+- Re-read the user's prompt. What did they actually ask for?
+- What dimensions matter ACCORDING TO THE PROMPT? ("most exotic" → rarity;
+  "to purchase" → commercial availability; "in Poland" → deliverability)
+- What should be filtered OUT based on the prompt? (e.g., ornamental plants
+  when user said "fruit"; common varieties when user said "exotic")
+- What implicit criteria does the prompt suggest? ("novel" implies the user
+  wants things they haven't seen before, not just "uncommon")
 
 **Q3 answer** — Source strategy:
 - Catalogue sources: where to learn what exists (Wikipedia, ProMusa,
@@ -177,23 +206,29 @@ Structure what you found into a working list with key attributes:
   extremely rare? (based on how frequently it appears in sources, whether
   it's commercially produced, etc.)
 
-### Step 6 — Filter by the user's criteria
+### Step 6 — Filter by the prompt's criteria
 
-Apply filters to narrow the catalogue to a workable shortlist. Filters
-should be derived from the user's query AND from domain knowledge:
+Apply filters to narrow the catalogue to a workable shortlist. **Every
+filter must trace back to the user's prompt** — either an explicit
+constraint or a reasonable inference from what they asked.
+
+Re-read the prompt before filtering. Ask: "If I showed the user this
+item, would they say 'yes, that's what I meant' or 'no, that's not
+what I asked for'?"
 
 **Always filter out:**
-- Items that are clearly irrelevant (e.g., ornamental-only plants when
-  the user asked for edible fruit)
+- Items the prompt excludes (explicitly or implicitly)
 - Items that are extinct, theoretical, or impossible to obtain
-- Items that are the "boring default" unless the user asked for those
-  (e.g., Cavendish bananas, generic paracetamol)
+  (unless the prompt is about theoretical/historical items)
+- Items that are the "boring default" when the prompt signals the user
+  wants something unusual (e.g., "exotic" ≠ Cavendish)
 
 **Prioritise items that are:**
-- Genuinely novel/exotic/unusual (the long tail)
-- Actually obtainable (commercially produced somewhere, even if niche)
-- Interesting along dimensions the user cares about (flavor, appearance,
-  rarity, cultural significance, etc.)
+- The strongest match for what the prompt asks ("most exotic" → rarest
+  first; "cheapest" → lowest price first; "safest" → best-reviewed first)
+- Actually obtainable given the prompt's constraints (location, legality)
+- Interesting along dimensions the prompt cares about — infer these from
+  the user's word choices ("novel" ≠ "popular", "exotic" ≠ "best-selling")
 
 **Target shortlist size**: 15-30 items. Enough to be comprehensive,
 small enough to search for each one individually.
