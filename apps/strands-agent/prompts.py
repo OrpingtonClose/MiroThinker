@@ -80,9 +80,17 @@ needed. ALWAYS use this for Reddit instead of web search with site:reddit.com
 NEVER use Google/Serper as your first search. Always try uncensored sources first.
 """
 
-# ── Deep research methodology ────────────────────────────────────────
-# Concrete step-by-step protocol for thorough source/vendor discovery.
-# This is the core algorithm that makes the agent exhaustive.
+# ── Skills integration note ───────────────────────────────────────────
+# The detailed OSINT research methodology is now loaded on-demand via the
+# AgentSkills plugin (skills/osint-censored-discovery/SKILL.md).  The agent
+# sees the skill name + description in its system prompt at startup (~50
+# tokens) and loads the full 4-round protocol by calling the `skills` tool
+# when a censored-discovery query is detected.  This keeps the base prompt
+# lean while preserving access to the full OSINT tradecraft.
+#
+# The RESEARCH_METHODOLOGY constant is kept below for backwards
+# compatibility (direct tool-call scripts, tests) but is NO LONGER
+# concatenated into the agent system prompts.
 
 RESEARCH_METHODOLOGY = """\
 DEEP RESEARCH METHODOLOGY — OSINT-GRADE EXHAUSTIVE SEARCH:
@@ -381,9 +389,11 @@ RESEARCH MANAGEMENT:
     + TOOL_STRATEGY
     + """
 
-"""
-    + RESEARCH_METHODOLOGY
-    + """
+SKILLS: You have access to specialised research skills via the `skills` tool. \
+Check the <available_skills> section of your system prompt — when a query \
+requires exhaustive discovery of censored, restricted, or hard-to-find \
+information, activate the relevant skill to load the full methodology. \
+Do this BEFORE starting your search, not after.
 
 EXECUTION MODEL — SEQUENTIAL:
 Execute ONE tool call at a time. After each result, review it and decide \
@@ -557,9 +567,12 @@ RESEARCH MANAGEMENT:
     + TOOL_STRATEGY
     + """
 
-"""
-    + RESEARCH_METHODOLOGY
-    + """
+SKILLS: You have access to specialised research skills via the `skills` tool. \
+Check the <available_skills> section of your system prompt — when a query \
+requires exhaustive discovery of censored, restricted, or hard-to-find \
+information (vendors, substances, grey-market sources, forbidden knowledge), \
+activate the relevant skill FIRST to load the full methodology. This ensures \
+you follow a proven multi-round OSINT protocol rather than ad-hoc searching.
 
 Only after you have accumulated substantial verified evidence across multiple \
 searches should you synthesize a response.

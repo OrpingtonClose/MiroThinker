@@ -24,6 +24,8 @@ import sys
 import threading
 import time
 
+from pathlib import Path
+
 from dotenv import load_dotenv
 from strands import Agent
 from strands.handlers.callback_handler import (
@@ -31,12 +33,47 @@ from strands.handlers.callback_handler import (
     PrintingCallbackHandler,
 )
 from strands.agent.conversation_manager import SlidingWindowConversationManager
+from strands.vended_plugins.skills import AgentSkills
 
 from config import build_model
 from prompts import PLANNER_PROMPT, RESEARCHER_PROMPT, SYSTEM_PROMPT
 from tools import get_all_mcp_clients, get_native_tools
 
 logger = logging.getLogger(__name__)
+
+# ── Skills plugin (progressive disclosure) ────────────────────────────
+# Skills are loaded lazily: only metadata (name + description) is injected
+# into the system prompt at startup.  Full instructions are loaded on-demand
+# when the agent calls the `skills` tool.  This keeps the context lean while
+# preserving access to specialised techniques.
+
+_SKILLS_DIR = Path(__file__).parent / "skills"
+
+
+def _build_skills_plugin() -> AgentSkills | None:
+    """Build the AgentSkills plugin from the skills/ directory.
+
+    Returns None if no skills directory exists or no skills are found,
+    allowing the agent to run without skills.
+    """
+    if not _SKILLS_DIR.is_dir():
+        logger.info("No skills directory found at %s — running without skills", _SKILLS_DIR)
+        return None
+
+    try:
+        plugin = AgentSkills(skills=[str(_SKILLS_DIR)])
+        skills = plugin.get_available_skills()
+        if skills:
+            logger.info(
+                "AgentSkills loaded: %s",
+                ", ".join(s.name for s in skills),
+            )
+            return plugin
+        logger.info("Skills directory exists but no valid skills found")
+        return None
+    except Exception:
+        logger.exception("Failed to load AgentSkills plugin")
+        return None
 
 # ── Guardrails: budget tracking callback ─────────────────────────────
 # Tracks actual tool invocations (not user queries) via Strands' callback
@@ -318,6 +355,8 @@ def create_single_agent(tool_list=None, mcp_clients=None):
 
     Use this for simple interactive sessions where one agent handles
     both search and synthesis.  Tools are ordered uncensored-first.
+    The AgentSkills plugin is attached when skills are available,
+    enabling progressive disclosure of specialised techniques.
 
     Args:
         tool_list: Pre-built list of tools.  When *None* the function
@@ -337,12 +376,18 @@ def create_single_agent(tool_list=None, mcp_clients=None):
         should_truncate_results=True,
     )
 
+    plugins = []
+    skills_plugin = _build_skills_plugin()
+    if skills_plugin is not None:
+        plugins.append(skills_plugin)
+
     agent = Agent(
         model=model,
         system_prompt=SYSTEM_PROMPT,
         tools=tool_list,
         conversation_manager=conversation_manager,
         callback_handler=_build_callback_handler(),
+        plugins=plugins or None,
     )
     return agent, mcp_clients or []
 
@@ -376,6 +421,11 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
         should_truncate_results=True,
     )
 
+    plugins = []
+    skills_plugin = _build_skills_plugin()
+    if skills_plugin is not None:
+        plugins.append(skills_plugin)
+
     # Researcher: tool-capable agent that does the actual searching
     researcher = Agent(
         model=model,
@@ -386,6 +436,7 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
             should_truncate_results=True,
         ),
         callback_handler=_build_callback_handler(),
+        plugins=plugins or None,
     )
 
     # Planner: strategic agent that delegates to the researcher
