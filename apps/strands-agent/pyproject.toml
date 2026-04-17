@@ -12,6 +12,7 @@ dependencies = [
     "fastapi[standard]",
     "uvicorn[standard]",
     "duckduckgo-search",
+    "ddgs",
     "httpx",
 ]
 
