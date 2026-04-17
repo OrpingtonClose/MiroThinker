@@ -69,6 +69,17 @@ SCIHUB_DOMAINS = [
     "https://sci-hub.ru",
 ]
 
+# ── Proxy configuration ───────────────────────────────────────────────
+# Bright Data and Oxylabs provide residential proxies that bypass cloud IP
+# blocks on LibGen, Anna's Archive, Sci-Hub, etc.
+
+BRIGHT_DATA_API_KEY = os.environ.get("BRIGHT_DATA_API_KEY", "")
+BRIGHT_DATA_CUSTOMER_ID = os.environ.get("BRIGHTDATA_CUSTOMER_ID", "hl_dc044bf4")
+BRIGHT_DATA_ZONE = os.environ.get("BRIGHTDATA_ZONE", "mcp_unlocker")
+
+OXYLABS_USERNAME = os.environ.get("OXYLABS_USERNAME", "")
+OXYLABS_PASSWORD = os.environ.get("OXYLABS_PASSWORD", "")
+
 
 # ── Text extraction helpers ───────────────────────────────────────────
 
@@ -198,8 +209,6 @@ def _extract_text(content: bytes, filename: str = "", content_type: str = "") ->
         return _extract_text_from_epub(content)
     elif lower_name.endswith(".pdf") or "pdf" in lower_ct:
         return _extract_text_from_pdf(content)
-    elif lower_name.endswith((".txt", ".md", ".rst")) or "text/" in lower_ct:
-        return content.decode("utf-8", errors="replace")
     elif lower_name.endswith((".htm", ".html")) or "html" in lower_ct:
         try:
             from bs4 import BeautifulSoup
@@ -207,6 +216,8 @@ def _extract_text(content: bytes, filename: str = "", content_type: str = "") ->
             return soup.get_text(separator="\n", strip=True)
         except ImportError:
             return content.decode("utf-8", errors="replace")
+    elif lower_name.endswith((".txt", ".md", ".rst")) or "text/" in lower_ct:
+        return content.decode("utf-8", errors="replace")
     else:
         # Try PDF first (most common for academic content)
         if content[:5] == b"%PDF-":
@@ -233,27 +244,68 @@ def _strip_html(text: str) -> str:
 
 # ── HTTP helpers ──────────────────────────────────────────────────────
 
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
 
-def _get_http_client(timeout: int = 30):
-    """Get httpx client with browser-like headers."""
+
+def _get_http_client(timeout: int = 30, use_proxy: bool = False):
+    """Get httpx client with browser-like headers.
+
+    When use_proxy=True, routes through Bright Data or Oxylabs residential
+    proxy to bypass cloud IP blocks on shadow libraries.
+    """
     import httpx
+
+    proxy_url = None
+    if use_proxy:
+        proxy_url = _get_proxy_url()
+
     return httpx.Client(
-        timeout=httpx.Timeout(timeout, connect=10),
+        timeout=httpx.Timeout(timeout, connect=15 if use_proxy else 10),
         follow_redirects=True,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-        },
+        proxy=proxy_url,
+        verify=not use_proxy,  # proxies may use self-signed certs
+        headers={"User-Agent": _BROWSER_UA},
     )
 
 
+def _get_proxy_url() -> Optional[str]:
+    """Build a proxy URL from Bright Data or Oxylabs credentials.
+
+    Tries Bright Data first (Web Unlocker), then Oxylabs as fallback.
+    Returns None if neither is configured.
+    """
+    if BRIGHT_DATA_API_KEY:
+        return (
+            f"https://brd-customer-{BRIGHT_DATA_CUSTOMER_ID}"
+            f"-zone-{BRIGHT_DATA_ZONE}"
+            f":{BRIGHT_DATA_API_KEY}@brd.superproxy.io:33335"
+        )
+    if OXYLABS_USERNAME and OXYLABS_PASSWORD:
+        return (
+            f"https://{OXYLABS_USERNAME}:{OXYLABS_PASSWORD}"
+            f"@unblock.oxylabs.io:60000"
+        )
+    return None
+
+
+def _has_proxy() -> bool:
+    """Check if any proxy is configured."""
+    return bool(BRIGHT_DATA_API_KEY or (OXYLABS_USERNAME and OXYLABS_PASSWORD))
+
+
 def _try_mirrors(mirrors: list[str], path_fn, **kwargs) -> Optional[object]:
-    """Try a request across multiple mirror domains."""
+    """Try a request across multiple mirror domains.
+
+    First attempts direct connection on all mirrors, then retries with
+    proxy if available (shadow libraries often block cloud IPs).
+    """
     import httpx
 
+    # Pass 1: direct connection
     for mirror in mirrors:
         try:
             url = path_fn(mirror)
@@ -262,8 +314,24 @@ def _try_mirrors(mirrors: list[str], path_fn, **kwargs) -> Optional[object]:
                 if resp.status_code == 200:
                     return resp
         except Exception as exc:
-            logger.debug("Mirror %s failed: %s", mirror, exc)
+            logger.debug("Mirror %s failed (direct): %s", mirror, exc)
             continue
+
+    # Pass 2: retry with proxy if available
+    if _has_proxy():
+        logger.info("Direct mirrors failed — retrying with proxy")
+        for mirror in mirrors:
+            try:
+                url = path_fn(mirror)
+                with _get_http_client(timeout=45, use_proxy=True) as client:
+                    resp = client.get(url, **kwargs)
+                    if resp.status_code == 200:
+                        logger.info("Proxy succeeded for mirror %s", mirror)
+                        return resp
+            except Exception as exc:
+                logger.debug("Mirror %s failed (proxy): %s", mirror, exc)
+                continue
+
     return None
 
 
@@ -327,6 +395,61 @@ def _cache_lookup_book(url: str) -> Optional[str]:
     return None
 
 
+def _datalake_store(content: bytes, text: str, title: str, author: str,
+                    filename: str, md5: str, doi: str, source: str,
+                    cache_key: str) -> None:
+    """Upload artifact to B2 datalake as RO-Crate. Non-blocking — failures are logged."""
+    try:
+        from datalake import store_artifact, is_configured
+        if not is_configured():
+            return
+
+        # Determine file extension from filename
+        ext = ""
+        if filename and "." in filename:
+            ext = filename.rsplit(".", 1)[-1].lower()
+        if not ext:
+            if content[:5] == b"%PDF-":
+                ext = "pdf"
+            elif content[:2] == b"PK":
+                ext = "epub"
+            else:
+                ext = "txt"
+
+        store_artifact(
+            raw_content=content,
+            extracted_text=text,
+            category="books",
+            metadata={
+                "title": title or filename,
+                "author": author,
+                "source": source,
+                "source_url": cache_key if cache_key.startswith("http") else "",
+                "md5": md5,
+                "doi": doi,
+                "filename": filename,
+            },
+            file_extension=ext,
+        )
+    except ImportError:
+        logger.debug("Datalake module not available — skipping B2 upload")
+    except Exception as exc:
+        logger.warning("Datalake upload failed (non-fatal): %s", exc)
+
+
+def _datalake_lookup(content_hash: str) -> Optional[str]:
+    """Look up extracted text from B2 datalake by content hash."""
+    try:
+        from datalake import get_artifact_text, is_configured
+        if not is_configured():
+            return None
+        return get_artifact_text(content_hash)
+    except ImportError:
+        return None
+    except Exception:
+        return None
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # SOURCE 1: OPEN LIBRARY / INTERNET ARCHIVE
 # ═══════════════════════════════════════════════════════════════════════
@@ -381,33 +504,44 @@ def _search_open_library(query: str, max_results: int = 10) -> list[dict]:
 
 
 def _search_libgen(query: str, max_results: int = 10) -> list[dict]:
-    """Search Library Genesis via HTML scraping."""
+    """Search Library Genesis via HTML scraping.
+
+    Tries direct connection first, then retries with proxy if available.
+    """
     import httpx
 
     results = []
 
-    for mirror in LIBGEN_MIRRORS:
-        try:
-            search_url = (
-                f"{mirror}/search.php?"
-                f"req={quote_plus(query)}&lg_topic=libgen&open=0"
-                f"&view=simple&res={max_results}&phrase=1&column=def"
-            )
+    for use_proxy in ([False, True] if _has_proxy() else [False]):
+        for mirror in LIBGEN_MIRRORS:
+            try:
+                search_url = (
+                    f"{mirror}/search.php?"
+                    f"req={quote_plus(query)}&lg_topic=libgen&open=0"
+                    f"&view=simple&res={max_results}&phrase=1&column=def"
+                )
 
-            with _get_http_client() as client:
-                resp = client.get(search_url)
+                with _get_http_client(timeout=45 if use_proxy else 30,
+                                      use_proxy=use_proxy) as client:
+                    resp = client.get(search_url)
 
-            if resp.status_code != 200:
+                if resp.status_code != 200:
+                    continue
+
+                html = resp.text
+                results = _parse_libgen_results(html, mirror, max_results)
+                if results:
+                    if use_proxy:
+                        logger.info("LibGen search succeeded via proxy (%s)", mirror)
+                    return results
+
+            except Exception as exc:
+                logger.debug("LibGen mirror %s failed (%s): %s",
+                             mirror, "proxy" if use_proxy else "direct", exc)
                 continue
 
-            html = resp.text
-            results = _parse_libgen_results(html, mirror, max_results)
-            if results:
-                return results
-
-        except Exception as exc:
-            logger.debug("LibGen mirror %s failed: %s", mirror, exc)
-            continue
+        if results:
+            break
 
     return results
 
@@ -486,65 +620,72 @@ def _parse_libgen_results(html: str, mirror: str, max_results: int) -> list[dict
 
 
 def _download_libgen_book(md5: str) -> Optional[tuple[bytes, str]]:
-    """Download a book from LibGen by MD5 hash. Returns (content, filename) or None."""
+    """Download a book from LibGen by MD5 hash. Returns (content, filename) or None.
+
+    Tries direct connection first, then retries with proxy if available.
+    """
     import httpx
 
-    for mirror in LIBGEN_MIRRORS:
-        try:
-            get_url = f"{mirror}/get.php?md5={md5}"
+    for use_proxy in ([False, True] if _has_proxy() else [False]):
+        for mirror in LIBGEN_MIRRORS:
+            try:
+                get_url = f"{mirror}/get.php?md5={md5}"
 
-            with _get_http_client() as client:
-                resp = client.get(get_url)
+                with _get_http_client(timeout=45 if use_proxy else 30,
+                                      use_proxy=use_proxy) as client:
+                    resp = client.get(get_url)
 
-            if resp.status_code != 200:
-                continue
-
-            # The get.php page usually contains a download link
-            # Look for direct download link in the HTML
-            html = resp.text
-
-            # Pattern 1: Direct download link (e.g., <a href="...">GET</a>)
-            download_links = re.findall(
-                r'<a\s+href="([^"]+)"[^>]*>\s*(?:GET|Download|Click)\s*</a>',
-                html, re.IGNORECASE
-            )
-
-            # Pattern 2: Any link to a file with a book extension
-            if not download_links:
-                download_links = re.findall(
-                    r'href="([^"]*\.(?:pdf|epub|djvu|mobi|azw3)[^"]*)"',
-                    html, re.IGNORECASE
-                )
-
-            # Pattern 3: Cloudflare/library.lol links
-            if not download_links:
-                download_links = re.findall(
-                    r'href="(https?://[^"]*(?:cloudflare|library\.lol|download)[^"]*)"',
-                    html, re.IGNORECASE
-                )
-
-            for link in download_links:
-                if link.startswith("/"):
-                    link = f"{mirror}{link}"
-                elif not link.startswith("http"):
-                    link = urljoin(get_url, link)
-
-                try:
-                    with _get_http_client() as dl_client:
-                        dl_resp = dl_client.get(link)
-                    if dl_resp.status_code == 200 and len(dl_resp.content) > 1000:
-                        # Determine filename
-                        cd = dl_resp.headers.get("content-disposition", "")
-                        fn_match = re.search(r'filename="?([^";\n]+)', cd)
-                        filename = fn_match.group(1).strip() if fn_match else f"book_{md5[:8]}.pdf"
-                        return dl_resp.content, filename
-                except Exception as exc:
-                    logger.debug("Download link %s failed: %s", link[:80], exc)
+                if resp.status_code != 200:
                     continue
 
-        except Exception as exc:
-            logger.debug("LibGen mirror %s failed for MD5 %s: %s", mirror, md5, exc)
-            continue
+                # The get.php page usually contains a download link
+                html = resp.text
+
+                # Pattern 1: Direct download link (e.g., <a href="...">GET</a>)
+                download_links = re.findall(
+                    r'<a\s+href="([^"]+)"[^>]*>\s*(?:GET|Download|Click)\s*</a>',
+                    html, re.IGNORECASE
+                )
+
+                # Pattern 2: Any link to a file with a book extension
+                if not download_links:
+                    download_links = re.findall(
+                        r'href="([^"]*\.(?:pdf|epub|djvu|mobi|azw3)[^"]*)"',
+                        html, re.IGNORECASE
+                    )
+
+                # Pattern 3: Cloudflare/library.lol links
+                if not download_links:
+                    download_links = re.findall(
+                        r'href="(https?://[^"]*(?:cloudflare|library\.lol|download)[^"]*)"',
+                        html, re.IGNORECASE
+                    )
+
+                for link in download_links:
+                    if link.startswith("/"):
+                        link = f"{mirror}{link}"
+                    elif not link.startswith("http"):
+                        link = urljoin(get_url, link)
+
+                    try:
+                        with _get_http_client(timeout=60 if use_proxy else 30,
+                                              use_proxy=use_proxy) as dl_client:
+                            dl_resp = dl_client.get(link)
+                        if dl_resp.status_code == 200 and len(dl_resp.content) > 1000:
+                            cd = dl_resp.headers.get("content-disposition", "")
+                            fn_match = re.search(r'filename="?([^";\n]+)', cd)
+                            filename = fn_match.group(1).strip() if fn_match else f"book_{md5[:8]}.pdf"
+                            if use_proxy:
+                                logger.info("LibGen download succeeded via proxy (%s)", mirror)
+                            return dl_resp.content, filename
+                    except Exception as exc:
+                        logger.debug("Download link %s failed: %s", link[:80], exc)
+                        continue
+
+            except Exception as exc:
+                logger.debug("LibGen mirror %s failed for MD5 %s (%s): %s",
+                             mirror, md5, "proxy" if use_proxy else "direct", exc)
+                continue
 
     return None
 
@@ -556,58 +697,66 @@ def _download_libgen_book(md5: str) -> Optional[tuple[bytes, str]]:
 
 def _search_annas_archive(query: str, max_results: int = 10,
                           content_type: str = "") -> list[dict]:
-    """Search Anna's Archive via HTML scraping."""
+    """Search Anna's Archive via HTML scraping.
+
+    Tries direct connection first, then retries with proxy if available.
+    """
     import httpx
 
     results = []
     content_filter = f"&content={content_type}" if content_type else ""
 
-    for domain in ANNAS_DOMAINS:
-        try:
-            search_url = f"{domain}/search?q={quote_plus(query)}{content_filter}"
+    for use_proxy in ([False, True] if _has_proxy() else [False]):
+        for domain in ANNAS_DOMAINS:
+            try:
+                search_url = f"{domain}/search?q={quote_plus(query)}{content_filter}"
 
-            with _get_http_client() as client:
-                resp = client.get(search_url)
+                with _get_http_client(timeout=45 if use_proxy else 30,
+                                      use_proxy=use_proxy) as client:
+                    resp = client.get(search_url)
 
-            if resp.status_code != 200:
+                if resp.status_code != 200:
+                    continue
+
+                html = resp.text
+                # Anna's Archive uses /md5/ links for results
+                md5_links = re.findall(r'/md5/([a-f0-9]{32})', html)
+                seen = set()
+
+                for md5 in md5_links:
+                    if md5 in seen:
+                        continue
+                    seen.add(md5)
+
+                    pattern = re.compile(
+                        rf'href="/md5/{md5}"[^>]*>(.*?)</a>',
+                        re.DOTALL | re.IGNORECASE
+                    )
+                    match = pattern.search(html)
+                    title = _strip_html(match.group(1))[:300] if match else f"[Book — MD5: {md5[:12]}...]"
+
+                    results.append({
+                        "title": title,
+                        "md5": md5,
+                        "url": f"{domain}/md5/{md5}",
+                        "source": "Anna's Archive",
+                    })
+
+                    if len(results) >= max_results:
+                        break
+
+                if results:
+                    if use_proxy:
+                        logger.info("Anna's Archive search succeeded via proxy (%s)", domain)
+                    return results
+
+            except Exception as exc:
+                logger.debug("Anna's Archive %s failed (%s): %s",
+                             domain, "proxy" if use_proxy else "direct", exc)
                 continue
 
-            html = resp.text
-            # Anna's Archive uses /md5/ links for results
-            md5_links = re.findall(r'/md5/([a-f0-9]{32})', html)
-            seen = set()
-
-            # Try to extract titles from nearby text
-            for md5 in md5_links:
-                if md5 in seen:
-                    continue
-                seen.add(md5)
-
-                # Find the block containing this MD5 and extract info
-                # Look for text near the MD5 link
-                pattern = re.compile(
-                    rf'href="/md5/{md5}"[^>]*>(.*?)</a>',
-                    re.DOTALL | re.IGNORECASE
-                )
-                match = pattern.search(html)
-                title = _strip_html(match.group(1))[:300] if match else f"[Book — MD5: {md5[:12]}...]"
-
-                results.append({
-                    "title": title,
-                    "md5": md5,
-                    "url": f"{domain}/md5/{md5}",
-                    "source": "Anna's Archive",
-                })
-
-                if len(results) >= max_results:
-                    break
-
-            if results:
-                return results
-
-        except Exception as exc:
-            logger.debug("Anna's Archive %s failed: %s", domain, exc)
-            continue
+        if results:
+            break
 
     return results
 
@@ -618,50 +767,58 @@ def _search_annas_archive(query: str, max_results: int = 10,
 
 
 def _download_from_scihub(doi: str) -> Optional[tuple[bytes, str]]:
-    """Download a paper from Sci-Hub by DOI. Returns (content, filename) or None."""
+    """Download a paper from Sci-Hub by DOI. Returns (content, filename) or None.
+
+    Tries direct connection first, then retries with proxy if available.
+    """
     import httpx
 
-    for domain in SCIHUB_DOMAINS:
-        try:
-            url = f"{domain}/{doi}"
+    for use_proxy in ([False, True] if _has_proxy() else [False]):
+        for domain in SCIHUB_DOMAINS:
+            try:
+                url = f"{domain}/{doi}"
 
-            with _get_http_client() as client:
-                resp = client.get(url)
+                with _get_http_client(timeout=45 if use_proxy else 30,
+                                      use_proxy=use_proxy) as client:
+                    resp = client.get(url)
 
-            if resp.status_code != 200:
-                continue
+                if resp.status_code != 200:
+                    continue
 
-            html = resp.text
+                html = resp.text
 
-            # Find the PDF embed/iframe
-            pdf_match = re.search(
-                r'(?:src|href)="((?:https?:)?//[^"]*\.pdf[^"]*)"',
-                html, re.IGNORECASE
-            )
-            if not pdf_match:
-                # Try iframe src
+                # Find the PDF embed/iframe
                 pdf_match = re.search(
-                    r'<iframe[^>]*src="([^"]+)"',
+                    r'(?:src|href)="((?:https?:)?//[^"]*\.pdf[^"]*)"',
                     html, re.IGNORECASE
                 )
+                if not pdf_match:
+                    pdf_match = re.search(
+                        r'<iframe[^>]*src="([^"]+)"',
+                        html, re.IGNORECASE
+                    )
 
-            if not pdf_match:
+                if not pdf_match:
+                    continue
+
+                pdf_url = pdf_match.group(1)
+                if pdf_url.startswith("//"):
+                    pdf_url = "https:" + pdf_url
+
+                with _get_http_client(timeout=60 if use_proxy else 30,
+                                      use_proxy=use_proxy) as dl_client:
+                    pdf_resp = dl_client.get(pdf_url)
+
+                if pdf_resp.status_code == 200 and len(pdf_resp.content) > 1000:
+                    safe_doi = re.sub(r'[/\\:*?"<>|]', '_', doi)
+                    if use_proxy:
+                        logger.info("Sci-Hub download succeeded via proxy (%s)", domain)
+                    return pdf_resp.content, f"{safe_doi}.pdf"
+
+            except Exception as exc:
+                logger.debug("Sci-Hub %s failed for DOI %s (%s): %s",
+                             domain, doi, "proxy" if use_proxy else "direct", exc)
                 continue
-
-            pdf_url = pdf_match.group(1)
-            if pdf_url.startswith("//"):
-                pdf_url = "https:" + pdf_url
-
-            with _get_http_client() as dl_client:
-                pdf_resp = dl_client.get(pdf_url)
-
-            if pdf_resp.status_code == 200 and len(pdf_resp.content) > 1000:
-                safe_doi = re.sub(r'[/\\:*?"<>|]', '_', doi)
-                return pdf_resp.content, f"{safe_doi}.pdf"
-
-        except Exception as exc:
-            logger.debug("Sci-Hub %s failed for DOI %s: %s", domain, doi, exc)
-            continue
 
     return None
 
@@ -920,7 +1077,7 @@ def download_book(
     if not text or text.startswith("[ERROR]") or text.startswith("[No text"):
         return f"[EXTRACTION FAILED] Downloaded {len(content):,} bytes but could not extract text.\nFilename: {filename}"
 
-    # Cache it
+    # Cache locally
     _cache_store_book(
         url=cache_key,
         content=content,
@@ -936,6 +1093,9 @@ def download_book(
         },
         tags=["book", source] if source != "auto" else ["book"],
     )
+
+    # Upload to B2 datalake (RO-Crate format) for cross-session persistence
+    _datalake_store(content, text, title, author, filename, md5, doi, source, cache_key)
 
     # Truncate for context window
     if len(text) > 120000:
