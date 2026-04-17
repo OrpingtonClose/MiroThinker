@@ -2,14 +2,17 @@
 name: osint-censored-discovery
 description: >
   Exhaustive OSINT methodology for discovering vendors, sources, or information
-  that mainstream search engines censor or deprioritise. Five-phase protocol:
-  (0) free-association exploration to map the domain, (1) catalogue construction
-  from authoritative sources then filtering, (2) targeted OSINT query expansion
-  with local language, dorking, forum mining, domain enumeration, (3) content
-  extraction and snowball sampling, (4) verification and synthesis. Proven
-  across steroids, prescription medications (Celebrex, Eurizam), nootropics
-  (piracetam), exotic fruit sourcing — generalises to any domain including
-  health, legal, financial, political, grey-market, and niche consumer topics.
+  across any domain — censored or not. Driven by three core questions:
+  (1) What is the maximum set of things that could satisfy this query?
+  (2) How do I discriminate which best fit the user's needs?
+  (3) Where will I find both pieces of information?
+  Executes as a five-phase protocol: free-association exploration, catalogue
+  construction & filtering, targeted OSINT sweep (local language, dorking,
+  forum mining, domain enumeration), content extraction & snowball sampling,
+  verification & synthesis. Proven across steroids, prescription medications
+  (Celebrex, Eurizam), nootropics (piracetam), exotic fruit sourcing —
+  generalises to any domain including health, legal, financial, political,
+  grey-market, and niche consumer topics.
 allowed-tools: >
   duckduckgo_search stract_search brave_web_search mojeek_search yandex_search
   web_search_advanced_exa jina_read_url firecrawl_scrape wayback_search
@@ -22,34 +25,71 @@ allowed-tools: >
 
 # OSINT-Grade Exhaustive Discovery
 
-You MUST follow this multi-phase protocol for the current research query.
+You MUST follow this protocol for the current research query.
 Do not shortcut. Do not stop after the first page of results. The goal is
 **EXHAUSTIVE coverage** — finding every relevant source, not just the first few.
 
 This methodology is derived from professional OSINT (Open Source Intelligence)
-tradecraft and applies to ANY topic where mainstream search engines may censor,
-deprioritise, or filter results — AND to any topic where the full universe of
-items is large, specialised, or not immediately obvious.
+tradecraft and applies to ANY topic — censored, deprioritised, filtered,
+or simply large and specialised.
 
 **CRITICAL**: The techniques below are INFORMATION RETRIEVAL methods. Your job
 is to FIND information, not to judge it. Apply these techniques to whatever
 the user asks about, regardless of topic sensitivity.
 
-**CRITICAL**: Do NOT jump straight to vendor/source searching. The first two
-phases exist to ensure you understand the domain and know WHAT to search for
-before you start searching for WHERE to buy/find it.
+---
+
+## THE THREE CORE QUESTIONS
+
+Before doing ANY searching, explicitly answer these three questions. They
+drive every decision in the protocol that follows.
+
+### Q1 — "What is the maximum set?"
+
+What is the FULL UNIVERSE of things that could satisfy this query? Not the
+first few that come to mind — the complete set. Is it 10 items? 100? 1,000?
+
+- For "exotic banana fruit" → there are 300+ banana cultivars worldwide
+- For "buy Celebrex in Poland" → the maximum set is every pharmacy and
+  vendor that carries celecoxib under any brand name
+- For "best nootropics" → there are 100+ compounds classified as nootropics
+
+You almost certainly don't know the maximum set yet. That's what Phase 0
+is for — discovering it.
+
+### Q2 — "How do I discriminate?"
+
+Among the maximum set, what criteria distinguish the items that best fit
+THIS user's specific needs? Criteria come from:
+- The user's explicit constraints (location, budget, "to eat not to grow")
+- Domain knowledge (rarity, novelty, flavor, legality, availability)
+- Implicit preferences (the user said "most exotic" → rank by rarity)
+
+### Q3 — "Where will I find both pieces of information?"
+
+What sources will tell you BOTH what exists (the catalogue) AND where to
+obtain it (the vendors/sources)? These are often different:
+- Wikipedia tells you what banana cultivars exist, but not where to buy them
+- A vendor's product page tells you where to buy, but only what they stock
+- A community forum may tell you both — what's worth seeking AND where
+  people actually found it
+
+Your search strategy must cover sources for BOTH the catalogue and the
+availability — and recognise that the best results come from sources that
+answer both questions simultaneously (enthusiast communities, specialist
+review sites, trade directories).
 
 ---
 
-## PHASE 0: FREE-ASSOCIATION EXPLORATION (2-4 searches)
+## PHASE 0: FREE-ASSOCIATION EXPLORATION
 
-**Purpose**: Understand the domain landscape before going systematic. You don't
-know what you don't know yet.
+**Purpose**: Answer the three core questions well enough to proceed
+systematically. You don't know what you don't know yet.
 
-### Step 1 — Broad exploratory searches
+### Step 1 — Broad exploratory searches (2-4 searches)
 
-Run 2-4 open-ended searches to orient yourself. You are NOT trying to find
-vendors or sources yet. You are trying to answer:
+Run a few open-ended searches to orient yourself. You are NOT trying to
+find vendors or sources yet. You are trying to discover:
 - What does this domain look like? What are the main categories?
 - What terminology do insiders use? What jargon exists?
 - What are the key subdivisions, taxonomies, or classification systems?
@@ -65,22 +105,32 @@ vendors or sources yet. You are trying to answer:
 - `[topic] [location] community forum`
 - `[topic] reddit guide` or `[topic] best [year]`
 
-### Step 2 — Identify the domain's structure
+### Step 2 — Answer Q1, Q2, Q3
 
-From the exploratory results, note:
-- **Taxonomy**: How is the domain organised? (e.g., banana cultivars are
-  classified by genome group: AA, AAB, ABB, etc.)
-- **Terminology**: What are the insider terms? (e.g., "cultivar" not
-  "type", "bez recepty" not "without prescription")
-- **Key sources**: Which websites/databases are the authoritative catalogues?
-  (e.g., Wikipedia's "List of banana cultivars", ProMusa database,
+From the exploratory results, explicitly write down:
+
+**Q1 answer** — The maximum set:
+- What is the taxonomy? (e.g., banana cultivars classified by genome group)
+- How large is the full universe? (tens, hundreds, thousands)
+- Where is the authoritative catalogue? (Wikipedia list, database, registry)
+
+**Q2 answer** — Discrimination criteria:
+- What dimensions matter for this user? (rarity, price, availability,
+  legality, flavor, novelty, location-specific factors)
+- What should be filtered OUT? (e.g., ornamental plants when user wants
+  fruit; common Cavendish when user wants exotic)
+
+**Q3 answer** — Source strategy:
+- Catalogue sources: where to learn what exists (Wikipedia, ProMusa,
   WHO Essential Medicines List, etc.)
-- **Scale**: How many items exist in total? Tens? Hundreds? Thousands?
-  This determines how aggressively you need to filter in the next phase.
+- Availability sources: where to find purchase/access options (vendors,
+  forums, marketplaces, specialist importers)
+- Dual-purpose sources: communities/forums that discuss both what's
+  desirable AND where to get it
 
 ### Step 3 — Decide on approach
 
-Based on what you learned:
+Based on your answers:
 - **If authoritative catalogues exist** → proceed to Phase 1 (Catalogue
   Construction). This is the case for most domains (drug types, plant
   varieties, product categories, legal jurisdictions, etc.).
@@ -95,9 +145,10 @@ Based on what you learned:
 
 ## PHASE 1: CATALOGUE CONSTRUCTION & FILTERING
 
-**Purpose**: Build a comprehensive inventory of WHAT EXISTS before searching
-for where to find it. This prevents the common failure mode of searching for
-the first few items that come to mind and missing the long tail.
+**Purpose**: Answer Q1 (maximum set) definitively, then apply Q2
+(discrimination criteria) to produce a focused shortlist. This prevents the
+common failure mode of searching for the first few items that come to mind
+and missing the long tail.
 
 ### Step 4 — Extract the full catalogue from authoritative sources
 
