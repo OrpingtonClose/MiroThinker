@@ -34,7 +34,7 @@ from strands.agent.conversation_manager import SlidingWindowConversationManager
 
 from config import build_model
 from prompts import PLANNER_PROMPT, RESEARCHER_PROMPT, SYSTEM_PROMPT
-from tools import get_all_mcp_clients
+from tools import get_all_mcp_clients, get_native_tools
 
 logger = logging.getLogger(__name__)
 
@@ -266,15 +266,62 @@ def _enter_mcp_clients(mcp_clients):
     return tool_list
 
 
+def _build_tool_list(mcp_tools):
+    """Assemble the full tool list with uncensored-first ordering.
+
+    Tool ordering matters — LLMs naturally prefer tools listed earlier.
+    Order: Tier 1 uncensored natives → MCP tools (Brave, Exa, Semantic
+    Scholar, arXiv, Wikipedia, etc.) → Tier 2 extraction → Deep research
+    → Research management → Tier 3 censored fallback.
+
+    Args:
+        mcp_tools: Tools collected from MCP clients via list_tools_sync().
+
+    Returns:
+        Combined tool list ordered for uncensored-first preference.
+    """
+    native = get_native_tools()
+    from tools import (
+        NATIVE_TOOLS_TIER1,
+        NATIVE_TOOLS_TIER3,
+        NATIVE_TOOLS_DEEP_RESEARCH,
+        NATIVE_TOOLS_RESEARCH_MGMT,
+    )
+
+    def _tool_name(t):
+        return t.tool_name if hasattr(t, "tool_name") else t.__name__
+
+    tier1_names = {_tool_name(t) for t in NATIVE_TOOLS_TIER1}
+    tier3_names = {_tool_name(t) for t in NATIVE_TOOLS_TIER3}
+    deep_names = {_tool_name(t) for t in NATIVE_TOOLS_DEEP_RESEARCH}
+    mgmt_names = {_tool_name(t) for t in NATIVE_TOOLS_RESEARCH_MGMT}
+    special_names = tier1_names | tier3_names | deep_names | mgmt_names
+
+    native_first = [t for t in native if _tool_name(t) in tier1_names]
+    native_mid = [t for t in native if _tool_name(t) not in special_names]  # Tier 2 only
+    native_deep = [t for t in native if _tool_name(t) in deep_names]
+    native_mgmt = [t for t in native if _tool_name(t) in mgmt_names]
+    native_last = [t for t in native if _tool_name(t) in tier3_names]
+
+    return [
+        *native_first,   # Tier 1: duckduckgo_search, mojeek_search
+        *mcp_tools,      # MCP: Brave, Exa, Semantic Scholar, arXiv, Wikipedia, etc.
+        *native_mid,     # Tier 2: jina_read_url
+        *native_deep,    # Deep research: perplexity, grok, tavily, exa_multi
+        *native_mgmt,    # Research mgmt: findings store, knowledge graph
+        *native_last,    # Tier 3: google_search (censored fallback — always last)
+    ]
+
+
 def create_single_agent(tool_list=None, mcp_clients=None):
     """Create a single-agent setup with all tools directly available.
 
     Use this for simple interactive sessions where one agent handles
-    both search and synthesis.
+    both search and synthesis.  Tools are ordered uncensored-first.
 
     Args:
-        tool_list: Pre-built list of MCP tools.  When *None* the
-            function enters its own MCP clients (REPL use-case).
+        tool_list: Pre-built list of tools.  When *None* the function
+            enters its own MCP clients and builds the list (REPL use-case).
         mcp_clients: MCP clients that were entered to produce
             *tool_list*.  Returned as-is for the caller to manage.
     """
@@ -282,7 +329,8 @@ def create_single_agent(tool_list=None, mcp_clients=None):
     owns_clients = tool_list is None
     if owns_clients:
         mcp_clients = get_all_mcp_clients()
-        tool_list = _enter_mcp_clients(mcp_clients)
+        mcp_tools = _enter_mcp_clients(mcp_clients)
+        tool_list = _build_tool_list(mcp_tools)
 
     conversation_manager = SlidingWindowConversationManager(
         window_size=20,
@@ -302,14 +350,14 @@ def create_single_agent(tool_list=None, mcp_clients=None):
 def create_multi_agent(tool_list=None, mcp_clients=None):
     """Create a planner + researcher multi-agent setup.
 
-    The researcher agent has direct access to all MCP tools and handles
-    web search/scraping.  The planner agent delegates to the researcher
-    via the agent-as-tool pattern and handles strategic decomposition
-    and synthesis.
+    The researcher agent has direct access to all tools (ordered
+    uncensored-first) and handles web search/scraping.  The planner
+    agent delegates to the researcher via the agent-as-tool pattern
+    and handles strategic decomposition and synthesis.
 
     Args:
-        tool_list: Pre-built list of MCP tools.  When *None* the
-            function enters its own MCP clients (REPL use-case).
+        tool_list: Pre-built list of tools.  When *None* the function
+            enters its own MCP clients and builds the list (REPL use-case).
         mcp_clients: MCP clients that were entered to produce
             *tool_list*.  Returned as-is for the caller to manage.
 
@@ -320,7 +368,8 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
     owns_clients = tool_list is None
     if owns_clients:
         mcp_clients = get_all_mcp_clients()
-        tool_list = _enter_mcp_clients(mcp_clients)
+        mcp_tools = _enter_mcp_clients(mcp_clients)
+        tool_list = _build_tool_list(mcp_tools)
 
     conversation_manager = SlidingWindowConversationManager(
         window_size=20,
@@ -347,9 +396,16 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
             researcher.as_tool(
                 name="researcher",
                 description=(
-                    "Deep web research agent with access to Brave Search, "
-                    "Firecrawl, Exa, and Kagi. Delegate any web search, "
-                    "scrape, or data retrieval task to this tool."
+                    "Deep web research agent with uncensored-first tool "
+                    "priority: DuckDuckGo, Brave, Exa, Mojeek for search; "
+                    "Jina Reader, Firecrawl, Kagi for extraction; "
+                    "Semantic Scholar, arXiv for academic papers; "
+                    "Wikipedia, DuckDB for reference data; "
+                    "Perplexity, Grok, Tavily for deep research; "
+                    "store_finding/read_findings + knowledge graph for "
+                    "persisting research; Google/Serper as censored fallback. "
+                    "Delegate any web search, scrape, or data retrieval task "
+                    "to this tool."
                 ),
             ),
         ],

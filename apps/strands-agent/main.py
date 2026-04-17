@@ -128,6 +128,7 @@ async def lifespan(app: FastAPI):
     global _single_agent, _multi_agent, _multi_researcher, _mcp_clients
 
     from agent import (
+        _build_tool_list,
         _enter_mcp_clients,
         _setup_otel,
         create_multi_agent,
@@ -149,13 +150,14 @@ async def lifespan(app: FastAPI):
 
     _setup_otel()
 
-    # Enter MCP clients once and share tools between both agents
+    # Enter MCP clients once and build the combined tool list (uncensored-first)
     try:
         _mcp_clients = get_all_mcp_clients()
-        tool_list = _enter_mcp_clients(_mcp_clients)
+        mcp_tools = _enter_mcp_clients(_mcp_clients)
+        tool_list = _build_tool_list(mcp_tools)
     except Exception:
         logger.exception("Failed to initialise MCP tools")
-        tool_list = []
+        tool_list = _build_tool_list([])  # Still include native tools
         _mcp_clients = []
 
     try:

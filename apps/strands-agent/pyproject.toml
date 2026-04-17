@@ -11,6 +11,8 @@ dependencies = [
     "python-dotenv",
     "fastapi[standard]",
     "uvicorn[standard]",
+    "ddgs",
+    "httpx",
 ]
 
 [build-system]
