@@ -344,8 +344,9 @@ def _cache_store_book(url: str, content: bytes, text: str, title: str,
     """Store a book in the persistent cache. Returns True on success."""
     try:
         from cache import cache_put
-        tag_list = tags or []
-        tag_list.append("book")
+        tag_list = list(tags) if tags else []
+        if "book" not in tag_list:
+            tag_list.append("book")
 
         # Store extracted text (main entry — what the agent reads)
         cache_put(
@@ -1098,10 +1099,11 @@ def download_book(
     _datalake_store(content, text, title, author, filename, md5, doi, source, cache_key)
 
     # Truncate for context window
-    if len(text) > 120000:
+    text_len = len(text)
+    if text_len > 120000:
         text = (
             text[:120000]
-            + f"\n\n[...TRUNCATED — full text is {len(text):,} chars. "
+            + f"\n\n[...TRUNCATED — full text is {text_len:,} chars. "
             f"Use read_book_section to read specific chapters.]"
         )
 
@@ -1109,7 +1111,7 @@ def download_book(
         f"**{title or filename or 'Downloaded book'}**\n"
         f"Author: {author or 'Unknown'}\n"
         f"File: {filename} ({len(content):,} bytes)\n"
-        f"Text: {len(text):,} characters extracted\n"
+        f"Text: {text_len:,} characters extracted\n"
         f"---\n\n{text}"
     )
 
