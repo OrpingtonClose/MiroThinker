@@ -242,12 +242,8 @@ def yandex_search(query: str, max_results: int = 10) -> str:
         return f"[TOOL_ERROR] Yandex search failed: {exc}"
 
     # Parse XML-like response structure from Yandex
-    groups = (
-        data.get("groupByResponses", [{}])[0]
-        .get("groups", [])
-        if isinstance(data.get("groupByResponses"), list)
-        else []
-    )
+    gbr = data.get("groupByResponses")
+    groups = gbr[0].get("groups", []) if isinstance(gbr, list) and gbr else []
 
     if not groups:
         # Try flat result list
