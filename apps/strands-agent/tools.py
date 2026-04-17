@@ -1507,4 +1507,26 @@ def get_native_tools():
 
     # Research management — always available
     tools.extend(NATIVE_TOOLS_RESEARCH_MGMT)
+
+    # Persistent cache tools — always available
+    try:
+        from cache import CACHE_TOOLS
+        tools.extend(CACHE_TOOLS)
+    except ImportError:
+        logger.debug("Cache module not available — cache tools skipped")
+
+    # YouTube intelligence tools — always available (yt-dlp checked at runtime)
+    try:
+        from youtube_tools import YOUTUBE_TOOLS
+        tools.extend(YOUTUBE_TOOLS)
+    except ImportError:
+        logger.debug("YouTube tools module not available — YouTube tools skipped")
+
+    # Scientific document & book acquisition tools — always available
+    try:
+        from document_tools import DOCUMENT_TOOLS
+        tools.extend(DOCUMENT_TOOLS)
+    except ImportError:
+        logger.debug("Document tools module not available — document tools skipped")
+
     return tools

@@ -13,6 +13,8 @@ dependencies = [
     "uvicorn[standard]",
     "ddgs",
     "httpx",
+    "pdfplumber",
+    "yt-dlp",
 ]
 
 [build-system]
@@ -20,4 +22,4 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["main", "agent", "config", "tools", "prompts"]
+py-modules = ["main", "agent", "config", "tools", "prompts", "cache", "youtube_tools", "document_tools"]
