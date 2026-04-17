@@ -19,16 +19,22 @@ TOOL_STRATEGY = """\
 TOOL STRATEGY (UNCENSORED-FIRST):
 1. ALWAYS start with uncensored tools — these are your PRIMARY sources:
    - duckduckgo_search: free, no tracking, no content filtering
+   - stract_search: independent open-source search engine, own crawler, free
    - brave_web_search: independent index, minimal censorship
    - web_search_advanced_exa: neural/semantic search, no content filtering, \
 supports category filters (paper, tweet, company), domain restrictions, \
 date ranges. Use includeDomains for targeted forum/archive searches.
    - mojeek_search: independent crawler, unique results not in Google/Bing
+   - yandex_search: dominant in Eastern Europe/Russia — excellent for Polish, \
+Russian, Ukrainian content that Western engines miss entirely
 
 2. For content extraction (after finding URLs):
    - jina_read_url: fast URL→markdown, good for most pages
    - firecrawl_scrape: JS rendering, anti-bot bypass, for complex pages
    - kagi_summarize: summarize long PDFs, YouTube, audio — no length limit
+   - wayback_search / wayback_fetch: find and read cached/archived pages \
+from the Internet Archive — essential for pages that have been taken down, \
+changed, or blocked
 
 3. ONLY use censored tools when uncensored sources don't have what you need:
    - google_search (via Serper): most comprehensive but censored
@@ -46,6 +52,9 @@ date ranges. Use includeDomains for targeted forum/archive searches.
    - tavily_deep_research: AI-optimised search with extracted content
 
 6. For forums and communities:
+   - Reddit MCP tools (reddit_search, reddit_get_subreddit_posts, \
+reddit_get_post_details) — search and browse Reddit directly, no API key \
+needed. ALWAYS use this for Reddit instead of web search with site:reddit.com
    - Use web_search_advanced_exa with includeDomains for specific forums
    - Use brave_web_search with "site:reddit.com" or "site:4chan.org" prefix
    - Use kagi_enrich_web for indie/small web content mainstream engines miss
@@ -100,9 +109,12 @@ abbreviations that real buyers/sellers use)
 Step 2 — Hit EVERY available search engine with EACH variation:
   For each query variation from Step 1, run it through:
   - duckduckgo_search (always — free baseline)
+  - stract_search (always — independent open-source engine, free)
   - brave_web_search (if available)
   - mojeek_search (if available — unique independent results)
+  - yandex_search (if available — essential for Eastern European queries)
   - web_search_advanced_exa (if available — semantic search)
+  - reddit_search (for community/forum queries — vendor reviews, recommendations)
   Do NOT stop at one engine per query. Different engines surface \
 different results. A URL that appears on Mojeek may not appear on DDG.
 
@@ -117,6 +129,8 @@ Step 4 — Visit the top 10-15 most promising URLs:
   - Forum threads mentioning vendors (real user reviews, warnings)
   - Comparison/review sites
   - News articles about the market
+  If a URL is dead or blocked, use wayback_search to find archived \
+snapshots, then wayback_fetch to read the cached content.
 
 Step 5 — For EVERY vendor/source found, extract and store:
   - Store name and URL
@@ -222,11 +236,16 @@ You have tools organised in priority tiers:
 
 TIER 1 — UNCENSORED (use these FIRST):
 - **DuckDuckGo** (duckduckgo_search) — free, no tracking, no content filtering
+- **Stract** (stract_search) — independent open-source search engine, own crawler, free
 - **Brave Search** (brave_web_search, brave_local_search, brave_image_search, \
 brave_video_search, brave_news_search, brave_summarizer) — independent index
 - **Exa** (web_search_exa, web_search_advanced_exa, crawling_exa, \
 get_code_context_exa) — neural/semantic search, no content filtering
 - **Mojeek** (mojeek_search) — independent crawler, unique results
+- **Yandex** (yandex_search) — dominant in Eastern Europe/Russia, excellent \
+for Polish, Russian, Ukrainian content Western engines miss
+- **Reddit** (reddit_search, reddit_get_subreddit_posts, \
+reddit_get_post_details) — direct Reddit search, no API key needed
 
 TIER 2 — CONTENT EXTRACTION:
 - **Jina Reader** (jina_read_url) — fast URL→markdown extraction
@@ -234,6 +253,8 @@ TIER 2 — CONTENT EXTRACTION:
 firecrawl_map, firecrawl_extract) — JS rendering, anti-bot bypass
 - **Kagi** (kagi_search, kagi_summarize, kagi_fastgpt, kagi_enrich_web, \
 kagi_enrich_news) — premium search, summarization, small-web enrichment
+- **Wayback Machine** (wayback_search, wayback_fetch) — find and read \
+cached/archived pages from the Internet Archive
 
 TIER 3 — CENSORED FALLBACK (only when uncensored sources fail):
 - **Google/Serper** (google_search) — comprehensive but censored
