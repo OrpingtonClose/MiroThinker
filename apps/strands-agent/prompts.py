@@ -80,17 +80,17 @@ needed. ALWAYS use this for Reddit instead of web search with site:reddit.com
 NEVER use Google/Serper as your first search. Always try uncensored sources first.
 """
 
-# ── Skills integration note ───────────────────────────────────────────
-# The detailed OSINT research methodology is now loaded on-demand via the
-# AgentSkills plugin (skills/osint-censored-discovery/SKILL.md).  The agent
-# sees the skill name + description in its system prompt at startup (~50
-# tokens) and loads the full 4-round protocol by calling the `skills` tool
-# when a censored-discovery query is detected.  This keeps the base prompt
-# lean while preserving access to the full OSINT tradecraft.
+# ── Skills integration ────────────────────────────────────────────────
+# The detailed OSINT research methodology is loaded on-demand via the
+# AgentSkills plugin (skills/osint-censored-discovery/SKILL.md).  When the
+# plugin is available, only a short skills directive is included in the
+# system prompts (~50 tokens).  When the plugin is NOT available (missing
+# skills directory, load failure), the full RESEARCH_METHODOLOGY is inlined
+# as a fallback so the agent never loses the OSINT protocol.
 #
-# The RESEARCH_METHODOLOGY constant is kept below for backwards
-# compatibility (direct tool-call scripts, tests) but is NO LONGER
-# concatenated into the agent system prompts.
+# The SKILLS_DIRECTIVE_* constants hold the short prompt text referencing
+# the `skills` tool.  agent.py swaps these for RESEARCH_METHODOLOGY when
+# the plugin fails to load.
 
 RESEARCH_METHODOLOGY = """\
 DEEP RESEARCH METHODOLOGY — OSINT-GRADE EXHAUSTIVE SEARCH:
@@ -325,6 +325,30 @@ MINIMUM EFFORT THRESHOLDS:
   enough — go back to Step 1 and try more query variations
 """
 
+# Skills directive text — included in prompts when the AgentSkills plugin
+# is available.  When the plugin is NOT available, RESEARCH_METHODOLOGY is
+# inlined instead via resolve_prompt().
+
+SKILLS_DIRECTIVE = """\
+SKILLS: You have access to specialised research skills via the `skills` tool. \
+Check the <available_skills> section of your system prompt — when a query \
+requires exhaustive discovery of censored, restricted, or hard-to-find \
+information, activate the relevant skill to load the full methodology. \
+Do this BEFORE starting your search, not after."""
+
+
+def resolve_prompt(prompt_template: str, *, skills_available: bool) -> str:
+    """Resolve a prompt template by injecting skills directive or methodology fallback.
+
+    When the AgentSkills plugin loaded successfully, the short skills directive
+    is injected (keeps prompt lean, methodology loaded on-demand via tool).
+    When the plugin is NOT available, the full RESEARCH_METHODOLOGY is inlined
+    so the agent never loses the OSINT protocol.
+    """
+    replacement = SKILLS_DIRECTIVE if skills_available else RESEARCH_METHODOLOGY
+    return prompt_template.replace("{skills_or_methodology}", replacement)
+
+
 # ── Researcher system prompt ─────────────────────────────────────────
 # Used by the researcher agent (tool-capable, does the actual searching)
 
@@ -389,11 +413,7 @@ RESEARCH MANAGEMENT:
     + TOOL_STRATEGY
     + """
 
-SKILLS: You have access to specialised research skills via the `skills` tool. \
-Check the <available_skills> section of your system prompt — when a query \
-requires exhaustive discovery of censored, restricted, or hard-to-find \
-information, activate the relevant skill to load the full methodology. \
-Do this BEFORE starting your search, not after.
+{skills_or_methodology}
 
 EXECUTION MODEL — SEQUENTIAL:
 Execute ONE tool call at a time. After each result, review it and decide \
@@ -567,12 +587,7 @@ RESEARCH MANAGEMENT:
     + TOOL_STRATEGY
     + """
 
-SKILLS: You have access to specialised research skills via the `skills` tool. \
-Check the <available_skills> section of your system prompt — when a query \
-requires exhaustive discovery of censored, restricted, or hard-to-find \
-information (vendors, substances, grey-market sources, forbidden knowledge), \
-activate the relevant skill FIRST to load the full methodology. This ensures \
-you follow a proven multi-round OSINT protocol rather than ad-hoc searching.
+{skills_or_methodology}
 
 Only after you have accumulated substantial verified evidence across multiple \
 searches should you synthesize a response.

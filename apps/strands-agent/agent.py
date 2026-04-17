@@ -36,7 +36,7 @@ from strands.agent.conversation_manager import SlidingWindowConversationManager
 from strands.vended_plugins.skills import AgentSkills
 
 from config import build_model
-from prompts import PLANNER_PROMPT, RESEARCHER_PROMPT, SYSTEM_PROMPT
+from prompts import PLANNER_PROMPT, RESEARCHER_PROMPT, SYSTEM_PROMPT, resolve_prompt
 from tools import get_all_mcp_clients, get_native_tools
 
 logger = logging.getLogger(__name__)
@@ -381,9 +381,13 @@ def create_single_agent(tool_list=None, mcp_clients=None):
     if skills_plugin is not None:
         plugins.append(skills_plugin)
 
+    system_prompt = resolve_prompt(
+        SYSTEM_PROMPT, skills_available=skills_plugin is not None
+    )
+
     agent = Agent(
         model=model,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=system_prompt,
         tools=tool_list,
         conversation_manager=conversation_manager,
         callback_handler=_build_callback_handler(),
@@ -426,10 +430,13 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
     if skills_plugin is not None:
         plugins.append(skills_plugin)
 
+    skills_available = skills_plugin is not None
+    researcher_prompt = resolve_prompt(RESEARCHER_PROMPT, skills_available=skills_available)
+
     # Researcher: tool-capable agent that does the actual searching
     researcher = Agent(
         model=model,
-        system_prompt=RESEARCHER_PROMPT,
+        system_prompt=researcher_prompt,
         tools=tool_list,
         conversation_manager=SlidingWindowConversationManager(
             window_size=15,
