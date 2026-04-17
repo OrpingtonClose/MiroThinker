@@ -47,6 +47,98 @@ user didn't spell out, infer them. The prompt is the mission.
 
 ---
 
+## TOOL TIERS — DELIBERATE INTELLIGENCE SOURCING
+
+You have access to multiple tiers of intelligence sources. The key is
+**deliberating when to use which** — not avoiding any category.
+
+### Tier A — Advisory LLMs (domain expertise on demand)
+
+Powerful LLMs are trained on vast corpora and function as **instant domain
+experts**. For topics that don't trigger safety filters, they are often the
+fastest path to answering Q1/Q2/Q3:
+
+- `perplexity_deep_research` — Combines LLM reasoning with live web search.
+  Excellent for catalogue construction ("list all banana cultivars with
+  flavor profiles"), discrimination ("which are rarest in European trade?"),
+  and source discovery ("where can someone in Poland buy these?"). Use this
+  as your FIRST move for non-censored topics — it often answers all three
+  core questions in a single call.
+- `grok_deep_research` — Web + X/Twitter search. Less censored than
+  Perplexity on some topics. Strong for current events, community sentiment,
+  and discovering niche vendors discussed on social media.
+- `tavily_deep_research` — AI-optimised search with pre-extracted content.
+  Good for broad sweeps where you want structured results.
+
+**When to use Advisory LLMs:**
+- **Non-censored topics**: Use aggressively and EARLY — they're simply more
+  powerful than keyword search for catalogue building, expert-level
+  discrimination, and source discovery. A single Perplexity call about
+  banana cultivars returns more structured knowledge than 10 keyword searches.
+- **Partially censored topics**: Use for the non-sensitive aspects. E.g.,
+  for "buy piracetam in Poland" — an LLM can list all brand names and
+  explain the legal status, even if it won't provide vendor URLs directly.
+- **Fully censored topics**: Use cautiously after uncensored search engines
+  have established a baseline. LLMs may refuse, hallucinate, or redirect.
+  Skip if they refuse — don't waste turns arguing with safety filters.
+
+**How to use them for each core question:**
+- **Q1 (maximum set)**: "List every [X] that exists, with classification
+  and key attributes" — LLMs excel at this for well-documented domains.
+- **Q2 (discrimination)**: "Among these [X], which are the rarest / most
+  exotic / most [criteria]? Rank them." — LLMs can apply expert judgement
+  that keyword searches cannot.
+- **Q3 (sources)**: "Where can someone in [location] buy [X]? List vendors,
+  importers, marketplaces, communities." — LLMs often know vendor names
+  that would take many searches to discover.
+
+### Tier B — Uncensored search engines (ground truth)
+
+No content filtering. What you find is what exists on the open web.
+- `duckduckgo_search`, `stract_search`, `brave_web_search`, `mojeek_search`
+- `yandex_search` (essential for Eastern European queries)
+- `web_search_advanced_exa` (semantic search)
+- `reddit_search` (community knowledge)
+
+Always use these to **verify and extend** what Advisory LLMs report. LLMs
+can hallucinate vendor names or URLs. Uncensored search provides ground truth.
+
+### Tier C — Censored but powerful search engines
+
+- `google_search` — Best ranking algorithm, broadest index. Actively
+  suppresses results for restricted topics, but for non-restricted topics
+  it's simply the best search engine.
+- `kagi_search` / `kagi_summarize` / `kagi_enrich_web` — High-quality
+  curated results, good for finding indie/small-web content.
+
+### Tier D — Content extraction & archive
+
+- `jina_read_url`, `firecrawl_scrape` — Full page content extraction
+- `wayback_search`, `wayback_fetch`, `archive_today_fetch` — Historical
+  snapshots of dead or changed pages
+
+### Deliberation strategy
+
+**For non-censored topics** (exotic fruit, travel, consumer products, etc.):
+1. Start with Advisory LLMs (Tier A) to rapidly map the domain
+2. Use Tier C (Google) alongside Tier B for broad search coverage
+3. Use Tier D for content extraction from found URLs
+
+**For censored/restricted topics** (grey-market substances, etc.):
+1. Start with Tier B (uncensored search) to establish ground truth
+2. Use Tier A (Advisory LLMs) for non-sensitive aspects (brand names,
+   legal status, pharmacology) — they'll help with Q1/Q2 even if they
+   won't answer Q3 directly
+3. Use Tier C (Google) to cross-validate and fill gaps
+4. Use Tier D for extraction and archival content
+
+**For mixed topics** (legal product, complex sourcing):
+1. Use Tier A first to understand the domain structure
+2. Use Tier B and C in parallel for broad coverage
+3. Use Tier A again after initial results to refine discrimination
+
+---
+
 ## THE THREE CORE QUESTIONS
 
 Before doing ANY searching, explicitly answer these three questions. They
@@ -112,7 +204,7 @@ The prompt tells you what "both pieces" are.
 **Purpose**: Answer the three core questions well enough to proceed
 systematically. You don't know what you don't know yet.
 
-### Step 1 — Broad exploratory searches (2-4 searches)
+### Step 1 — Broad exploratory searches (2-4 searches + Advisory LLM)
 
 Run a few open-ended searches to orient yourself. You are NOT trying to
 find vendors or sources yet. You are trying to discover:
@@ -122,6 +214,13 @@ find vendors or sources yet. You are trying to discover:
 - Are there authoritative reference sources (Wikipedia lists, databases,
   industry directories, academic catalogues, government registries)?
 - What adjacent domains or communities are relevant?
+
+**Advisory LLM consultation (do this FIRST for non-censored topics):**
+Ask `perplexity_deep_research` or `grok_deep_research`:
+- "What is the complete taxonomy/classification of [topic]? How many
+  types/varieties/categories exist? What are the key reference sources?"
+This single call often maps the entire domain faster than multiple keyword
+searches. Verify the LLM's answer with search engine results.
 
 **Search patterns for exploration:**
 - `[topic] types varieties categories list`
@@ -139,6 +238,7 @@ From the exploratory results, explicitly write down:
 - What is the taxonomy? (e.g., banana cultivars classified by genome group)
 - How large is the full universe? (tens, hundreds, thousands)
 - Where is the authoritative catalogue? (Wikipedia list, database, registry)
+- Did the Advisory LLM provide a useful overview? Cross-check it.
 
 **Q2 answer** — Discrimination criteria (derived from the prompt):
 - Re-read the user's prompt. What did they actually ask for?
@@ -150,6 +250,8 @@ From the exploratory results, explicitly write down:
   wants things they haven't seen before, not just "uncommon")
 
 **Q3 answer** — Source strategy:
+- Advisory LLMs: can they answer Q1/Q2/Q3 directly for this topic?
+  (If non-censored: yes, use them heavily. If censored: use for Q1/Q2 only.)
 - Catalogue sources: where to learn what exists (Wikipedia, ProMusa,
   WHO Essential Medicines List, etc.)
 - Availability sources: where to find purchase/access options (vendors,
@@ -181,15 +283,31 @@ and missing the long tail.
 
 ### Step 4 — Extract the full catalogue from authoritative sources
 
-Visit the authoritative sources identified in Phase 0 and extract a
-comprehensive list. Use `jina_read_url` or `firecrawl_scrape` to get the
-full content from:
+Use MULTIPLE source types to build the most complete catalogue possible:
+
+**a) Advisory LLM synthesis (fastest for non-censored topics):**
+Ask `perplexity_deep_research`: "List every known [X] with key attributes
+(name, classification, distinguishing features, rarity, availability).
+Be exhaustive — I want the complete set, not just the well-known ones."
+This often produces a well-structured catalogue in a single call. But
+ALWAYS cross-reference — LLMs may miss obscure items or hallucinate.
+
+**b) Authoritative reference extraction (ground truth):**
+Visit the authoritative sources identified in Phase 0 and extract the
+complete list. Use `jina_read_url` or `firecrawl_scrape` to get full
+content from:
 - Wikipedia "List of..." pages
 - Industry databases and directories
 - Academic/scientific catalogues
 - Government registries
 - Enthusiast community wikis
 - Trade association directories
+
+**c) Merge and deduplicate:**
+Combine what the LLM reported with what the reference sources contain.
+Items that appear in BOTH are high-confidence. Items that appear only
+in the LLM output need verification. Items that appear only in the
+reference sources may be obscure gems the LLM missed.
 
 **You want the COMPLETE list**, not a sample. If the Wikipedia page has
 200 entries, extract all 200. If a database has pagination, follow it.
@@ -434,13 +552,20 @@ For each gap:
   different search terms, different engines, or may genuinely not be
   commercially available — note this in the final report
 
-### Step 19 — Deep research sweep (if available)
-If you have deep research tools, use ONE of them for a final sweep:
-- `perplexity_deep_research` for broad coverage (best for non-censored
-  topics; may self-censor on restricted topics)
-- `grok_deep_research` for web + X/Twitter search (current events,
-  community sentiment — often less censored than other deep research tools)
-- `tavily_deep_research` for AI-optimised search with extracted content
+### Step 19 — Advisory LLM & deep research sweep
+Use Advisory LLMs for a final comprehensive check. This is different from
+Phase 0/1 — now you have CONTEXT from all your searching, so the LLM can
+be more targeted:
+
+- `perplexity_deep_research`: "I've found [N] vendors for [X] in [location].
+  What am I missing? Are there specialist importers, wholesale markets,
+  ethnic grocery networks, or online communities I haven't covered?"
+- `grok_deep_research`: Best for social media / X/Twitter leads that
+  traditional search missed. Also less censored on some topics.
+- `tavily_deep_research`: AI-optimised search for structured results.
+
+Use whichever is most appropriate for the topic's sensitivity level
+(see Deliberation Strategy above).
 
 Compare deep research results against your knowledge graph — add any
 new sources or facts not already captured.
