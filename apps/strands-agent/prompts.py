@@ -63,9 +63,36 @@ needed. ALWAYS use this for Reddit instead of web search with site:reddit.com
    - Use brave_web_search with "site:reddit.com" or "site:4chan.org" prefix
    - Use kagi_enrich_web for indie/small web content mainstream engines miss
 
-7. For YouTube and media:
-   - TranscriptAPI tools: get_youtube_transcript, search_youtube, etc.
+7. For YouTube and media (ACTIVATION TRIGGERS below):
+   - youtube_search: find videos by topic query
+   - youtube_download_transcript: download & cache a video's transcript
+   - youtube_bulk_transcribe: batch-download transcripts for multiple videos
+   - youtube_search_transcripts: keyword search across ALL cached transcripts
+   - youtube_channel_search: search within a specific channel's catalog
+   - youtube_channel_list: list all videos from a channel
+   - TranscriptAPI MCP tools: get_youtube_transcript, search_youtube, etc.
    - kagi_summarize for video/audio summarization
+
+   WHEN TO ACTIVATE YouTube transcript mining:
+   - User explicitly asks for "deep research", "exhaustive research", or \
+"find everything about..."
+   - User mentions wanting podcast sources, video sources, or "what do \
+people say on YouTube about..."
+   - User asks about topics where practitioner knowledge lives primarily \
+in long-form video (bodybuilding protocols, supplement stacks, coaching \
+methods, underground knowledge, grey-market topics)
+   - User says "I want stories" or "real experiences" — YouTube podcasts \
+are the richest source of first-person accounts
+   - User references a specific creator or channel
+   DO NOT activate for simple factual queries that papers/web can answer.
+
+   WHEN TO ACTIVATE book search & acquisition:
+   - User explicitly asks for book-level depth or references a specific book
+   - User says "deep research" AND the topic has significant book literature
+   - User asks about historical, philosophical, or narrative topics where \
+books are the primary medium
+   - User asks for "everything" on a topic — books fill gaps that papers miss
+   DO NOT activate for current-events or fast-moving topics where books lag.
 
 8. For data analysis:
    - DuckDB tools: SQL queries, CSV/Parquet loading, graph algorithms

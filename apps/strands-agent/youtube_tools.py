@@ -1301,8 +1301,11 @@ def _whisper_transcribe(url: str, video_id: str, language: str, tmpdir: str) -> 
         "-o",
         str(audio_path) + ".%(ext)s",
         "--no-playlist",
-        url,
     ]
+    proxy_url = _build_proxy_url()
+    if proxy_url:
+        cmd.extend(["--proxy", proxy_url])
+    cmd.append(url)
 
     try:
         subprocess.run(cmd, capture_output=True, text=True, timeout=300)
