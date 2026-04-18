@@ -48,6 +48,8 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote, quote_plus, urljoin
 
+import asyncio
+
 import httpx
 from strands import tool
 from async_http import async_get
@@ -1581,8 +1583,9 @@ async def download_book_by_doi(
                     if pdf_url:
                         logger.info("Unpaywall found OA version: %s (%s)",
                                     doi, best_oa.get("host_type", ""))
-                        result = download_book(
-                            url=pdf_url, doi=doi, title=title, author=author, source="direct"
+                        result = await asyncio.to_thread(
+                            download_book,
+                            url=pdf_url, doi=doi, title=title, author=author, source="direct",
                         )
                         if "[DOWNLOAD FAILED]" not in result and "[ERROR]" not in result:
                             _doi_cache_alias(cache_key, result, title)
@@ -1615,8 +1618,9 @@ async def download_book_by_doi(
                 if link.get("content-type") == "application/pdf":
                     pdf_url = link.get("URL", "")
                     if pdf_url:
-                        result = download_book(
-                            url=pdf_url, doi=doi, title=title, author=author, source="direct"
+                        result = await asyncio.to_thread(
+                            download_book,
+                            url=pdf_url, doi=doi, title=title, author=author, source="direct",
                         )
                         if "[DOWNLOAD FAILED]" not in result and "[ERROR]" not in result:
                             _doi_cache_alias(cache_key, result, title)
@@ -1625,7 +1629,9 @@ async def download_book_by_doi(
         pass
 
     # Strategy 3: Sci-Hub (last resort for paywalled papers)
-    return download_book(doi=doi, title=title, author=author, source="scihub")
+    return await asyncio.to_thread(
+        download_book, doi=doi, title=title, author=author, source="scihub",
+    )
 
 
 @tool
@@ -2359,16 +2365,19 @@ async def internet_archive_download(
     file_name = download_file["name"]
     download_url = f"https://archive.org/download/{ia_id}/{quote(file_name)}"
 
-    # Download the file
+    # Download the file (sync HTTP — run in thread to avoid blocking event loop)
+    def _sync_ia_download(url, hdrs):
+        with _get_http_client(timeout=120) as client:
+            resp = client.get(url, headers=hdrs)
+            resp.raise_for_status()
+            return resp.content
+
     try:
         headers = {"User-Agent": _BROWSER_UA}
         if IA_ACCESS_KEY and IA_SECRET_KEY:
             headers["Authorization"] = f"LOW {IA_ACCESS_KEY}:{IA_SECRET_KEY}"
 
-        with _get_http_client(timeout=120) as client:
-            resp = client.get(download_url, headers=headers)
-            resp.raise_for_status()
-            content = resp.content
+        content = await asyncio.to_thread(_sync_ia_download, download_url, headers)
     except Exception as exc:
         return f"[TOOL_ERROR] Download failed for {download_url}: {exc}"
 

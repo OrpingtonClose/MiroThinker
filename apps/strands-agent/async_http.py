@@ -111,8 +111,8 @@ async def async_get(
     retries = max_retries if max_retries is not None else _MAX_RETRIES
     request_timeout = (
         httpx.Timeout(connect=_CONNECT_TIMEOUT, read=timeout, write=30.0, pool=10.0)
-        if timeout
-        else None
+        if timeout is not None
+        else _TIMEOUT
     )
     merged_headers = {**_HEADERS, **(headers or {})}
 
@@ -206,8 +206,8 @@ async def async_head(
     retries = max_retries if max_retries is not None else _MAX_RETRIES
     request_timeout = (
         httpx.Timeout(connect=_CONNECT_TIMEOUT, read=timeout, write=30.0, pool=10.0)
-        if timeout
-        else None
+        if timeout is not None
+        else _TIMEOUT
     )
     merged_headers = {**_HEADERS, **(headers or {})}
 
@@ -267,8 +267,8 @@ async def async_post(
     retries = max_retries if max_retries is not None else _MAX_RETRIES
     request_timeout = (
         httpx.Timeout(connect=_CONNECT_TIMEOUT, read=timeout, write=30.0, pool=10.0)
-        if timeout
-        else None
+        if timeout is not None
+        else _TIMEOUT
     )
     merged_headers = {**_HEADERS, **(headers or {})}
 
