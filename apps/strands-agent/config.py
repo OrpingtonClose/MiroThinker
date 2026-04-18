@@ -4,26 +4,41 @@
 """
 Model configuration for the Strands Venice agent.
 
-Configures the Venice GLM-4.7 model using Strands' OpenAI-compatible
-provider.  The ``include_venice_system_prompt: false`` parameter is
-critical for uncensored operation — it disables Venice's built-in
-safety system prompt so the agent's own prompt has full control.
+Supports two modes:
+  1. Static — uses VENICE_MODEL env var (fast, no probe overhead)
+  2. Runtime selection — probes candidate models with a topic-derived
+     censorship test and cascades to the first uncensored model.
+
+The ``include_venice_system_prompt: false`` parameter is critical for
+uncensored operation — it disables Venice's built-in safety system
+prompt so the agent's own prompt has full control.
+
+Set ``MODEL_SELECTION=runtime`` to enable runtime probing.
+Set ``VENICE_MODEL`` to override with a specific model (skips probing).
 
 Reference: apps/adk-agent/agents/model_config.py lines 41-56.
 """
 
+from __future__ import annotations
+
+import logging
 import os
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 VENICE_API_BASE = os.environ.get("VENICE_API_BASE", "https://api.venice.ai/api/v1")
-VENICE_MODEL = os.environ.get("VENICE_MODEL", "olafangensan-glm-4.7-flash-heretic")
+VENICE_MODEL = os.environ.get("VENICE_MODEL", "zai-org-glm-5")
+
+# Default model changed from heretic (known empty-content issue) to GLM 5
+# (fastest uncensored model in benchmarks: 8157 chars, 24.4s, FC+Reasoning).
 
 
 def build_model():
-    """Build Strands model provider pointing at Venice AI."""
+    """Build Strands model provider pointing at Venice AI (static mode)."""
     from strands.models.openai import OpenAIModel
 
     api_key = os.environ.get("VENICE_API_KEY", "")
@@ -42,7 +57,40 @@ def build_model():
         params={
             "extra_body": {
                 "venice_parameters": {"include_venice_system_prompt": False},
-                "reasoning": {"effort": "high"},
             }
         },
     )
+
+
+def build_model_with_selection(user_query: str):
+    """Build Strands model using runtime censorship probing.
+
+    Probes candidate models with a topic-derived test extracted from
+    *user_query*.  Returns (model, selection_result) where selection_result
+    contains the full probe log for transparency.
+
+    Falls back to static ``build_model()`` if:
+      - ``MODEL_SELECTION`` env var is not ``runtime``
+      - ``VENICE_MODEL`` is explicitly set (user override)
+    """
+    from model_selector import SelectionResult, build_model_from_selection, select_model
+
+    selection_mode = os.environ.get("MODEL_SELECTION", "runtime")
+    explicit_model = os.environ.get("VENICE_MODEL_OVERRIDE")
+
+    if selection_mode != "runtime":
+        logger.info("Static model selection: %s", VENICE_MODEL)
+        return build_model(), None
+
+    if explicit_model:
+        logger.info("Model override: %s (skipping probe)", explicit_model)
+        os.environ["VENICE_MODEL"] = explicit_model
+        return build_model(), None
+
+    logger.info("Runtime model selection — probing candidates...")
+    selection = select_model(user_query)
+    logger.info("Selected: %s (%s)", selection.label, selection.model_id)
+    logger.info("\n%s", selection.summary())
+
+    model = build_model_from_selection(selection)
+    return model, selection

@@ -35,7 +35,7 @@ from strands.handlers.callback_handler import (
 from strands.agent.conversation_manager import SlidingWindowConversationManager
 from strands.vended_plugins.skills import AgentSkills
 
-from config import build_model
+from config import build_model, build_model_with_selection
 from prompts import PLANNER_PROMPT, RESEARCHER_PROMPT, SYSTEM_PROMPT
 from tools import get_all_mcp_clients, get_native_tools
 
@@ -350,7 +350,7 @@ def _build_tool_list(mcp_tools):
     ]
 
 
-def create_single_agent(tool_list=None, mcp_clients=None):
+def create_single_agent(tool_list=None, mcp_clients=None, user_query=None):
     """Create a single-agent setup with all tools directly available.
 
     Use this for simple interactive sessions where one agent handles
@@ -358,13 +358,23 @@ def create_single_agent(tool_list=None, mcp_clients=None):
     The AgentSkills plugin is attached when skills are available,
     enabling progressive disclosure of specialised techniques.
 
+    When *user_query* is provided and MODEL_SELECTION=runtime, the model
+    is selected via runtime censorship probing.  Otherwise falls back
+    to the static VENICE_MODEL.
+
     Args:
         tool_list: Pre-built list of tools.  When *None* the function
             enters its own MCP clients and builds the list (REPL use-case).
         mcp_clients: MCP clients that were entered to produce
             *tool_list*.  Returned as-is for the caller to manage.
+        user_query: Optional query for runtime model selection.
     """
-    model = build_model()
+    if user_query:
+        model, selection = build_model_with_selection(user_query)
+        if selection:
+            logger.info("Runtime model selected: %s", selection.label)
+    else:
+        model = build_model()
     owns_clients = tool_list is None
     if owns_clients:
         mcp_clients = get_all_mcp_clients()
@@ -392,7 +402,7 @@ def create_single_agent(tool_list=None, mcp_clients=None):
     return agent, mcp_clients or []
 
 
-def create_multi_agent(tool_list=None, mcp_clients=None):
+def create_multi_agent(tool_list=None, mcp_clients=None, user_query=None):
     """Create a planner + researcher multi-agent setup.
 
     The researcher agent has direct access to all tools (ordered
@@ -400,16 +410,25 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
     agent delegates to the researcher via the agent-as-tool pattern
     and handles strategic decomposition and synthesis.
 
+    When *user_query* is provided and MODEL_SELECTION=runtime, the model
+    is selected via runtime censorship probing.
+
     Args:
         tool_list: Pre-built list of tools.  When *None* the function
             enters its own MCP clients and builds the list (REPL use-case).
         mcp_clients: MCP clients that were entered to produce
             *tool_list*.  Returned as-is for the caller to manage.
+        user_query: Optional query for runtime model selection.
 
     Returns:
         Tuple of (planner_agent, researcher_agent, mcp_clients).
     """
-    model = build_model()
+    if user_query:
+        model, selection = build_model_with_selection(user_query)
+        if selection:
+            logger.info("Runtime model selected: %s", selection.label)
+    else:
+        model = build_model()
     owns_clients = tool_list is None
     if owns_clients:
         mcp_clients = get_all_mcp_clients()
