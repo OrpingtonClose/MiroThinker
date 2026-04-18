@@ -203,8 +203,12 @@ def search_retractions(
         "rows": min(max_results, 50),
         "filter": "update-type:retraction",
     }
-    if query:
+    if query and reason:
+        params["query"] = f"{query} {reason}"
+    elif query:
         params["query"] = query
+    elif reason:
+        params["query"] = reason
 
     try:
         resp = httpx.get(
@@ -271,7 +275,7 @@ def retraction_watch_csv_url() -> str:
         "CSV: https://gitlab.com/crossref/retraction-watch-data/-/raw/main/retraction_watch.csv\n"
         "GitLab: https://gitlab.com/crossref/retraction-watch-data\n\n"
         "License: Open Database License (ODbL)\n"
-        "Citation: Always cite the International Consortium of Investigative Journalists.\n\n"
+        "Citation: Retraction Watch Database (The Center for Scientific Integrity, via CrossRef).\n\n"
         "Fields include:\n"
         "  - Record ID, Title, Subject, Institution\n"
         "  - Journal, Publisher, Country\n"
