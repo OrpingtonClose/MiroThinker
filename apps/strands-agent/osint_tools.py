@@ -183,8 +183,8 @@ async def ipfs_fetch(cid: str, path: str = "") -> str:
 
     for gateway_url in gateways:
         try:
-            resp = httpx.head(gateway_url, timeout=15, follow_redirects=True)
-            if resp.status_code == 200:
+            resp = await async_get(gateway_url, timeout=15, headers={"Range": "bytes=0-0"})
+            if resp.status_code in (200, 206):
                 content_type = resp.headers.get("content-type", "")
                 content_length = resp.headers.get("content-length", "unknown")
 

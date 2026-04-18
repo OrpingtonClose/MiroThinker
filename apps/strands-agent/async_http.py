@@ -86,6 +86,7 @@ async def async_get(
     headers: dict | None = None,
     timeout: float | None = None,
     max_retries: int | None = None,
+    **kwargs,
 ) -> httpx.Response:
     """GET with automatic retry on 429/5xx and timeout handling.
 
@@ -95,6 +96,9 @@ async def async_get(
         headers: Extra headers (merged with defaults).
         timeout: Override read timeout for this request (seconds).
         max_retries: Override max retry count.
+        **kwargs: Additional keyword arguments passed to httpx.AsyncClient.get()
+            (e.g. follow_redirects, extensions). Note: the shared client already
+            has follow_redirects=True by default.
 
     Returns:
         httpx.Response on success.
@@ -120,6 +124,7 @@ async def async_get(
                 params=params,
                 headers=merged_headers,
                 timeout=request_timeout,
+                **kwargs,
             )
 
             # Success — return immediately
@@ -193,10 +198,12 @@ async def async_post(
     headers: dict | None = None,
     timeout: float | None = None,
     max_retries: int | None = None,
+    **kwargs,
 ) -> httpx.Response:
     """POST with automatic retry on 429/5xx and timeout handling.
 
-    Same retry semantics as async_get().
+    Same retry semantics as async_get(). Accepts **kwargs passed through
+    to httpx.AsyncClient.post().
     """
     client = _get_client()
     retries = max_retries if max_retries is not None else _MAX_RETRIES
@@ -217,6 +224,7 @@ async def async_post(
                 params=params,
                 headers=merged_headers,
                 timeout=request_timeout,
+                **kwargs,
             )
 
             if resp.status_code < 400:

@@ -23,10 +23,12 @@ Environment variables:
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
-from async_http import async_get, async_post
 import os
+
+from async_http import async_get, async_post
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -158,7 +160,6 @@ async def extract_with_mathpix(
 
     try:
         import base64
-        import time
 
         # Mathpix PDF API: POST the PDF and poll for results
         b64_pdf = base64.b64encode(pdf_bytes).decode("ascii")
@@ -194,7 +195,7 @@ async def extract_with_mathpix(
 
         # Poll for completion (Mathpix processes async)
         for _ in range(60):  # max 5 minutes
-            time.sleep(5)
+            await asyncio.sleep(5)
             status_resp = await async_get(
                 f"https://api.mathpix.com/v3/pdf/{pdf_id}",
                 headers=headers,
