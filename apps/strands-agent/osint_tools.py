@@ -25,7 +25,7 @@ import os
 from urllib.parse import quote, quote_plus
 
 from strands import tool
-from async_http import async_get
+from async_http import async_get, async_head
 
 logger = logging.getLogger(__name__)
 
@@ -183,8 +183,8 @@ async def ipfs_fetch(cid: str, path: str = "") -> str:
 
     for gateway_url in gateways:
         try:
-            resp = await async_get(gateway_url, timeout=15, headers={"Range": "bytes=0-0"})
-            if resp.status_code in (200, 206):
+            resp = await async_head(gateway_url, timeout=15)
+            if resp.status_code == 200:
                 content_type = resp.headers.get("content-type", "")
                 content_length = resp.headers.get("content-length", "unknown")
 

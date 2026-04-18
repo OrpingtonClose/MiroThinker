@@ -135,7 +135,7 @@ async def async_get(
             if resp.status_code == 429:
                 retry_after = _parse_retry_after(resp)
                 if attempt < retries:
-                    wait = retry_after or min(2 ** attempt, 30)
+                    wait = retry_after if retry_after is not None else min(2 ** attempt, 30)
                     logger.info(
                         "Rate limited (429) on %s — waiting %.1fs (attempt %d/%d)",
                         url, wait, attempt + 1, retries,
@@ -189,6 +189,64 @@ async def async_get(
     raise httpx.TimeoutException(f"All {retries} retries exhausted for {url}")
 
 
+async def async_head(
+    url: str,
+    *,
+    headers: dict | None = None,
+    timeout: float | None = None,
+    max_retries: int | None = None,
+    **kwargs,
+) -> httpx.Response:
+    """HEAD request — probes headers without downloading the body.
+
+    Same retry semantics as async_get(). Useful for content-type/size probing
+    (e.g. IPFS gateway checks) without wasting bandwidth on large files.
+    """
+    client = _get_client()
+    retries = max_retries if max_retries is not None else _MAX_RETRIES
+    request_timeout = (
+        httpx.Timeout(connect=_CONNECT_TIMEOUT, read=timeout, write=30.0, pool=10.0)
+        if timeout
+        else None
+    )
+    merged_headers = {**_HEADERS, **(headers or {})}
+
+    last_exc: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            resp = await client.head(
+                url,
+                headers=merged_headers,
+                timeout=request_timeout,
+                **kwargs,
+            )
+            if resp.status_code < 400:
+                return resp
+            if resp.status_code == 429:
+                retry_after = _parse_retry_after(resp)
+                if attempt < retries:
+                    wait = retry_after if retry_after is not None else min(2 ** attempt, 30)
+                    await asyncio.sleep(wait)
+                    continue
+                resp.raise_for_status()
+            if resp.status_code >= 500:
+                if attempt < retries:
+                    await asyncio.sleep(min(2 ** attempt, 30))
+                    continue
+                resp.raise_for_status()
+            return resp
+        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+            last_exc = exc
+            if attempt < retries:
+                await asyncio.sleep(min(2 ** attempt, 15))
+                continue
+            raise
+
+    if last_exc:
+        raise last_exc
+    raise httpx.TimeoutException(f"All {retries} retries exhausted for HEAD {url}")
+
+
 async def async_post(
     url: str,
     *,
@@ -233,7 +291,7 @@ async def async_post(
             if resp.status_code == 429:
                 retry_after = _parse_retry_after(resp)
                 if attempt < retries:
-                    wait = retry_after or min(2 ** attempt, 30)
+                    wait = retry_after if retry_after is not None else min(2 ** attempt, 30)
                     logger.info("Rate limited (429) — waiting %.1fs", wait)
                     await asyncio.sleep(wait)
                     continue
