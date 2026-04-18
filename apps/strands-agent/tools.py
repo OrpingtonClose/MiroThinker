@@ -299,7 +299,7 @@ async def jina_read_url(url: str) -> str:
         Clean markdown text extracted from the URL (truncated to 15000 chars).
     """
 
-    headers = {}
+    headers = {"Accept": "text/plain"}  # Jina returns JSON envelope with Accept: application/json
     api_key = os.environ.get("JINA_API_KEY", "")
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
