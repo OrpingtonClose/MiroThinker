@@ -1050,7 +1050,7 @@ def _search_hathitrust(query: str, max_results: int = 10) -> list[dict]:
         with _get_http_client() as client:
             resp = client.get(
                 "https://catalog.hathitrust.org/api/volumes/brief/json/title/{}.json".format(
-                    quote(query)
+                    quote(query, safe='')
                 ),
             )
 
@@ -1155,7 +1155,7 @@ def _search_internet_archive(query: str, max_results: int = 10) -> list[dict]:
                 "language": doc.get("language", ""),
                 "downloads": doc.get("downloads", 0),
                 "subjects": doc.get("subject", []) if isinstance(doc.get("subject"), list) else [],
-                "description": (str(doc.get("description", "")) or "")[:300],
+                "description": (doc.get("description") or "")[:300],
                 "ia_id": ia_id,
                 "has_fulltext": True,
                 "url": f"https://archive.org/details/{ia_id}",
