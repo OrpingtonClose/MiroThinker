@@ -7,13 +7,21 @@ Scientific document & book acquisition tools for the Strands research agent.
 Tier strategy (most legal → most comprehensive):
   1. Open Access — arXiv, PubMed Central, Semantic Scholar (MCP servers exist)
   2. Institutional — CrossRef, DOI resolution, publisher APIs
-  3. Grey — Anna's Archive search, LibGen, Sci-Hub (legal grey area)
-  4. Paid — Publisher paywalls (user provides credentials)
+  3. Aggregators — CORE (40M+ full-text), Unpaywall (legal OA finder)
+  4. Grey — Anna's Archive search, LibGen, Sci-Hub (legal grey area)
+  5. Paid — Publisher paywalls (user provides credentials)
+
+Additional sources (new):
+  - Semantic Scholar — 200M+ papers, AI embeddings, recommendations
+  - CORE — 300M+ metadata, 40M+ open-access full texts
+  - Springer Nature — 7M+ docs, 280K+ open access articles
+  - Zenodo — CERN's open data/research repository
 
 All downloaded documents are stored in the persistent cache (cache.py) for
 reuse across sessions.
 
 PDF text extraction uses pdfplumber (pure Python, no external deps).
+Enhanced extraction available via Docling or Mathpix (see extraction.py).
 
 Resolves: https://github.com/OrpingtonClose/MiroThinker/issues/92
 """
@@ -30,6 +38,14 @@ from pathlib import Path
 from strands import tool
 
 logger = logging.getLogger(__name__)
+
+# ── API keys ──────────────────────────────────────────────────────────
+
+SEMANTIC_SCHOLAR_API_KEY = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
+CORE_API_KEY = os.getenv("CORE_API_KEY", "")
+SPRINGER_API_KEY = os.getenv("SPRINGER_API_KEY", "")
+ZENODO_ACCESS_TOKEN = os.getenv("ZENODO_ACCESS_TOKEN", "")
+UNPAYWALL_EMAIL = os.getenv("UNPAYWALL_EMAIL", "")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -666,6 +682,493 @@ def extract_pdf_text(
     return extracted
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# SEMANTIC SCHOLAR — 200M+ papers, AI embeddings, recommendations
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@tool
+def semantic_scholar_search(
+    query: str,
+    max_results: int = 10,
+    year_range: str = "",
+    fields_of_study: str = "",
+) -> str:
+    """Search Semantic Scholar for papers with AI-powered relevance ranking.
+
+    Semantic Scholar indexes 200M+ papers with SPECTER2 embeddings for
+    semantic search (not just keyword matching). Returns papers with
+    abstracts, citation counts, and open access links.
+
+    FREE — 100 requests per 5 minutes without API key.
+    Set SEMANTIC_SCHOLAR_API_KEY for higher rate limits.
+
+    Args:
+        query: Search query (natural language works well).
+        max_results: Maximum results (default 10, max 100).
+        year_range: Filter by year range, e.g. "2020-2024" or "2020-".
+        fields_of_study: Filter by field, e.g. "Neuroscience", "Computer Science".
+
+    Returns:
+        Formatted list of papers with metadata and links.
+    """
+    import httpx
+
+    headers = {"User-Agent": "MiroThinker/1.0 (research agent)"}
+    if SEMANTIC_SCHOLAR_API_KEY:
+        headers["x-api-key"] = SEMANTIC_SCHOLAR_API_KEY
+
+    params = {
+        "query": query,
+        "limit": min(max_results, 100),
+        "fields": "title,authors,year,abstract,citationCount,openAccessPdf,externalIds,publicationTypes,journal,url",
+    }
+    if year_range:
+        params["year"] = year_range
+    if fields_of_study:
+        params["fieldsOfStudy"] = fields_of_study
+
+    try:
+        resp = httpx.get(
+            "https://api.semanticscholar.org/graph/v1/paper/search",
+            headers=headers,
+            params=params,
+            timeout=30,
+        )
+        if resp.status_code == 429:
+            return (
+                "[RATE LIMITED] Semantic Scholar rate limit hit. "
+                "Set SEMANTIC_SCHOLAR_API_KEY for higher limits, "
+                "or wait a few minutes."
+            )
+        resp.raise_for_status()
+    except Exception as exc:
+        return f"[TOOL_ERROR] Semantic Scholar search failed: {exc}"
+
+    data = resp.json()
+    papers = data.get("data", [])
+
+    if not papers:
+        return f"No Semantic Scholar results for: {query}"
+
+    formatted = [f"**Semantic Scholar: {query}** ({len(papers)} results)\n"]
+
+    for i, paper in enumerate(papers, 1):
+        authors = ", ".join(
+            a.get("name", "") for a in (paper.get("authors") or [])[:4]
+        )
+        if len(paper.get("authors") or []) > 4:
+            authors += f" +{len(paper['authors']) - 4} more"
+
+        year = paper.get("year", "")
+        citations = paper.get("citationCount", 0)
+        journal_info = paper.get("journal", {}) or {}
+        journal = journal_info.get("name", "")
+
+        oa_pdf = paper.get("openAccessPdf", {}) or {}
+        pdf_url = oa_pdf.get("url", "")
+        oa_tag = " [OPEN ACCESS]" if pdf_url else ""
+
+        ext_ids = paper.get("externalIds", {}) or {}
+        doi = ext_ids.get("DOI", "")
+        arxiv_id = ext_ids.get("ArXiv", "")
+
+        abstract = (paper.get("abstract", "") or "")[:250]
+        if abstract:
+            abstract = f"\n     Abstract: {abstract}..."
+
+        doi_line = f"\n     DOI: {doi}" if doi else ""
+        arxiv_line = f"\n     arXiv: {arxiv_id}" if arxiv_id else ""
+        pdf_line = f"\n     PDF: {pdf_url}" if pdf_url else ""
+
+        formatted.append(
+            f"  {i}. **{paper.get('title', 'Unknown')}**\n"
+            f"     {authors} ({year}) — {journal}{oa_tag}\n"
+            f"     Cited by: {citations}{doi_line}{arxiv_line}{pdf_line}{abstract}"
+        )
+
+    return "\n\n".join(formatted)
+
+
+@tool
+def semantic_scholar_recommend(
+    paper_id: str,
+    max_results: int = 10,
+) -> str:
+    """Get paper recommendations from Semantic Scholar.
+
+    Given a paper (by Semantic Scholar ID, DOI, or arXiv ID), returns
+    similar papers based on SPECTER2 embeddings. Great for discovering
+    related work that keyword searches would miss.
+
+    Args:
+        paper_id: Paper identifier — Semantic Scholar ID, DOI (prefix with "DOI:"),
+                  or arXiv ID (prefix with "ARXIV:").
+        max_results: Maximum recommendations (default 10).
+
+    Returns:
+        Recommended papers with similarity scores.
+    """
+    import httpx
+
+    headers = {"User-Agent": "MiroThinker/1.0 (research agent)"}
+    if SEMANTIC_SCHOLAR_API_KEY:
+        headers["x-api-key"] = SEMANTIC_SCHOLAR_API_KEY
+
+    try:
+        resp = httpx.get(
+            f"https://api.semanticscholar.org/recommendations/v1/papers/forpaper/{paper_id}",
+            headers=headers,
+            params={
+                "limit": min(max_results, 100),
+                "fields": "title,authors,year,citationCount,openAccessPdf,externalIds,abstract",
+            },
+            timeout=30,
+        )
+        if resp.status_code == 404:
+            return f"Paper not found: {paper_id}. Try DOI:10.xxx/yyy or ARXIV:2301.xxxxx format."
+        resp.raise_for_status()
+    except Exception as exc:
+        return f"[TOOL_ERROR] Semantic Scholar recommendations failed: {exc}"
+
+    papers = resp.json().get("recommendedPapers", [])
+    if not papers:
+        return f"No recommendations for paper: {paper_id}"
+
+    formatted = [f"**Recommendations for: {paper_id}** ({len(papers)} papers)\n"]
+
+    for i, paper in enumerate(papers, 1):
+        authors = ", ".join(
+            a.get("name", "") for a in (paper.get("authors") or [])[:3]
+        )
+        year = paper.get("year", "")
+        citations = paper.get("citationCount", 0)
+        ext_ids = paper.get("externalIds", {}) or {}
+        doi = ext_ids.get("DOI", "")
+        oa_pdf = paper.get("openAccessPdf", {}) or {}
+        pdf_url = oa_pdf.get("url", "")
+        oa_tag = " [OA]" if pdf_url else ""
+
+        formatted.append(
+            f"  {i}. {paper.get('title', '?')} ({year}){oa_tag}\n"
+            f"     {authors} | Cited by: {citations}\n"
+            f"     {'DOI: ' + doi if doi else ''}"
+            f"{'  PDF: ' + pdf_url if pdf_url else ''}"
+        )
+
+    return "\n\n".join(formatted)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# CORE — 300M+ metadata, 40M+ open-access full texts
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@tool
+def search_core(
+    query: str,
+    max_results: int = 10,
+    year_from: int = 0,
+    year_to: int = 0,
+    full_text: bool = False,
+) -> str:
+    """Search CORE for open-access papers and full texts.
+
+    CORE aggregates 300M+ metadata records and 40M+ full-text papers from
+    institutional repositories worldwide. Often finds open-access versions
+    that other sources miss.
+
+    FREE — register for API key at core.ac.uk (set CORE_API_KEY).
+
+    Args:
+        query: Search query.
+        max_results: Maximum results (default 10, max 100).
+        year_from: Filter papers from this year (0 = no filter).
+        year_to: Filter papers up to this year (0 = no filter).
+        full_text: If True, only return papers with downloadable full text.
+
+    Returns:
+        Formatted list of papers with metadata and download links.
+    """
+    import httpx
+
+    if not CORE_API_KEY:
+        return (
+            "[TOOL_ERROR] CORE_API_KEY not set. "
+            "Register for a free key at https://core.ac.uk/services/api"
+        )
+
+    headers = {"Authorization": f"Bearer {CORE_API_KEY}"}
+
+    body = {
+        "q": query,
+        "limit": min(max_results, 100),
+    }
+    if year_from or year_to:
+        year_filter = ""
+        if year_from:
+            year_filter += f"yearPublished>={year_from}"
+        if year_to:
+            if year_filter:
+                year_filter += " AND "
+            year_filter += f"yearPublished<={year_to}"
+        body["q"] = f"({query}) AND ({year_filter})"
+
+    if full_text:
+        body["q"] = f"({body['q']}) AND _exists_:fullText"
+
+    try:
+        resp = httpx.post(
+            "https://api.core.ac.uk/v3/search/works",
+            headers=headers,
+            json=body,
+            timeout=30,
+        )
+        if resp.status_code == 401:
+            return "[TOOL_ERROR] CORE API key invalid. Get a new one at https://core.ac.uk/services/api"
+        resp.raise_for_status()
+    except Exception as exc:
+        return f"[TOOL_ERROR] CORE search failed: {exc}"
+
+    data = resp.json()
+    results = data.get("results", [])
+
+    if not results:
+        return f"No CORE results for: {query}"
+
+    formatted = [f"**CORE: {query}** ({len(results)} results, {data.get('totalHits', '?')} total)\n"]
+
+    for i, paper in enumerate(results, 1):
+        authors = ", ".join(
+            (a.get("name", "") if isinstance(a, dict) else str(a))
+            for a in (paper.get("authors") or [])[:4]
+        )
+        year = paper.get("yearPublished", "")
+        title = paper.get("title", "Unknown")
+        doi = paper.get("doi", "")
+        download_url = paper.get("downloadUrl", "")
+        has_fulltext = bool(paper.get("fullText") or download_url)
+
+        oa_tag = " [FULL TEXT]" if has_fulltext else ""
+        doi_line = f"\n     DOI: {doi}" if doi else ""
+        dl_line = f"\n     Download: {download_url}" if download_url else ""
+        abstract = (paper.get("abstract", "") or "")[:200]
+        abstract_line = f"\n     Abstract: {abstract}..." if abstract else ""
+
+        formatted.append(
+            f"  {i}. **{title}** ({year}){oa_tag}\n"
+            f"     {authors}{doi_line}{dl_line}{abstract_line}"
+        )
+
+    return "\n\n".join(formatted)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# SPRINGER NATURE — 7M+ docs, 280K+ open access
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@tool
+def search_springer(
+    query: str,
+    max_results: int = 10,
+    content_type: str = "all",
+    open_access: bool = False,
+) -> str:
+    """Search Springer Nature for academic articles and book chapters.
+
+    Springer Nature publishes 7M+ documents including 280K+ open access
+    articles. Covers major journals like Nature, Scientific American,
+    BioMed Central, etc.
+
+    FREE — register for API key at dev.springernature.com (set SPRINGER_API_KEY).
+
+    Args:
+        query: Search query.
+        max_results: Maximum results (default 10, max 50).
+        content_type: Filter by type: "all", "Journal", "Book".
+        open_access: If True, only return open access articles.
+
+    Returns:
+        Formatted list of articles/chapters with metadata.
+    """
+    import httpx
+
+    if not SPRINGER_API_KEY:
+        return (
+            "[TOOL_ERROR] SPRINGER_API_KEY not set. "
+            "Register for a free key at https://dev.springernature.com"
+        )
+
+    # Use open access endpoint if requested, otherwise metadata
+    if open_access:
+        api_url = "https://api.springernature.com/openaccess/json"
+    else:
+        api_url = "https://api.springernature.com/meta/v2/json"
+
+    params = {
+        "q": query,
+        "s": 1,
+        "p": min(max_results, 50),
+        "api_key": SPRINGER_API_KEY,
+    }
+    if content_type != "all":
+        params["q"] += f' type:{content_type}'
+
+    try:
+        resp = httpx.get(api_url, params=params, timeout=30)
+        if resp.status_code == 403:
+            return "[TOOL_ERROR] Springer API key invalid or quota exceeded."
+        resp.raise_for_status()
+    except Exception as exc:
+        return f"[TOOL_ERROR] Springer search failed: {exc}"
+
+    data = resp.json()
+    records = data.get("records", [])
+
+    if not records:
+        return f"No Springer results for: {query}"
+
+    total = data.get("result", [{}])[0].get("total", "?") if data.get("result") else "?"
+
+    formatted = [f"**Springer Nature: {query}** ({len(records)} results, {total} total)\n"]
+
+    for i, rec in enumerate(records, 1):
+        title = rec.get("title", "Unknown")
+        creators = rec.get("creators", [])
+        authors = ", ".join(
+            c.get("creator", "") for c in creators[:4]
+        )
+        pub_name = rec.get("publicationName", "")
+        pub_date = rec.get("publicationDate", "")
+        doi = rec.get("doi", "")
+        is_oa = rec.get("openaccess", "false") == "true"
+        abstract_text = rec.get("abstract", "")
+
+        urls = rec.get("url", [])
+        pdf_url = ""
+        for u in urls:
+            if u.get("format") == "pdf":
+                pdf_url = u.get("value", "")
+                break
+
+        oa_tag = " [OPEN ACCESS]" if is_oa else ""
+        doi_line = f"\n     DOI: {doi}" if doi else ""
+        pdf_line = f"\n     PDF: {pdf_url}" if pdf_url else ""
+        abstract_line = f"\n     Abstract: {abstract_text[:200]}..." if abstract_text else ""
+
+        formatted.append(
+            f"  {i}. **{title}**{oa_tag}\n"
+            f"     {authors}\n"
+            f"     {pub_name} ({pub_date}){doi_line}{pdf_line}{abstract_line}"
+        )
+
+    return "\n\n".join(formatted)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# ZENODO — CERN's open research data repository
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@tool
+def search_zenodo(
+    query: str,
+    max_results: int = 10,
+    resource_type: str = "",
+    sort: str = "bestmatch",
+) -> str:
+    """Search Zenodo for research papers, datasets, and software.
+
+    Zenodo is CERN's open data repository. Papers often deposit supplementary
+    data, code, and full datasets here. Also hosts many preprints.
+
+    FREE — optionally set ZENODO_ACCESS_TOKEN for higher limits.
+
+    Args:
+        query: Search query.
+        max_results: Maximum results (default 10).
+        resource_type: Filter by type: "", "publication", "dataset", "software",
+                      "poster", "presentation", "image", "video".
+        sort: Sort order: "bestmatch", "mostrecent", "-mostrecent".
+
+    Returns:
+        Formatted list of Zenodo records with download links.
+    """
+    import httpx
+
+    params = {
+        "q": query,
+        "size": min(max_results, 100),
+        "sort": sort,
+    }
+    if resource_type:
+        params["type"] = resource_type
+
+    headers = {}
+    if ZENODO_ACCESS_TOKEN:
+        headers["Authorization"] = f"Bearer {ZENODO_ACCESS_TOKEN}"
+
+    try:
+        resp = httpx.get(
+            "https://zenodo.org/api/records",
+            params=params,
+            headers=headers,
+            timeout=30,
+        )
+        resp.raise_for_status()
+    except Exception as exc:
+        return f"[TOOL_ERROR] Zenodo search failed: {exc}"
+
+    data = resp.json()
+    hits = data.get("hits", {}).get("hits", [])
+
+    if not hits:
+        return f"No Zenodo results for: {query}"
+
+    total = data.get("hits", {}).get("total", "?")
+
+    formatted = [f"**Zenodo: {query}** ({len(hits)} results, {total} total)\n"]
+
+    for i, rec in enumerate(hits, 1):
+        metadata = rec.get("metadata", {})
+        title = metadata.get("title", "Unknown")
+        creators = metadata.get("creators", [])
+        authors = ", ".join(c.get("name", "") for c in creators[:4])
+        pub_date = metadata.get("publication_date", "")
+        res_type = metadata.get("resource_type", {}).get("title", "")
+        doi = metadata.get("doi", "")
+        access_right = metadata.get("access_right", "")
+        description = (metadata.get("description", "") or "")[:200]
+        # Strip HTML tags from description
+        description = re.sub(r"<[^>]+>", "", description).strip()
+
+        # Get file download links
+        files = rec.get("files", [])
+        file_info = ""
+        if files:
+            total_size = sum(f.get("size", 0) for f in files)
+            size_str = f"{total_size:,}" if total_size < 1_000_000 else f"{total_size / 1_000_000:.1f}MB"
+            file_info = f"\n     Files: {len(files)} ({size_str})"
+            # Show first downloadable file
+            first_file = files[0]
+            file_info += f"\n     Download: {first_file.get('links', {}).get('self', '')}"
+
+        doi_line = f"\n     DOI: {doi}" if doi else ""
+
+        formatted.append(
+            f"  {i}. **{title}** [{res_type}]\n"
+            f"     {authors} ({pub_date})\n"
+            f"     Access: {access_right}{doi_line}{file_info}\n"
+            f"     {description}..." if description else
+            f"  {i}. **{title}** [{res_type}]\n"
+            f"     {authors} ({pub_date})\n"
+            f"     Access: {access_right}{doi_line}{file_info}"
+        )
+
+    return "\n\n".join(formatted)
+
+
 # ── Tool registry ─────────────────────────────────────────────────────
 
 DOCUMENT_TOOLS = [
@@ -674,4 +1177,9 @@ DOCUMENT_TOOLS = [
     annas_archive_search,
     resolve_doi_metadata,
     extract_pdf_text,
+    semantic_scholar_search,
+    semantic_scholar_recommend,
+    search_core,
+    search_springer,
+    search_zenodo,
 ]
