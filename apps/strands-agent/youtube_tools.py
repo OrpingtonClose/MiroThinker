@@ -295,7 +295,7 @@ def _transcriptapi_get_transcript(video_id: str, language: str) -> str | None:
         resp = httpx.get(
             "https://transcriptapi.com/api/v2/youtube/transcript",
             params={
-                "video_url": video_id,
+                "video_url": f"https://www.youtube.com/watch?v={video_id}",
                 "lang": language,
             },
             headers={"Authorization": f"Bearer {api_key}"},
