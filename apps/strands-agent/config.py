@@ -14,7 +14,7 @@ uncensored operation — it disables Venice's built-in safety system
 prompt so the agent's own prompt has full control.
 
 Set ``MODEL_SELECTION=runtime`` to enable runtime probing.
-Set ``VENICE_MODEL`` to override with a specific model (skips probing).
+Set ``VENICE_MODEL_OVERRIDE`` to force a specific model (skips runtime probing).
 
 Reference: apps/adk-agent/agents/model_config.py lines 41-56.
 """
