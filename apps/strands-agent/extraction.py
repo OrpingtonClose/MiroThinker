@@ -92,7 +92,24 @@ def extract_with_docling(
             tmp_path = f.name
 
         try:
-            converter = DocumentConverter()
+            # Configure OCR and page limits when the Docling pipeline API is available
+            converter_kwargs = {}
+            try:
+                from docling.datamodel.pipeline_options import PdfPipelineOptions
+                pipeline_opts = PdfPipelineOptions()
+                pipeline_opts.do_ocr = enable_ocr
+                if max_pages and max_pages > 0:
+                    pipeline_opts.max_num_pages = max_pages
+                from docling.datamodel.base_models import InputFormat
+                from docling.document_converter import PdfFormatOption
+                converter_kwargs["format_options"] = {
+                    InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_opts)
+                }
+            except ImportError:
+                # Older Docling version without pipeline options — best-effort
+                logger.debug("Docling pipeline options not available; enable_ocr/max_pages ignored")
+
+            converter = DocumentConverter(**converter_kwargs)
             result = converter.convert(tmp_path)
 
             # Export as markdown (preserves tables and structure)
