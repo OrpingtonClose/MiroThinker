@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 
 import httpx
 
@@ -49,22 +50,28 @@ _HEADERS = {
 # Module-level client — created lazily on first use.
 # httpx.AsyncClient is safe for concurrent use from multiple coroutines.
 _client: httpx.AsyncClient | None = None
+_client_lock = threading.Lock()
 
 
 def _get_client() -> httpx.AsyncClient:
-    """Get or create the shared async HTTP client."""
+    """Get or create the shared async HTTP client.
+
+    Thread-safe: protected by _client_lock so asyncio.to_thread callers
+    and the main event loop cannot race on client creation/closure.
+    """
     global _client
-    if _client is None or _client.is_closed:
-        _client = httpx.AsyncClient(
-            timeout=_TIMEOUT,
-            headers=_HEADERS,
-            follow_redirects=True,
-            limits=httpx.Limits(
-                max_connections=20,
-                max_keepalive_connections=10,
-            ),
-        )
-    return _client
+    with _client_lock:
+        if _client is None or _client.is_closed:
+            _client = httpx.AsyncClient(
+                timeout=_TIMEOUT,
+                headers=_HEADERS,
+                follow_redirects=True,
+                limits=httpx.Limits(
+                    max_connections=20,
+                    max_keepalive_connections=10,
+                ),
+            )
+        return _client
 
 
 async def close_client() -> None:
@@ -141,7 +148,7 @@ async def async_get(
                     )
                     await asyncio.sleep(wait)
                     continue
-                resp.raise_for_status()
+                return resp  # let caller check status_code for fallback logic
 
             # Server error — retry with backoff
             if resp.status_code >= 500:
@@ -153,7 +160,7 @@ async def async_get(
                     )
                     await asyncio.sleep(wait)
                     continue
-                resp.raise_for_status()
+                return resp  # let caller check status_code for fallback logic
 
             # Other 4xx — don't retry, return as-is
             return resp
@@ -227,12 +234,12 @@ async def async_head(
                     wait = min(retry_after, 120) if retry_after is not None else min(2 ** attempt, 30)
                     await asyncio.sleep(wait)
                     continue
-                resp.raise_for_status()
+                return resp  # let caller check status_code for fallback logic
             if resp.status_code >= 500:
                 if attempt < retries:
                     await asyncio.sleep(min(2 ** attempt, 30))
                     continue
-                resp.raise_for_status()
+                return resp  # let caller check status_code for fallback logic
             return resp
         except (httpx.TimeoutException, httpx.ConnectError) as exc:
             last_exc = exc
@@ -294,14 +301,14 @@ async def async_post(
                     logger.info("Rate limited (429) — waiting %.1fs", wait)
                     await asyncio.sleep(wait)
                     continue
-                resp.raise_for_status()
+                return resp  # let caller check status_code for fallback logic
 
             if resp.status_code >= 500:
                 if attempt < retries:
                     wait = min(2 ** attempt, 30)
                     await asyncio.sleep(wait)
                     continue
-                resp.raise_for_status()
+                return resp  # let caller check status_code for fallback logic
 
             return resp
 
