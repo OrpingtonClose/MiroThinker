@@ -218,10 +218,10 @@ async def yandex_search(query: str, max_results: int = 10) -> str:
             op_id = op_data.get("id", "")
             if op_id:
                 # Poll up to 10 seconds for completion
-                import time as _time
+                import asyncio as _asyncio
 
                 for _ in range(10):
-                    _time.sleep(1)
+                    await _asyncio.sleep(1)
                     poll_resp = await async_get(
                         f"https://operation.api.cloud.yandex.net/operations/{op_id}",
                         headers={"Authorization": f"Api-Key {api_key}"},

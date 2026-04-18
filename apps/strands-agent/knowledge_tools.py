@@ -715,13 +715,19 @@ async def search_google_scholar(
     if bright_data_key:
         proxy_url = f"http://{customer_id}-zone-{zone}:{bright_data_key}@brd.superproxy.io:33335"
         try:
-            resp = await async_get(
-                "https://scholar.google.com/scholar",
-                params={"q": query, "num": max_results},
+            # proxy= is a client-construction-time setting in httpx, so we need
+            # a dedicated AsyncClient for proxy-routed requests.
+            import httpx as _httpx
+            async with _httpx.AsyncClient(
                 proxy=proxy_url,
-                timeout=30,
-                headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/120.0"},
-            )
+                timeout=_httpx.Timeout(connect=30, read=30, write=30, pool=10),
+                follow_redirects=True,
+            ) as proxy_client:
+                resp = await proxy_client.get(
+                    "https://scholar.google.com/scholar",
+                    params={"q": query, "num": max_results},
+                    headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/120.0"},
+                )
             resp.raise_for_status()
             # Basic parsing of Google Scholar HTML
             import re
