@@ -14,6 +14,12 @@ Sources (ordered by reliability):
   3. Anna's Archive — HTML scraping (API requires donation key)
   4. Sci-Hub — DOI → PDF for paywalled papers
   5. Project Gutenberg — free, legal, classic works
+  6. Google Books — metadata enrichment, ISBN lookup (free API)
+  7. ISBNdb — deep book metadata, 108M+ titles (paid)
+  8. HathiTrust — 17M+ digitized books, public domain OCR text (free)
+  9. Internet Archive (full API) — advanced search, bulk download (free)
+  10. Unpaywall — legal open-access PDF finder for DOIs (free)
+  11. CrossRef — citation graph traversal, DOI metadata (free)
 
 Format support:
   - PDF → pdfplumber (pure Python)
@@ -79,6 +85,27 @@ BRIGHT_DATA_ZONE = os.environ.get("BRIGHTDATA_ZONE", "mcp_unlocker")
 
 OXYLABS_USERNAME = os.environ.get("OXYLABS_USERNAME", "")
 OXYLABS_PASSWORD = os.environ.get("OXYLABS_PASSWORD", "")
+
+# ── New service API keys ──────────────────────────────────────────────
+
+# Unpaywall — free, just needs an email address (no key)
+UNPAYWALL_EMAIL = os.environ.get("UNPAYWALL_EMAIL", "")
+
+# Google Books API — free, optional API key for higher quotas
+GOOGLE_BOOKS_API_KEY = os.environ.get("GOOGLE_BOOKS_API_KEY", "")
+
+# ISBNdb — paid service, 108M+ titles, 19 data points per book
+ISBNDB_API_KEY = os.environ.get("ISBNDB_API_KEY", "")
+
+# Springer Nature — free key, 280K+ open access articles
+SPRINGER_API_KEY = os.environ.get("SPRINGER_API_KEY", "")
+
+# HathiTrust — free, 17M+ digitized books
+# No API key needed for basic catalog/metadata access
+
+# Internet Archive — free, S3-like API for bulk ops
+IA_ACCESS_KEY = os.environ.get("IA_ACCESS_KEY", "")
+IA_SECRET_KEY = os.environ.get("IA_SECRET_KEY", "")
 
 
 # ── Text extraction helpers ───────────────────────────────────────────
@@ -398,6 +425,24 @@ def _cache_lookup_book(url: str) -> Optional[str]:
     except ImportError:
         pass
     return None
+
+
+def _doi_cache_alias(cache_key: str, result: str, title: str) -> None:
+    """Cache a download result under the doi:// key for future DOI lookups."""
+    try:
+        from cache import cache_put
+        cache_put(
+            url=cache_key,
+            content=result,
+            content_type="text/plain",
+            source_type="book",
+            title=title or "Unknown",
+            summary=result[:500],
+            tags=["book", "doi"],
+            ttl=10 * 365 * 24 * 3600,
+        )
+    except ImportError:
+        pass
 
 
 def _datalake_store(content: bytes, text: str, title: str, author: str,
@@ -884,6 +929,245 @@ def _search_gutenberg(query: str, max_results: int = 10) -> list[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# SOURCE 6: GOOGLE BOOKS (metadata enrichment)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _search_google_books(query: str, max_results: int = 10) -> list[dict]:
+    """Search Google Books API for metadata enrichment."""
+    import httpx
+
+    results = []
+    try:
+        params = {
+            "q": query,
+            "maxResults": min(max_results, 40),
+            "printType": "books",
+        }
+        if GOOGLE_BOOKS_API_KEY:
+            params["key"] = GOOGLE_BOOKS_API_KEY
+
+        with _get_http_client() as client:
+            resp = client.get(
+                "https://www.googleapis.com/books/v1/volumes",
+                params=params,
+            )
+
+        if resp.status_code != 200:
+            return results
+
+        for item in resp.json().get("items", [])[:max_results]:
+            info = item.get("volumeInfo", {})
+            access = item.get("accessInfo", {})
+
+            isbn_13 = ""
+            isbn_10 = ""
+            for ident in info.get("industryIdentifiers", []):
+                if ident.get("type") == "ISBN_13":
+                    isbn_13 = ident.get("identifier", "")
+                elif ident.get("type") == "ISBN_10":
+                    isbn_10 = ident.get("identifier", "")
+
+            results.append({
+                "title": info.get("title", "Unknown"),
+                "authors": info.get("authors", []),
+                "year": (info.get("publishedDate", "") or "")[:4],
+                "isbn": isbn_13 or isbn_10,
+                "pages": info.get("pageCount", ""),
+                "language": info.get("language", ""),
+                "publisher": info.get("publisher", ""),
+                "categories": info.get("categories", []),
+                "description": (info.get("description", "") or "")[:300],
+                "preview_link": info.get("previewLink", ""),
+                "has_fulltext": access.get("viewability", "") in ("ALL_PAGES", "PARTIAL"),
+                "url": info.get("infoLink", ""),
+                "source": "Google Books",
+            })
+    except Exception as exc:
+        logger.debug("Google Books search failed: %s", exc)
+
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# SOURCE 7: ISBNdb (deep book metadata — 108M+ titles)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _search_isbndb(query: str, max_results: int = 10) -> list[dict]:
+    """Search ISBNdb for detailed book metadata."""
+    import httpx
+
+    if not ISBNDB_API_KEY:
+        return []
+
+    results = []
+    try:
+        with _get_http_client() as client:
+            resp = client.get(
+                f"https://api2.isbndb.com/books/{quote_plus(query)}",
+                headers={"Authorization": ISBNDB_API_KEY},
+                params={"pageSize": min(max_results, 20)},
+            )
+
+        if resp.status_code != 200:
+            return results
+
+        for book in resp.json().get("books", [])[:max_results]:
+            results.append({
+                "title": book.get("title", "Unknown"),
+                "authors": book.get("authors", []),
+                "year": str(book.get("date_published", ""))[:4],
+                "isbn": book.get("isbn13", book.get("isbn", "")),
+                "pages": book.get("pages", ""),
+                "publisher": book.get("publisher", ""),
+                "language": book.get("language", ""),
+                "binding": book.get("binding", ""),
+                "dimensions": book.get("dimensions", ""),
+                "msrp": book.get("msrp", ""),
+                "subjects": book.get("subjects", []),
+                "synopsis": (book.get("synopsis", "") or "")[:300],
+                "url": f"https://isbndb.com/book/{book.get('isbn13', '')}",
+                "source": "ISBNdb",
+            })
+    except Exception as exc:
+        logger.debug("ISBNdb search failed: %s", exc)
+
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# SOURCE 8: HATHITRUST (17M+ digitized books, public domain full text)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _search_hathitrust(query: str, max_results: int = 10) -> list[dict]:
+    """Search HathiTrust catalog for digitized books."""
+    import httpx
+
+    results = []
+    try:
+        with _get_http_client() as client:
+            resp = client.get(
+                "https://catalog.hathitrust.org/api/volumes/brief/json/title/{}.json".format(
+                    quote(query)
+                ),
+            )
+
+        if resp.status_code != 200:
+            # Try full-text search via Solr
+            with _get_http_client() as client:
+                resp = client.get(
+                    "https://babel.hathitrust.org/cgi/ls",
+                    params={
+                        "a": "srchls",
+                        "q1": query,
+                        "lmt": max_results,
+                        "output": "json",
+                    },
+                )
+            if resp.status_code != 200:
+                return results
+
+        data = resp.json()
+
+        # Handle brief/volumes response
+        if "items" in data:
+            for item_id, info in list(data.get("items", {}).items())[:max_results]:
+                records = info.get("records", {})
+                for rec_id, rec in records.items():
+                    ht_items = info.get("items", [])
+                    has_fulltext = any(
+                        i.get("usRightsString", "") == "Full view"
+                        for i in ht_items
+                    )
+                    first_item = ht_items[0] if ht_items else {}
+
+                    results.append({
+                        "title": " ".join(rec.get("titles", ["Unknown"])),
+                        "authors": rec.get("authors", {}).keys() if isinstance(rec.get("authors"), dict) else [],
+                        "year": rec.get("publishDates", [""])[0] if rec.get("publishDates") else "",
+                        "isbn": rec.get("isbns", [""])[0] if rec.get("isbns") else "",
+                        "has_fulltext": has_fulltext,
+                        "ht_id": first_item.get("htid", ""),
+                        "rights": first_item.get("usRightsString", ""),
+                        "url": f"https://babel.hathitrust.org/cgi/pt?id={first_item.get('htid', '')}",
+                        "source": "HathiTrust",
+                    })
+        # Handle search response
+        elif isinstance(data, list):
+            for item in data[:max_results]:
+                results.append({
+                    "title": item.get("title", "Unknown"),
+                    "authors": [item.get("author", "")],
+                    "year": item.get("date", ""),
+                    "has_fulltext": item.get("rights", "") == "Full view",
+                    "ht_id": item.get("htid", ""),
+                    "url": f"https://babel.hathitrust.org/cgi/pt?id={item.get('htid', '')}",
+                    "source": "HathiTrust",
+                })
+    except Exception as exc:
+        logger.debug("HathiTrust search failed: %s", exc)
+
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# SOURCE 9: INTERNET ARCHIVE (full API — beyond Open Library)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _search_internet_archive(query: str, max_results: int = 10) -> list[dict]:
+    """Search Internet Archive's advanced search API.
+
+    Goes beyond Open Library to find audiobooks, magazines, historical
+    texts, and other formats in the Archive's 40M+ items.
+    """
+    import httpx
+
+    results = []
+    try:
+        with _get_http_client() as client:
+            resp = client.get(
+                "https://archive.org/advancedsearch.php",
+                params={
+                    "q": f"{query} AND mediatype:texts",
+                    "fl[]": "identifier,title,creator,date,description,downloads,format,language,subject",
+                    "sort[]": "downloads desc",
+                    "rows": max_results,
+                    "page": 1,
+                    "output": "json",
+                },
+            )
+
+        if resp.status_code != 200:
+            return results
+
+        for doc in resp.json().get("response", {}).get("docs", [])[:max_results]:
+            ia_id = doc.get("identifier", "")
+
+            results.append({
+                "title": doc.get("title", "Unknown"),
+                "authors": [doc["creator"]] if isinstance(doc.get("creator"), str)
+                           else (doc.get("creator", []) or []),
+                "year": str(doc.get("date", ""))[:4],
+                "language": doc.get("language", ""),
+                "downloads": doc.get("downloads", 0),
+                "subjects": doc.get("subject", []) if isinstance(doc.get("subject"), list) else [],
+                "description": (str(doc.get("description", "")) or "")[:300],
+                "ia_id": ia_id,
+                "has_fulltext": True,
+                "url": f"https://archive.org/details/{ia_id}",
+                "download_url": f"https://archive.org/download/{ia_id}",
+                "source": "Internet Archive",
+            })
+    except Exception as exc:
+        logger.debug("Internet Archive search failed: %s", exc)
+
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # AGENT TOOLS — exposed to the Strands agent
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -896,8 +1180,9 @@ def search_books(
 ) -> str:
     """Search for books, textbooks, and documents across multiple sources.
 
-    Searches Open Library, Library Genesis, Anna's Archive, and Project
-    Gutenberg simultaneously. Returns unified results with metadata and
+    Searches up to 9 sources simultaneously: Open Library, Library Genesis,
+    Anna's Archive, Project Gutenberg, Google Books, ISBNdb, HathiTrust,
+    and Internet Archive. Returns unified results with metadata and
     download availability.
 
     Use this to find books for documentary research, knowledge base
@@ -906,7 +1191,9 @@ def search_books(
     Args:
         query: Search query — title, author, ISBN, topic, etc.
         sources: Which sources to search: "all", "openlibrary", "libgen",
-                 "annas", "gutenberg". Comma-separated for multiple.
+                 "annas", "gutenberg", "googlebooks", "isbndb",
+                 "hathitrust", "internetarchive".
+                 Comma-separated for multiple (default "all").
         max_results: Maximum results per source (default 10).
 
     Returns:
@@ -945,6 +1232,34 @@ def search_books(
         except Exception as exc:
             logger.debug("Gutenberg search error: %s", exc)
 
+    if search_all or "googlebooks" in source_list:
+        try:
+            gb_results = _search_google_books(query, max_results)
+            all_results.extend(gb_results)
+        except Exception as exc:
+            logger.debug("Google Books search error: %s", exc)
+
+    if search_all or "isbndb" in source_list:
+        try:
+            isbn_results = _search_isbndb(query, max_results)
+            all_results.extend(isbn_results)
+        except Exception as exc:
+            logger.debug("ISBNdb search error: %s", exc)
+
+    if search_all or "hathitrust" in source_list:
+        try:
+            ht_results = _search_hathitrust(query, max_results)
+            all_results.extend(ht_results)
+        except Exception as exc:
+            logger.debug("HathiTrust search error: %s", exc)
+
+    if search_all or "internetarchive" in source_list:
+        try:
+            ia_results = _search_internet_archive(query, max_results)
+            all_results.extend(ia_results)
+        except Exception as exc:
+            logger.debug("Internet Archive search error: %s", exc)
+
     if not all_results:
         return f"No books found for: {query}\nTry different search terms or check that the sources are accessible."
 
@@ -952,7 +1267,10 @@ def search_books(
     formatted = [f"**Book search: {query}** ({len(all_results)} results)\n"]
 
     for i, r in enumerate(all_results, 1):
-        authors = ", ".join(r.get("authors", [])[:3]) or "Unknown author"
+        authors_raw = r.get("authors", [])
+        if isinstance(authors_raw, dict):
+            authors_raw = list(authors_raw.keys())
+        authors = ", ".join(str(a) for a in list(authors_raw)[:3]) or "Unknown author"
         year = f" ({r.get('year', '')})" if r.get("year") else ""
         source = r.get("source", "Unknown")
         fmt = f" [{r.get('format', '').upper()}]" if r.get("format") else ""
@@ -962,7 +1280,13 @@ def search_books(
         md5 = f"\n     MD5: {r.get('md5', '')}" if r.get("md5") else ""
         dl_info = ""
         if r.get("has_fulltext"):
-            dl_info = "\n     [FULL TEXT AVAILABLE via Internet Archive]"
+            src = r.get("source", "")
+            if src == "HathiTrust":
+                dl_info = "\n     [FULL TEXT AVAILABLE via HathiTrust]"
+            elif src == "Internet Archive":
+                dl_info = "\n     [FULL TEXT AVAILABLE via Internet Archive]"
+            else:
+                dl_info = "\n     [FULL TEXT AVAILABLE]"
         elif r.get("md5"):
             dl_info = "\n     [DOWNLOADABLE via LibGen/Anna's Archive]"
         elif r.get("url") and r.get("source") == "Project Gutenberg":
@@ -1151,13 +1475,43 @@ def download_book_by_doi(
     if cached:
         return f"[FROM CACHE]\nDOI: {doi}\nTitle: {title or 'Unknown'}\n---\n{cached}"
 
-    # Try CrossRef for open access PDF first
     import httpx
 
+    # Strategy 1: Unpaywall — find legal open access version FIRST
+    # This is free, fast, and legal — check before anything else
+    if UNPAYWALL_EMAIL:
+        try:
+            resp = httpx.get(
+                f"https://api.unpaywall.org/v2/{doi}",
+                params={"email": UNPAYWALL_EMAIL},
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if not title:
+                    title = data.get("title", "")
+                if data.get("is_oa"):
+                    best_oa = data.get("best_oa_location", {}) or {}
+                    pdf_url = best_oa.get("url_for_pdf") or best_oa.get("url", "")
+                    if pdf_url:
+                        logger.info("Unpaywall found OA version: %s (%s)",
+                                    doi, best_oa.get("host_type", ""))
+                        result = download_book(
+                            url=pdf_url, doi=doi, title=title, author=author, source="direct"
+                        )
+                        if "[DOWNLOAD FAILED]" not in result and "[ERROR]" not in result:
+                            _doi_cache_alias(cache_key, result, title)
+                            return result
+        except Exception as exc:
+            logger.debug("Unpaywall lookup failed for %s: %s", doi, exc)
+
+    # Strategy 2: CrossRef for open access PDF link
     try:
         resp = httpx.get(
             f"https://api.crossref.org/works/{doi}",
-            headers={"User-Agent": "MiroThinker/1.0"},
+            headers={"User-Agent": "MiroThinker/1.0 (mailto:{})".format(
+                UNPAYWALL_EMAIL or "research@mirothinker.ai"
+            )},
             timeout=30,
         )
         if resp.status_code == 200:
@@ -1180,26 +1534,12 @@ def download_book_by_doi(
                             url=pdf_url, doi=doi, title=title, author=author, source="direct"
                         )
                         if "[DOWNLOAD FAILED]" not in result and "[ERROR]" not in result:
-                            # Also cache under doi:// key so future DOI lookups hit cache
-                            try:
-                                from cache import cache_put
-                                cache_put(
-                                    url=cache_key,
-                                    content=result,
-                                    content_type="text/plain",
-                                    source_type="book",
-                                    title=title or "Unknown",
-                                    summary=result[:500],
-                                    tags=["book", "doi"],
-                                    ttl=10 * 365 * 24 * 3600,
-                                )
-                            except ImportError:
-                                pass
+                            _doi_cache_alias(cache_key, result, title)
                             return result
     except Exception:
         pass
 
-    # Try Sci-Hub
+    # Strategy 3: Sci-Hub (last resort for paywalled papers)
     return download_book(doi=doi, title=title, author=author, source="scihub")
 
 
@@ -1447,6 +1787,588 @@ def search_book_content(
     return "\n\n".join(formatted)
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# NEW SERVICE TOOLS — Unpaywall, Google Books, HathiTrust, IA, CrossRef
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@tool
+def unpaywall_lookup(doi: str) -> str:
+    """Look up open access availability for a paper via Unpaywall.
+
+    Given a DOI, checks Unpaywall's database of 50,000+ repositories to find
+    legal free versions of paywalled papers. Returns direct PDF links when
+    available, along with OA status (gold/green/hybrid/bronze).
+
+    FREE — no API key needed, just an email address (set UNPAYWALL_EMAIL).
+    Rate limit: 100,000 calls/day.
+
+    Args:
+        doi: The DOI to look up (e.g. "10.1038/s41586-023-06647-8").
+
+    Returns:
+        Open access information including PDF links and OA status.
+    """
+    import httpx
+
+    doi = doi.strip()
+    doi = re.sub(r"^https?://doi\.org/", "", doi)
+
+    email = UNPAYWALL_EMAIL
+    if not email:
+        return (
+            "[TOOL_ERROR] UNPAYWALL_EMAIL not set. "
+            "Add your email to .env — Unpaywall is free, no API key needed."
+        )
+
+    try:
+        resp = httpx.get(
+            f"https://api.unpaywall.org/v2/{doi}",
+            params={"email": email},
+            timeout=15,
+        )
+        if resp.status_code == 404:
+            return f"DOI not found in Unpaywall: {doi}"
+        resp.raise_for_status()
+    except Exception as exc:
+        return f"[TOOL_ERROR] Unpaywall lookup failed: {exc}"
+
+    data = resp.json()
+    is_oa = data.get("is_oa", False)
+    title = data.get("title", "Unknown")
+    journal = data.get("journal_name", "")
+    year = data.get("year", "")
+    oa_status = data.get("oa_status", "closed")
+
+    lines = [
+        f"**{title}**",
+        f"DOI: {doi}",
+        f"Journal: {journal} ({year})",
+        f"Open Access: {'YES' if is_oa else 'NO'} ({oa_status})",
+    ]
+
+    if is_oa:
+        best = data.get("best_oa_location", {}) or {}
+        pdf_url = best.get("url_for_pdf", "")
+        landing_url = best.get("url", "")
+        host_type = best.get("host_type", "")
+        license_val = best.get("license", "")
+
+        lines.append(f"Host: {host_type}")
+        if license_val:
+            lines.append(f"License: {license_val}")
+        if pdf_url:
+            lines.append(f"PDF: {pdf_url}")
+        if landing_url and landing_url != pdf_url:
+            lines.append(f"Landing page: {landing_url}")
+
+        # List all OA locations
+        all_locs = data.get("oa_locations", [])
+        if len(all_locs) > 1:
+            lines.append(f"\nAll OA locations ({len(all_locs)}):")
+            for loc in all_locs:
+                loc_url = loc.get("url_for_pdf") or loc.get("url", "")
+                loc_host = loc.get("host_type", "")
+                loc_license = loc.get("license", "")
+                lines.append(f"  - {loc_host}: {loc_url} ({loc_license})")
+    else:
+        lines.append("\nNo open access version found.")
+        lines.append("Consider using download_book_by_doi to try Sci-Hub as a fallback.")
+
+    return "\n".join(lines)
+
+
+@tool
+def google_books_metadata(
+    query: str = "",
+    isbn: str = "",
+    max_results: int = 5,
+) -> str:
+    """Look up book metadata from Google Books API.
+
+    Enriches book information with descriptions, categories, page counts,
+    cover images, and preview links. Search by title/author or ISBN.
+
+    FREE — no API key required (but GOOGLE_BOOKS_API_KEY gets higher quotas).
+
+    Args:
+        query: Search query (title, author, etc.).
+        isbn: ISBN-10 or ISBN-13 for precise lookup.
+        max_results: Maximum results (default 5).
+
+    Returns:
+        Detailed book metadata from Google Books.
+    """
+    import httpx
+
+    if not query and not isbn:
+        return "[ERROR] Provide a query or ISBN"
+
+    search_q = f"isbn:{isbn}" if isbn else query
+
+    params = {
+        "q": search_q,
+        "maxResults": min(max_results, 40),
+        "printType": "books",
+    }
+    if GOOGLE_BOOKS_API_KEY:
+        params["key"] = GOOGLE_BOOKS_API_KEY
+
+    try:
+        resp = httpx.get(
+            "https://www.googleapis.com/books/v1/volumes",
+            params=params,
+            timeout=15,
+        )
+        resp.raise_for_status()
+    except Exception as exc:
+        return f"[TOOL_ERROR] Google Books API failed: {exc}"
+
+    items = resp.json().get("items", [])
+    if not items:
+        return f"No results on Google Books for: {search_q}"
+
+    formatted = [f"**Google Books: {search_q}** ({len(items)} results)\n"]
+
+    for item in items[:max_results]:
+        info = item.get("volumeInfo", {})
+        access = item.get("accessInfo", {})
+
+        isbn_13 = ""
+        isbn_10 = ""
+        for ident in info.get("industryIdentifiers", []):
+            if ident.get("type") == "ISBN_13":
+                isbn_13 = ident.get("identifier", "")
+            elif ident.get("type") == "ISBN_10":
+                isbn_10 = ident.get("identifier", "")
+
+        authors = ", ".join(info.get("authors", ["Unknown"]))
+        categories = ", ".join(info.get("categories", []))
+        description = (info.get("description", "") or "")[:400]
+
+        entry = [
+            f"  **{info.get('title', 'Unknown')}**",
+            f"  Authors: {authors}",
+            f"  Published: {info.get('publishedDate', '?')} by {info.get('publisher', '?')}",
+        ]
+        if isbn_13:
+            entry.append(f"  ISBN-13: {isbn_13}")
+        if isbn_10:
+            entry.append(f"  ISBN-10: {isbn_10}")
+        if info.get("pageCount"):
+            entry.append(f"  Pages: {info['pageCount']}")
+        if categories:
+            entry.append(f"  Categories: {categories}")
+        if info.get("averageRating"):
+            entry.append(f"  Rating: {info['averageRating']}/5 ({info.get('ratingsCount', 0)} ratings)")
+        if description:
+            entry.append(f"  Description: {description}")
+        if info.get("previewLink"):
+            entry.append(f"  Preview: {info['previewLink']}")
+        entry.append(f"  Viewability: {access.get('viewability', 'unknown')}")
+
+        formatted.append("\n".join(entry))
+
+    return "\n\n".join(formatted)
+
+
+@tool
+def crossref_citation_graph(
+    doi: str,
+    depth: int = 1,
+    max_refs: int = 20,
+) -> str:
+    """Explore the citation graph around a paper via CrossRef.
+
+    Given a DOI, returns the paper's references (what it cites) and
+    citing works (who cites it). Useful for building knowledge graphs
+    and finding related work for documentary research.
+
+    FREE — include UNPAYWALL_EMAIL for polite pool (50 req/sec vs 1 req/sec).
+
+    Args:
+        doi: The DOI to explore.
+        depth: How many levels deep to traverse (1 = immediate refs, default 1).
+        max_refs: Maximum references/citations to return per level (default 20).
+
+    Returns:
+        Citation graph with paper metadata.
+    """
+    import httpx
+
+    doi = doi.strip()
+    doi = re.sub(r"^https?://doi\.org/", "", doi)
+
+    polite_email = UNPAYWALL_EMAIL or "research@mirothinker.ai"
+
+    try:
+        resp = httpx.get(
+            f"https://api.crossref.org/works/{doi}",
+            headers={"User-Agent": f"MiroThinker/1.0 (mailto:{polite_email})"},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            return f"DOI not found in CrossRef: {doi}"
+
+        data = resp.json().get("message", {})
+    except Exception as exc:
+        return f"[TOOL_ERROR] CrossRef lookup failed: {exc}"
+
+    title = " ".join(data.get("title", ["Unknown"]))
+    authors = [
+        f"{a.get('given', '')} {a.get('family', '')}".strip()
+        for a in data.get("author", [])[:5]
+    ]
+    year_parts = data.get("published-print", data.get("published-online", {})).get("date-parts", [[""]])
+    year = str(year_parts[0][0]) if year_parts and year_parts[0] else ""
+    journal = " ".join(data.get("container-title", [""]))
+    cited_by = data.get("is-referenced-by-count", 0)
+
+    lines = [
+        f"**{title}**",
+        f"Authors: {', '.join(authors)}",
+        f"Journal: {journal} ({year})",
+        f"DOI: {doi}",
+        f"Cited by: {cited_by} works",
+        f"Reference count: {data.get('reference-count', 0)}",
+    ]
+
+    # References (what this paper cites)
+    refs = data.get("reference", [])[:max_refs]
+    if refs:
+        lines.append(f"\n**References** ({len(refs)} of {data.get('reference-count', 0)}):")
+        for i, ref in enumerate(refs, 1):
+            ref_title = ref.get("article-title", ref.get("unstructured", ""))[:120]
+            ref_doi = ref.get("DOI", "")
+            ref_year = ref.get("year", "")
+            ref_author = ref.get("author", "")
+            doi_str = f" DOI:{ref_doi}" if ref_doi else ""
+            lines.append(f"  {i}. {ref_author} ({ref_year}) {ref_title}{doi_str}")
+
+    # Citing works (who cites this paper) — requires a separate query
+    if cited_by > 0 and depth >= 1:
+        try:
+            citing_resp = httpx.get(
+                "https://api.crossref.org/works",
+                params={
+                    "query": title[:200],
+                    "filter": f"references:{doi}",
+                    "rows": max_refs,
+                    "sort": "is-referenced-by-count",
+                    "order": "desc",
+                },
+                headers={"User-Agent": f"MiroThinker/1.0 (mailto:{polite_email})"},
+                timeout=30,
+            )
+            if citing_resp.status_code == 200:
+                citing_items = citing_resp.json().get("message", {}).get("items", [])
+                if citing_items:
+                    lines.append(f"\n**Cited by** ({len(citing_items)} of {cited_by}):")
+                    for i, item in enumerate(citing_items[:max_refs], 1):
+                        c_title = " ".join(item.get("title", ["?"]))[:120]
+                        c_doi = item.get("DOI", "")
+                        c_year = str(item.get("published-print", item.get("published-online", {}))
+                                     .get("date-parts", [[""]])[0][0])
+                        c_cited = item.get("is-referenced-by-count", 0)
+                        lines.append(f"  {i}. ({c_year}) {c_title} [cited by {c_cited}] DOI:{c_doi}")
+        except Exception:
+            pass
+
+    return "\n".join(lines)
+
+
+@tool
+def hathitrust_read(
+    ht_id: str = "",
+    query: str = "",
+    page: int = 1,
+) -> str:
+    """Read content from HathiTrust's digitized book collection.
+
+    HathiTrust has 17M+ digitized volumes. Public domain content is fully
+    readable. Search the full-text index or read specific pages.
+
+    FREE — no API key needed.
+
+    Args:
+        ht_id: HathiTrust volume ID (e.g. "mdp.39015027794331").
+        query: Search query for full-text search across all volumes.
+        page: Page number to read (default 1).
+
+    Returns:
+        Page text or search results from HathiTrust.
+    """
+    import httpx
+
+    if ht_id:
+        # Read a specific page from a known volume
+        try:
+            # HathiTrust Data API — get OCR text for a page
+            resp = httpx.get(
+                f"https://babel.hathitrust.org/cgi/imgsrv/ocr?id={ht_id}&seq={page}",
+                headers={"User-Agent": _BROWSER_UA},
+                timeout=30,
+                follow_redirects=True,
+            )
+            if resp.status_code == 200 and resp.text.strip():
+                text = resp.text
+                return (
+                    f"**HathiTrust Volume: {ht_id}** — Page {page}\n"
+                    f"---\n{text}\n---\n"
+                    f"[Next page: hathitrust_read(ht_id=\"{ht_id}\", page={page + 1})]"
+                )
+            else:
+                return (
+                    f"Could not read page {page} of {ht_id}. "
+                    f"The volume may not be public domain or the page may not exist.\n"
+                    f"View online: https://babel.hathitrust.org/cgi/pt?id={ht_id}"
+                )
+        except Exception as exc:
+            return f"[TOOL_ERROR] HathiTrust read failed: {exc}"
+
+    elif query:
+        # Full-text search
+        try:
+            resp = httpx.get(
+                "https://babel.hathitrust.org/cgi/ls",
+                params={
+                    "a": "srchls",
+                    "q1": query,
+                    "lmt": 10,
+                },
+                headers={"User-Agent": _BROWSER_UA},
+                timeout=30,
+                follow_redirects=True,
+            )
+            if resp.status_code != 200:
+                return f"HathiTrust search failed (HTTP {resp.status_code})"
+
+            # Parse search results from HTML
+            html = resp.text
+            # Extract result items
+            results = []
+            # Simple extraction of result links and titles
+            import re as re_mod
+            items = re_mod.findall(
+                r'id=([^&"]+).*?class="result-title"[^>]*>(.*?)</a>',
+                html, re_mod.DOTALL
+            )
+            if not items:
+                # Fallback: just find HT IDs and titles
+                items = re_mod.findall(
+                    r'id=([a-z]+\.\d+)',
+                    html
+                )
+                if items:
+                    results = [{"ht_id": hid, "title": f"[Volume {hid}]"} for hid in items[:10]]
+
+            if not results and not items:
+                return f"No HathiTrust results for: {query}"
+
+            lines = [f"**HathiTrust search: {query}** ({len(results) or len(items)} results)\n"]
+            for item in (results or items)[:10]:
+                if isinstance(item, dict):
+                    lines.append(
+                        f"  - {item['title']}\n"
+                        f"    HT ID: {item['ht_id']}\n"
+                        f"    URL: https://babel.hathitrust.org/cgi/pt?id={item['ht_id']}"
+                    )
+                else:
+                    lines.append(
+                        f"  - Volume: {item}\n"
+                        f"    URL: https://babel.hathitrust.org/cgi/pt?id={item}"
+                    )
+            return "\n\n".join(lines)
+
+        except Exception as exc:
+            return f"[TOOL_ERROR] HathiTrust search failed: {exc}"
+
+    return "[ERROR] Provide either ht_id (to read a volume) or query (to search)"
+
+
+@tool
+def internet_archive_download(
+    ia_id: str,
+    file_format: str = "auto",
+    title: str = "",
+    author: str = "",
+) -> str:
+    """Download a book/document from Internet Archive by identifier.
+
+    Given an Internet Archive item ID, downloads the best available format
+    (PDF, EPUB, DjVu, plain text) and extracts the text content.
+
+    FREE — no API key needed for public items. Set IA_ACCESS_KEY and
+    IA_SECRET_KEY for access to restricted items.
+
+    Args:
+        ia_id: Internet Archive item identifier (e.g. "thebookoflife00up" or from search results).
+        file_format: Preferred format: "auto", "pdf", "epub", "txt", "djvu".
+        title: Book title (optional, for metadata).
+        author: Author (optional, for metadata).
+
+    Returns:
+        Extracted text from the downloaded book.
+    """
+    import httpx
+
+    cache_key = f"ia://{ia_id}"
+    cached = _cache_lookup_book(cache_key)
+    if cached:
+        return f"[FROM CACHE]\nIA ID: {ia_id}\nTitle: {title or 'Unknown'}\n---\n{cached}"
+
+    # Get item metadata to find downloadable files
+    try:
+        resp = httpx.get(
+            f"https://archive.org/metadata/{ia_id}",
+            timeout=30,
+            follow_redirects=True,
+        )
+        resp.raise_for_status()
+        metadata = resp.json()
+    except Exception as exc:
+        return f"[TOOL_ERROR] Failed to get IA metadata for {ia_id}: {exc}"
+
+    if not title:
+        title = metadata.get("metadata", {}).get("title", ia_id)
+    if not author:
+        creator = metadata.get("metadata", {}).get("creator", "")
+        author = creator if isinstance(creator, str) else ", ".join(creator) if isinstance(creator, list) else ""
+
+    # Find best downloadable file
+    files = metadata.get("files", [])
+    format_priority = {
+        "auto": ["Text", "DjVuTXT", "Plain text", "PDF", "EPUB", "DjVu"],
+        "pdf": ["PDF"],
+        "epub": ["EPUB"],
+        "txt": ["Text", "DjVuTXT", "Plain text"],
+        "djvu": ["DjVu"],
+    }
+    preferred = format_priority.get(file_format.lower(), format_priority["auto"])
+
+    download_file = None
+    for fmt in preferred:
+        for f in files:
+            f_format = f.get("format", "")
+            f_name = f.get("name", "")
+            if fmt.lower() in f_format.lower() or f_name.endswith(f".{fmt.lower()}"):
+                download_file = f
+                break
+        if download_file:
+            break
+
+    # Fallback: try any text-like file
+    if not download_file:
+        for f in files:
+            name = f.get("name", "").lower()
+            if name.endswith((".txt", ".pdf", ".epub", ".htm", ".html")):
+                download_file = f
+                break
+
+    if not download_file:
+        return (
+            f"No downloadable text found for IA item: {ia_id}\n"
+            f"Available formats: {', '.join(set(f.get('format', '') for f in files))}\n"
+            f"View online: https://archive.org/details/{ia_id}"
+        )
+
+    file_name = download_file["name"]
+    download_url = f"https://archive.org/download/{ia_id}/{quote(file_name)}"
+
+    # Download the file
+    try:
+        headers = {"User-Agent": _BROWSER_UA}
+        if IA_ACCESS_KEY and IA_SECRET_KEY:
+            headers["Authorization"] = f"LOW {IA_ACCESS_KEY}:{IA_SECRET_KEY}"
+
+        with _get_http_client(timeout=120) as client:
+            resp = client.get(download_url, headers=headers)
+            resp.raise_for_status()
+            content = resp.content
+    except Exception as exc:
+        return f"[TOOL_ERROR] Download failed for {download_url}: {exc}"
+
+    # Extract text
+    text = _extract_text(content, filename=file_name)
+
+    if not text or text.startswith("[ERROR]") or text.startswith("[No text"):
+        return f"[EXTRACTION FAILED] Downloaded {len(content):,} bytes from IA but could not extract text."
+
+    # Cache and store
+    _cache_store_book(
+        url=cache_key,
+        content=content,
+        text=text,
+        title=title,
+        author=author,
+        metadata={
+            "ia_id": ia_id,
+            "filename": file_name,
+            "size_bytes": len(content),
+            "source": "Internet Archive",
+        },
+        tags=["book", "internet_archive"],
+    )
+
+    _datalake_store(content, text, title, author, file_name, "", "", "Internet Archive", cache_key)
+
+    # Truncate for context
+    text_len = len(text)
+    if text_len > 120000:
+        text = (
+            text[:120000]
+            + f"\n\n[...TRUNCATED — full text is {text_len:,} chars. "
+            f"Use read_book_section to read specific chapters.]"
+        )
+
+    return (
+        f"**{title}**\n"
+        f"Author: {author or 'Unknown'}\n"
+        f"Source: Internet Archive ({ia_id})\n"
+        f"File: {file_name} ({len(content):,} bytes)\n"
+        f"Text: {text_len:,} characters extracted\n"
+        f"---\n\n{text}"
+    )
+
+
+@tool
+def extraction_status() -> str:
+    """Show which document extraction backends are available.
+
+    The pipeline can use multiple backends for PDF text extraction:
+    - Docling (best for complex layouts, tables, math)
+    - Mathpix (best for STEM content, LaTeX equations)
+    - pdfplumber (baseline, always available)
+
+    Returns:
+        Status of each extraction backend.
+    """
+    try:
+        from extraction import get_extraction_status
+        status = get_extraction_status()
+    except ImportError:
+        status = {
+            "docling": False,
+            "mathpix": False,
+            "pdfplumber": True,
+            "active_backend": "pdfplumber",
+        }
+
+    lines = ["**PDF Extraction Backends**\n"]
+    for backend, available in status.items():
+        if backend == "active_backend":
+            lines.append(f"  Active backend: {available}")
+        else:
+            icon = "AVAILABLE" if available else "not configured"
+            lines.append(f"  - {backend}: {icon}")
+
+    lines.append("\nSet EXTRACTION_BACKEND in .env to force a specific backend.")
+    lines.append("Install Docling: pip install docling")
+    lines.append("Configure Mathpix: set MATHPIX_APP_ID and MATHPIX_APP_KEY")
+
+    return "\n".join(lines)
+
+
 # ── Tool registry ─────────────────────────────────────────────────────
 
 BOOK_TOOLS = [
@@ -1456,4 +2378,10 @@ BOOK_TOOLS = [
     book_library,
     read_book_section,
     search_book_content,
+    unpaywall_lookup,
+    google_books_metadata,
+    crossref_citation_graph,
+    hathitrust_read,
+    internet_archive_download,
+    extraction_status,
 ]
