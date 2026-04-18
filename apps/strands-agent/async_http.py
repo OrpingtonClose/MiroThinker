@@ -134,7 +134,7 @@ async def async_get(
             if resp.status_code == 429:
                 retry_after = _parse_retry_after(resp)
                 if attempt < retries:
-                    wait = retry_after if retry_after is not None else min(2 ** attempt, 30)
+                    wait = min(retry_after, 120) if retry_after is not None else min(2 ** attempt, 30)
                     logger.info(
                         "Rate limited (429) on %s — waiting %.1fs (attempt %d/%d)",
                         url, wait, attempt + 1, retries,
@@ -224,7 +224,7 @@ async def async_head(
             if resp.status_code == 429:
                 retry_after = _parse_retry_after(resp)
                 if attempt < retries:
-                    wait = retry_after if retry_after is not None else min(2 ** attempt, 30)
+                    wait = min(retry_after, 120) if retry_after is not None else min(2 ** attempt, 30)
                     await asyncio.sleep(wait)
                     continue
                 resp.raise_for_status()
@@ -290,7 +290,7 @@ async def async_post(
             if resp.status_code == 429:
                 retry_after = _parse_retry_after(resp)
                 if attempt < retries:
-                    wait = retry_after if retry_after is not None else min(2 ** attempt, 30)
+                    wait = min(retry_after, 120) if retry_after is not None else min(2 ** attempt, 30)
                     logger.info("Rate limited (429) — waiting %.1fs", wait)
                     await asyncio.sleep(wait)
                     continue
