@@ -75,7 +75,7 @@ def build_model_with_selection(user_query: str):
     """
     from model_selector import SelectionResult, build_model_from_selection, select_model
 
-    selection_mode = os.environ.get("MODEL_SELECTION", "runtime")
+    selection_mode = os.environ.get("MODEL_SELECTION", "static")
     explicit_model = os.environ.get("VENICE_MODEL_OVERRIDE")
 
     if selection_mode != "runtime":
@@ -84,8 +84,16 @@ def build_model_with_selection(user_query: str):
 
     if explicit_model:
         logger.info("Model override: %s (skipping probe)", explicit_model)
-        os.environ["VENICE_MODEL"] = explicit_model
-        return build_model(), None
+        from strands.models.openai import OpenAIModel
+
+        api_key = os.environ.get("VENICE_API_KEY", "")
+        if not api_key:
+            raise RuntimeError("VENICE_API_KEY is not set.")
+        return OpenAIModel(
+            client_args={"api_key": api_key, "base_url": VENICE_API_BASE},
+            model_id=explicit_model,
+            params={"extra_body": {"venice_parameters": {"include_venice_system_prompt": False}}},
+        ), None
 
     logger.info("Runtime model selection — probing candidates...")
     selection = select_model(user_query)
