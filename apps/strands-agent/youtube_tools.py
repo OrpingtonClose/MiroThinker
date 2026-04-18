@@ -145,7 +145,9 @@ def _build_proxy_url() -> str | None:
     oxy_user = os.environ.get("OXYLABS_USERNAME", "")
     oxy_pass = os.environ.get("OXYLABS_PASSWORD", "")
     if oxy_user and oxy_pass:
-        return f"http://{oxy_user}:{oxy_pass}@pr.oxylabs.io:7777"
+        from urllib.parse import quote
+
+        return f"http://{quote(oxy_user, safe='')}:{quote(oxy_pass, safe='')}@pr.oxylabs.io:7777"
 
     return None
 
