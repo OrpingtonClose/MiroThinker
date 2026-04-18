@@ -75,11 +75,18 @@ def _get_client() -> httpx.AsyncClient:
 
 
 async def close_client() -> None:
-    """Close the shared client. Call during shutdown."""
+    """Close the shared client. Call during shutdown.
+
+    Thread-safe: acquires _client_lock to prevent races with _get_client().
+    Note: we set _client = None first under the lock, then aclose() outside
+    it so _get_client() callers get a fresh client rather than a closing one.
+    """
     global _client
-    if _client is not None and not _client.is_closed:
-        await _client.aclose()
+    with _client_lock:
+        client_to_close = _client
         _client = None
+    if client_to_close is not None and not client_to_close.is_closed:
+        await client_to_close.aclose()
 
 
 # ── Retry-aware request helpers ──────────────────────────────────────
