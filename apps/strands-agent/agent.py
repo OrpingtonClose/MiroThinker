@@ -33,6 +33,7 @@ from strands.handlers.callback_handler import (
     PrintingCallbackHandler,
 )
 from strands.agent.conversation_manager import SlidingWindowConversationManager
+from strands.types.agent import ConcurrentInvocationMode
 from strands.vended_plugins.skills import AgentSkills
 
 from config import build_model
@@ -426,7 +427,10 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
     if skills_plugin is not None:
         plugins.append(skills_plugin)
 
-    # Researcher: tool-capable agent that does the actual searching
+    # Researcher: tool-capable agent that does the actual searching.
+    # UNSAFE_REENTRANT allows the planner to dispatch multiple concurrent
+    # researcher calls (each handling a different sub-question).  Each call
+    # clears messages first so conversation state doesn't corrupt.
     researcher = Agent(
         model=model,
         system_prompt=RESEARCHER_PROMPT,
@@ -437,6 +441,7 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
         ),
         callback_handler=_build_callback_handler(),
         plugins=plugins or None,
+        concurrent_invocation_mode=ConcurrentInvocationMode.UNSAFE_REENTRANT,
     )
 
     # Planner: strategic agent that delegates to the researcher

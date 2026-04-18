@@ -181,11 +181,13 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown: close MCP connections (once)
+    # Shutdown: close MCP connections and async HTTP client
     from agent import _cleanup_mcp
+    from async_http import close_client
 
     _cleanup_mcp(_mcp_clients)
-    logger.info("MCP connections closed")
+    await close_client()
+    logger.info("MCP connections and async HTTP client closed")
 
 
 app = FastAPI(

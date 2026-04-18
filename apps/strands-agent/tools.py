@@ -36,12 +36,13 @@ import json
 import logging
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from pathlib import Path
 
 from mcp import StdioServerParameters
 from mcp.client.stdio import stdio_client
 from strands import tool
+from async_http import async_get, async_post
 from strands.tools.mcp import MCPClient
 
 logger = logging.getLogger(__name__)
@@ -94,7 +95,7 @@ def duckduckgo_search(query: str, max_results: int = 10) -> str:
 
 
 @tool
-def mojeek_search(query: str, max_results: int = 10) -> str:
+async def mojeek_search(query: str, max_results: int = 10) -> str:
     """Search using Mojeek's independent crawler. Not a Google/Bing proxy — unique results.
 
     Mojeek has its own crawler and index, so it surfaces content that other
@@ -107,13 +108,12 @@ def mojeek_search(query: str, max_results: int = 10) -> str:
     Returns:
         Formatted search results with titles, URLs, and descriptions.
     """
-    import httpx
 
     api_key = os.environ.get("MOJEEK_API_KEY", "")
     if not api_key:
         return "Mojeek API key not configured. Set MOJEEK_API_KEY in .env."
 
-    resp = httpx.get(
+    resp = await async_get(
         "https://api.mojeek.com/search",
         params={"q": query, "fmt": "json", "t": max_results, "api_key": api_key},
         timeout=30,
@@ -135,7 +135,7 @@ def mojeek_search(query: str, max_results: int = 10) -> str:
 
 
 @tool
-def stract_search(query: str, max_results: int = 10) -> str:
+async def stract_search(query: str, max_results: int = 10) -> str:
     """Search using Stract — an independent, open-source web search engine.
 
     Stract has its own crawler and index, completely independent from
@@ -149,10 +149,9 @@ def stract_search(query: str, max_results: int = 10) -> str:
     Returns:
         Formatted search results with titles, URLs, and snippets.
     """
-    import httpx
 
     try:
-        resp = httpx.post(
+        resp = await async_post(
             "https://stract.com/beta/api/search",
             json={"query": query, "numResults": max_results},
             timeout=30,
@@ -176,7 +175,7 @@ def stract_search(query: str, max_results: int = 10) -> str:
 
 
 @tool
-def yandex_search(query: str, max_results: int = 10) -> str:
+async def yandex_search(query: str, max_results: int = 10) -> str:
     """Search using Yandex — the dominant search engine in Eastern Europe and Russia.
 
     Yandex has its own crawler/index and is especially strong for results
@@ -191,7 +190,6 @@ def yandex_search(query: str, max_results: int = 10) -> str:
     Returns:
         Formatted search results with titles, URLs, and snippets.
     """
-    import httpx
 
     api_key = os.environ.get("YANDEX_SEARCH_API_KEY", "")
     folder_id = os.environ.get("YANDEX_FOLDER_ID", "")
@@ -202,7 +200,7 @@ def yandex_search(query: str, max_results: int = 10) -> str:
         )
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://searchapi.api.cloud.yandex.net/v2/web/searchAsync",
             params={
                 "query": query,
@@ -224,7 +222,7 @@ def yandex_search(query: str, max_results: int = 10) -> str:
 
                 for _ in range(10):
                     _time.sleep(1)
-                    poll_resp = httpx.get(
+                    poll_resp = await async_get(
                         f"https://operation.api.cloud.yandex.net/operations/{op_id}",
                         headers={"Authorization": f"Api-Key {api_key}"},
                         timeout=15,
@@ -288,7 +286,7 @@ def yandex_search(query: str, max_results: int = 10) -> str:
 
 
 @tool
-def jina_read_url(url: str) -> str:
+async def jina_read_url(url: str) -> str:
     """Extract clean text/markdown from any URL using Jina Reader.
 
     Converts web pages into clean, readable markdown. Fast and reliable
@@ -300,14 +298,13 @@ def jina_read_url(url: str) -> str:
     Returns:
         Clean markdown text extracted from the URL (truncated to 15000 chars).
     """
-    import httpx
 
     headers = {}
     api_key = os.environ.get("JINA_API_KEY", "")
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    resp = httpx.get(
+    resp = await async_get(
         f"https://r.jina.ai/{url}",
         headers=headers,
         timeout=30,
@@ -318,7 +315,7 @@ def jina_read_url(url: str) -> str:
 
 
 @tool
-def wayback_search(url: str, limit: int = 5) -> str:
+async def wayback_search(url: str, limit: int = 5) -> str:
     """Search the Wayback Machine (Internet Archive) for cached/archived pages.
 
     Use this to find pages that have been taken down, changed, or blocked.
@@ -332,11 +329,10 @@ def wayback_search(url: str, limit: int = 5) -> str:
     Returns:
         List of archived snapshots with timestamps and archive URLs.
     """
-    import httpx
 
     try:
         # CDX API for searching archived URLs
-        resp = httpx.get(
+        resp = await async_get(
             "https://web.archive.org/cdx/search/cdx",
             params={
                 "url": url,
@@ -374,7 +370,7 @@ def wayback_search(url: str, limit: int = 5) -> str:
 
 
 @tool
-def wayback_fetch(url: str, timestamp: str = "") -> str:
+async def wayback_fetch(url: str, timestamp: str = "") -> str:
     """Fetch an archived page from the Wayback Machine.
 
     Retrieves the content of a specific archived snapshot. Use wayback_search
@@ -388,7 +384,6 @@ def wayback_fetch(url: str, timestamp: str = "") -> str:
     Returns:
         The archived page content (truncated to 15000 chars).
     """
-    import httpx
 
     if timestamp:
         archive_url = f"https://web.archive.org/web/{timestamp}id_/{url}"
@@ -396,7 +391,7 @@ def wayback_fetch(url: str, timestamp: str = "") -> str:
         archive_url = f"https://web.archive.org/web/id_/{url}"
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             archive_url,
             timeout=30,
             follow_redirects=True,
@@ -408,7 +403,7 @@ def wayback_fetch(url: str, timestamp: str = "") -> str:
 
 
 @tool
-def archive_today_fetch(url: str) -> str:
+async def archive_today_fetch(url: str) -> str:
     """Fetch a cached page from archive.today (archive.ph).
 
     Alternative to the Wayback Machine. archive.today takes independent
@@ -424,12 +419,11 @@ def archive_today_fetch(url: str) -> str:
     Returns:
         The cached page content (truncated to 15000 chars), or error message.
     """
-    import httpx
 
     try:
         # archive.today's lookup endpoint — returns the most recent snapshot
         search_url = f"https://archive.ph/newest/{url}"
-        resp = httpx.get(
+        resp = await async_get(
             search_url,
             timeout=30,
             follow_redirects=True,
@@ -443,7 +437,7 @@ def archive_today_fetch(url: str) -> str:
 
 
 @tool
-def similar_sites_search(domain: str) -> str:
+async def similar_sites_search(domain: str) -> str:
     """Find websites similar to a given domain.
 
     Uses the SimilarSites API to discover competitor and related websites
@@ -457,7 +451,6 @@ def similar_sites_search(domain: str) -> str:
     Returns:
         List of similar/related domains with similarity scores.
     """
-    import httpx
 
     api_key = os.environ.get("SIMILARSITES_API_KEY", "")
     if not api_key:
@@ -468,7 +461,7 @@ def similar_sites_search(domain: str) -> str:
         )
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://similarsites.p.rapidapi.com/similarsites",
             params={"url": domain},
             headers={
@@ -503,7 +496,7 @@ def similar_sites_search(domain: str) -> str:
 
 
 @tool
-def google_search(query: str, max_results: int = 10) -> str:
+async def google_search(query: str, max_results: int = 10) -> str:
     """Search Google via Serper API. Powerful but censored — use as fallback.
 
     Only use this when uncensored sources (DuckDuckGo, Brave, Exa, Mojeek)
@@ -516,13 +509,12 @@ def google_search(query: str, max_results: int = 10) -> str:
     Returns:
         Formatted Google search results with titles, URLs, and snippets.
     """
-    import httpx
 
     api_key = os.environ.get("SERPER_API_KEY", "")
     if not api_key:
         return "Serper API key not configured. Set SERPER_API_KEY in .env."
 
-    resp = httpx.post(
+    resp = await async_post(
         "https://google.serper.dev/search",
         headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
         json={"q": query, "num": max_results},
@@ -550,7 +542,7 @@ def google_search(query: str, max_results: int = 10) -> str:
 
 
 @tool
-def perplexity_deep_research(query: str, model: str = "sonar-deep-research") -> str:
+async def perplexity_deep_research(query: str, model: str = "sonar-deep-research") -> str:
     """Run a deep research query via Perplexity's sonar-deep-research model.
 
     Perplexity performs autonomous multi-step web research and returns a
@@ -565,7 +557,6 @@ def perplexity_deep_research(query: str, model: str = "sonar-deep-research") -> 
     Returns:
         Research results with citations, or error message.
     """
-    import httpx
 
     api_key = os.environ.get("PERPLEXITY_API_KEY", "")
     if not api_key:
@@ -587,7 +578,7 @@ def perplexity_deep_research(query: str, model: str = "sonar-deep-research") -> 
     }
 
     try:
-        resp = httpx.post(
+        resp = await async_post(
             "https://api.perplexity.ai/chat/completions",
             json=payload,
             headers={
@@ -628,7 +619,7 @@ def perplexity_deep_research(query: str, model: str = "sonar-deep-research") -> 
 
 
 @tool
-def grok_deep_research(query: str, search_type: str = "both") -> str:
+async def grok_deep_research(query: str, search_type: str = "both") -> str:
     """Search the web and/or X/Twitter via Grok's Responses API.
 
     Grok performs autonomous web + X searches (5-15 per call) and returns
@@ -642,7 +633,6 @@ def grok_deep_research(query: str, search_type: str = "both") -> str:
     Returns:
         Formatted search results with citations, or error message.
     """
-    import httpx
 
     api_key = os.environ.get("XAI_API_KEY", "")
     if not api_key:
@@ -672,7 +662,7 @@ def grok_deep_research(query: str, search_type: str = "both") -> str:
     }
 
     try:
-        resp = httpx.post(
+        resp = await async_post(
             f"{api_base}/v1/responses",
             json=payload,
             headers={
@@ -740,7 +730,7 @@ def grok_deep_research(query: str, search_type: str = "both") -> str:
 
 
 @tool
-def tavily_deep_research(query: str, search_depth: str = "advanced") -> str:
+async def tavily_deep_research(query: str, search_depth: str = "advanced") -> str:
     """Run an advanced search via Tavily's search API.
 
     Tavily provides AI-optimised search results with extracted content.
@@ -754,7 +744,6 @@ def tavily_deep_research(query: str, search_depth: str = "advanced") -> str:
     Returns:
         Formatted search results with content extracts, or error message.
     """
-    import httpx
 
     api_key = os.environ.get("TAVILY_API_KEY", "")
     if not api_key:
@@ -770,7 +759,7 @@ def tavily_deep_research(query: str, search_depth: str = "advanced") -> str:
     }
 
     try:
-        resp = httpx.post(
+        resp = await async_post(
             "https://api.tavily.com/search",
             json=payload,
             timeout=120.0,
@@ -810,7 +799,7 @@ def tavily_deep_research(query: str, search_depth: str = "advanced") -> str:
 
 
 @tool
-def exa_multi_search(queries: str, num_results_per_query: int = 5) -> str:
+async def exa_multi_search(queries: str, num_results_per_query: int = 5) -> str:
     """Run multiple Exa searches in parallel and return unified results.
 
     Use this when you need to compare multiple topics simultaneously
@@ -825,7 +814,6 @@ def exa_multi_search(queries: str, num_results_per_query: int = 5) -> str:
     Returns:
         JSON object with per-query results and a unified source list.
     """
-    import httpx
 
     api_key = os.environ.get("EXA_API_KEY", "")
     if not api_key:
@@ -843,9 +831,9 @@ def exa_multi_search(queries: str, num_results_per_query: int = 5) -> str:
         return json.dumps({"error": "No queries provided. Pass a JSON array of search strings."})
     num_results_per_query = min(num_results_per_query, 8)
 
-    def _search_one(q: str) -> dict:
+    async def _search_one(q: str) -> dict:
         try:
-            resp = httpx.post(
+            resp = await async_post(
                 "https://api.exa.ai/search",
                 json={
                     "query": q,
@@ -869,11 +857,8 @@ def exa_multi_search(queries: str, num_results_per_query: int = 5) -> str:
         except Exception as exc:
             return {"query": q, "count": 0, "results": [], "error": str(exc)}
 
-    with ThreadPoolExecutor(max_workers=min(len(query_list), 5)) as pool:
-        futures = {pool.submit(_search_one, q): q for q in query_list}
-        raw_results = []
-        for future in as_completed(futures):
-            raw_results.append(future.result())
+    import asyncio
+    raw_results = list(await asyncio.gather(*[_search_one(q) for q in query_list]))
 
     # Sort to match original query order
     order = {q: i for i, q in enumerate(query_list)}

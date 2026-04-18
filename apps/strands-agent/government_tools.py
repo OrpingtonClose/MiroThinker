@@ -26,6 +26,7 @@ import logging
 import os
 
 from strands import tool
+from async_http import async_get
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 @tool
-def search_clinical_trials(
+async def search_clinical_trials(
     query: str,
     status: str = "",
     phase: str = "",
@@ -61,7 +62,6 @@ def search_clinical_trials(
     Returns:
         Formatted list of clinical trials with status, sponsor, and results.
     """
-    import httpx
 
     params: dict = {
         "query.term": query,
@@ -79,7 +79,7 @@ def search_clinical_trials(
         params["filter.advanced"] = f"AREA[Phase]{phase}"
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://clinicaltrials.gov/api/v2/studies",
             params=params,
             timeout=30,
@@ -154,7 +154,7 @@ def search_clinical_trials(
 
 
 @tool
-def get_trial_results(nct_id: str) -> str:
+async def get_trial_results(nct_id: str) -> str:
     """Get full results for a specific clinical trial by NCT ID.
 
     Args:
@@ -163,10 +163,9 @@ def get_trial_results(nct_id: str) -> str:
     Returns:
         Full trial details including results if posted.
     """
-    import httpx
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             f"https://clinicaltrials.gov/api/v2/studies/{nct_id}",
             params={"format": "json"},
             timeout=30,
@@ -248,7 +247,7 @@ def get_trial_results(nct_id: str) -> str:
 
 
 @tool
-def search_fda_adverse_events(
+async def search_fda_adverse_events(
     drug_name: str = "",
     reaction: str = "",
     max_results: int = 10,
@@ -269,7 +268,6 @@ def search_fda_adverse_events(
     Returns:
         Formatted list of adverse event reports.
     """
-    import httpx
 
     search_terms = []
     if drug_name:
@@ -285,7 +283,7 @@ def search_fda_adverse_events(
     search_query = "+AND+".join(search_terms)
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://api.fda.gov/drug/event.json",
             params={
                 "search": search_query,
@@ -352,7 +350,7 @@ def search_fda_adverse_events(
 
 
 @tool
-def search_fda_recalls(
+async def search_fda_recalls(
     query: str,
     max_results: int = 10,
 ) -> str:
@@ -365,10 +363,9 @@ def search_fda_recalls(
     Returns:
         Formatted list of FDA recalls with reasons and classifications.
     """
-    import httpx
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://api.fda.gov/drug/enforcement.json",
             params={
                 "search": query,
@@ -415,7 +412,7 @@ def search_fda_recalls(
 
 
 @tool
-def search_court_opinions(
+async def search_court_opinions(
     query: str,
     court: str = "",
     max_results: int = 10,
@@ -435,7 +432,6 @@ def search_court_opinions(
     Returns:
         Formatted list of court opinions with citations and links.
     """
-    import httpx
 
     params: dict = {
         "q": query,
@@ -451,7 +447,7 @@ def search_court_opinions(
         headers["Authorization"] = f"Token {courtlistener_token}"
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://www.courtlistener.com/api/rest/v4/search/",
             params=params,
             headers=headers,
@@ -498,7 +494,7 @@ def search_court_opinions(
 
 
 @tool
-def search_sec_filings(
+async def search_sec_filings(
     query: str = "",
     company: str = "",
     filing_type: str = "",
@@ -520,7 +516,6 @@ def search_sec_filings(
     Returns:
         Formatted list of SEC filings with links to full documents.
     """
-    import httpx
 
     # SEC requires User-Agent with contact email
     headers = {
@@ -538,7 +533,7 @@ def search_sec_filings(
     }
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://efts.sec.gov/LATEST/search-index",
             params=params,
             headers=headers,
@@ -546,7 +541,7 @@ def search_sec_filings(
         )
         if resp.status_code != 200:
             # Fallback to EDGAR full text search
-            resp = httpx.get(
+            resp = await async_get(
                 "https://efts.sec.gov/LATEST/search-index",
                 params={
                     "q": query or company,
@@ -562,7 +557,7 @@ def search_sec_filings(
     if company:
         try:
             # Search for company CIK
-            resp2 = httpx.get(
+            resp2 = await async_get(
                 "https://efts.sec.gov/LATEST/search-index",
                 params={"q": company, "forms": filing_type or "10-K"},
                 headers=headers,
@@ -580,7 +575,7 @@ def search_sec_filings(
             "from": 0,
             "size": min(max_results, 50),
         }
-        resp = httpx.get(
+        resp = await async_get(
             search_url,
             params=search_params,
             headers=headers,
@@ -609,7 +604,7 @@ def search_sec_filings(
 
     # Final fallback: use company tickers endpoint
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://www.sec.gov/cgi-bin/browse-edgar",
             params={
                 "action": "getcompany",
@@ -651,7 +646,7 @@ def search_sec_filings(
 
 
 @tool
-def search_offshore_leaks(
+async def search_offshore_leaks(
     query: str,
     max_results: int = 10,
 ) -> str:
@@ -668,10 +663,9 @@ def search_offshore_leaks(
     Returns:
         Matching offshore entities with jurisdictions and connections.
     """
-    import httpx
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://offshoreleaks.icij.org/api/v1/search",
             params={
                 "q": query,

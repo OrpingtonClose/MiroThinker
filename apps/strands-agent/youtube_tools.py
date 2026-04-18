@@ -28,6 +28,7 @@ import tempfile
 from pathlib import Path
 
 from strands import tool
+from async_http import async_get
 
 logger = logging.getLogger(__name__)
 
@@ -558,7 +559,7 @@ def youtube_bulk_transcribe(
 
 
 @tool
-def youtube_get_comments(
+async def youtube_get_comments(
     video_url: str,
     max_comments: int = 100,
     sort_by: str = "relevance",
@@ -586,7 +587,7 @@ def youtube_get_comments(
     # Try YouTube Data API first (faster, more reliable)
     api_key = os.environ.get("YOUTUBE_API_KEY", "")
     if api_key:
-        return _get_comments_api(video_id, max_comments, sort_by, api_key)
+        return await _get_comments_api(video_id, max_comments, sort_by, api_key)
 
     # Fall back to yt-dlp comment extraction
     if not _yt_dlp_available():
@@ -598,14 +599,13 @@ def youtube_get_comments(
     return _get_comments_ytdlp(video_id, max_comments, sort_by)
 
 
-def _get_comments_api(
+async def _get_comments_api(
     video_id: str,
     max_comments: int,
     sort_by: str,
     api_key: str,
 ) -> str:
     """Extract comments via YouTube Data API v3."""
-    import httpx
 
     order = "relevance" if sort_by == "relevance" else "time"
     comments = []
@@ -624,7 +624,7 @@ def _get_comments_api(
             params["pageToken"] = next_page
 
         try:
-            resp = httpx.get(
+            resp = await async_get(
                 "https://www.googleapis.com/youtube/v3/commentThreads",
                 params=params,
                 timeout=30,

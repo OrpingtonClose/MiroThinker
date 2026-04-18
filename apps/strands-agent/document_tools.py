@@ -36,6 +36,7 @@ import tempfile
 from pathlib import Path
 
 from strands import tool
+from async_http import async_get, async_post
 
 logger = logging.getLogger(__name__)
 
@@ -86,12 +87,11 @@ def _extract_text_from_pdf(pdf_bytes: bytes, max_pages: int = 50) -> str:
     return "\n\n".join(pages) if pages else "[No text extracted from PDF]"
 
 
-def _resolve_doi(doi: str) -> dict | None:
+async def _resolve_doi(doi: str) -> dict | None:
     """Resolve a DOI to metadata via CrossRef API."""
-    import httpx
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             f"https://api.crossref.org/works/{doi}",
             headers={"User-Agent": "MiroThinker/1.0 (research agent)"},
             timeout=30,
@@ -123,7 +123,7 @@ def _resolve_doi(doi: str) -> dict | None:
 
 
 @tool
-def search_open_access(
+async def search_open_access(
     query: str,
     source: str = "all",
     max_results: int = 10,
@@ -144,14 +144,13 @@ def search_open_access(
     Returns:
         Formatted list of papers with metadata and download links.
     """
-    import httpx
 
     results = []
 
     # OpenAlex — free, comprehensive, 250M+ works
     if source in ("all", "openalex"):
         try:
-            resp = httpx.get(
+            resp = await async_get(
                 "https://api.openalex.org/works",
                 params={
                     "search": query,
@@ -189,7 +188,7 @@ def search_open_access(
     # CrossRef — 150M+ works, best for DOI-based lookup
     if source in ("all", "crossref"):
         try:
-            resp = httpx.get(
+            resp = await async_get(
                 "https://api.crossref.org/works",
                 params={
                     "query": query,
@@ -264,7 +263,7 @@ def search_open_access(
 
 
 @tool
-def download_paper(
+async def download_paper(
     url: str,
     title: str = "",
     doi: str = "",
@@ -289,7 +288,6 @@ def download_paper(
     Returns:
         Extracted text from the paper (first 50 pages).
     """
-    import httpx
 
     # Check cache first
     try:
@@ -308,7 +306,7 @@ def download_paper(
     # Resolve DOI for metadata
     metadata = {}
     if doi:
-        resolved = _resolve_doi(doi)
+        resolved = await _resolve_doi(doi)
         if resolved:
             metadata = resolved
             if not title:
@@ -321,7 +319,7 @@ def download_paper(
 
     # Download the document
     try:
-        resp = httpx.get(
+        resp = await async_get(
             url,
             headers={
                 "User-Agent": "MiroThinker/1.0 (research agent)",
@@ -409,7 +407,7 @@ def download_paper(
 
 
 @tool
-def annas_archive_search(
+async def annas_archive_search(
     query: str,
     content_type: str = "book_any",
     max_results: int = 10,
@@ -437,7 +435,6 @@ def annas_archive_search(
     Returns:
         Formatted list of results with metadata and links.
     """
-    import httpx
 
     # Anna's Archive search URL
     base_url = "https://annas-archive.org/search"
@@ -456,7 +453,7 @@ def annas_archive_search(
     search_url = f"{base_url}?q={query}{content_filter}"
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             search_url,
             headers={
                 "User-Agent": (
@@ -571,7 +568,7 @@ def _parse_annas_archive_html(html: str, max_results: int) -> list[dict]:
 
 
 @tool
-def resolve_doi_metadata(doi: str) -> str:
+async def resolve_doi_metadata(doi: str) -> str:
     """Resolve a DOI to full paper metadata via CrossRef.
 
     Given a DOI (e.g. "10.1038/s41586-023-06647-8"), returns:
@@ -590,7 +587,7 @@ def resolve_doi_metadata(doi: str) -> str:
     doi = doi.strip()
     doi = re.sub(r"^https?://doi\.org/", "", doi)
 
-    resolved = _resolve_doi(doi)
+    resolved = await _resolve_doi(doi)
     if not resolved:
         return f"Could not resolve DOI: {doi}"
 
@@ -616,7 +613,7 @@ def resolve_doi_metadata(doi: str) -> str:
 
 
 @tool
-def extract_pdf_text(
+async def extract_pdf_text(
     url: str,
     max_pages: int = 50,
 ) -> str:
@@ -632,7 +629,6 @@ def extract_pdf_text(
     Returns:
         Extracted text from the PDF.
     """
-    import httpx
 
     # Check cache
     try:
@@ -648,7 +644,7 @@ def extract_pdf_text(
         pass
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             url,
             headers={"User-Agent": "MiroThinker/1.0 (research agent)"},
             timeout=60,
@@ -688,7 +684,7 @@ def extract_pdf_text(
 
 
 @tool
-def semantic_scholar_search(
+async def semantic_scholar_search(
     query: str,
     max_results: int = 10,
     year_range: str = "",
@@ -712,7 +708,6 @@ def semantic_scholar_search(
     Returns:
         Formatted list of papers with metadata and links.
     """
-    import httpx
 
     headers = {"User-Agent": "MiroThinker/1.0 (research agent)"}
     if SEMANTIC_SCHOLAR_API_KEY:
@@ -729,7 +724,7 @@ def semantic_scholar_search(
         params["fieldsOfStudy"] = fields_of_study
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://api.semanticscholar.org/graph/v1/paper/search",
             headers=headers,
             params=params,
@@ -791,7 +786,7 @@ def semantic_scholar_search(
 
 
 @tool
-def semantic_scholar_recommend(
+async def semantic_scholar_recommend(
     paper_id: str,
     max_results: int = 10,
 ) -> str:
@@ -809,14 +804,13 @@ def semantic_scholar_recommend(
     Returns:
         Recommended papers with similarity scores.
     """
-    import httpx
 
     headers = {"User-Agent": "MiroThinker/1.0 (research agent)"}
     if SEMANTIC_SCHOLAR_API_KEY:
         headers["x-api-key"] = SEMANTIC_SCHOLAR_API_KEY
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             f"https://api.semanticscholar.org/recommendations/v1/papers/forpaper/{paper_id}",
             headers=headers,
             params={
@@ -865,7 +859,7 @@ def semantic_scholar_recommend(
 
 
 @tool
-def search_core(
+async def search_core(
     query: str,
     max_results: int = 10,
     year_from: int = 0,
@@ -890,7 +884,6 @@ def search_core(
     Returns:
         Formatted list of papers with metadata and download links.
     """
-    import httpx
 
     if not CORE_API_KEY:
         return (
@@ -918,7 +911,7 @@ def search_core(
         body["q"] = f"({body['q']}) AND _exists_:fullText"
 
     try:
-        resp = httpx.post(
+        resp = await async_post(
             "https://api.core.ac.uk/v3/search/works",
             headers=headers,
             json=body,
@@ -969,7 +962,7 @@ def search_core(
 
 
 @tool
-def search_springer(
+async def search_springer(
     query: str,
     max_results: int = 10,
     content_type: str = "all",
@@ -992,7 +985,6 @@ def search_springer(
     Returns:
         Formatted list of articles/chapters with metadata.
     """
-    import httpx
 
     if not SPRINGER_API_KEY:
         return (
@@ -1016,7 +1008,7 @@ def search_springer(
         params["q"] += f' type:{content_type}'
 
     try:
-        resp = httpx.get(api_url, params=params, timeout=30)
+        resp = await async_get(api_url, params=params, timeout=30)
         if resp.status_code == 403:
             return "[TOOL_ERROR] Springer API key invalid or quota exceeded."
         resp.raise_for_status()
@@ -1072,7 +1064,7 @@ def search_springer(
 
 
 @tool
-def search_zenodo(
+async def search_zenodo(
     query: str,
     max_results: int = 10,
     resource_type: str = "",
@@ -1095,7 +1087,6 @@ def search_zenodo(
     Returns:
         Formatted list of Zenodo records with download links.
     """
-    import httpx
 
     params = {
         "q": query,
@@ -1110,7 +1101,7 @@ def search_zenodo(
         headers["Authorization"] = f"Bearer {ZENODO_ACCESS_TOKEN}"
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://zenodo.org/api/records",
             params=params,
             headers=headers,
