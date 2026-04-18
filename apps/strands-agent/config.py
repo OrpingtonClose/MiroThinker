@@ -71,7 +71,7 @@ def build_model_with_selection(user_query: str):
 
     Falls back to static ``build_model()`` if:
       - ``MODEL_SELECTION`` env var is not ``runtime``
-      - ``VENICE_MODEL`` is explicitly set (user override)
+      - ``VENICE_MODEL_OVERRIDE`` is explicitly set (user override)
     """
     from model_selector import SelectionResult, build_model_from_selection, select_model
 
