@@ -75,6 +75,14 @@ SCIHUB_DOMAINS = [
     "https://sci-hub.ru",
 ]
 
+# Z-Library domains — FBI-seized, operates via Tor and rotating clearnet mirrors
+ZLIB_DOMAINS = [
+    os.environ.get("ZLIB_DOMAIN", "https://z-lib.gs"),
+    "https://z-lib.fm",
+    "https://z-lib.id",
+    "https://singlelogin.re",
+]
+
 # ── Proxy configuration ───────────────────────────────────────────────
 # Bright Data and Oxylabs provide residential proxies that bypass cloud IP
 # blocks on LibGen, Anna's Archive, Sci-Hub, etc.
@@ -812,6 +820,88 @@ def _search_annas_archive(query: str, max_results: int = 10,
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# SOURCE 3b: Z-LIBRARY (books Anna's Archive may not have)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _search_zlibrary(query: str, max_results: int = 10) -> list[dict]:
+    """Search Z-Library via HTML scraping.
+
+    Z-Library has books that Anna's Archive doesn't — especially recent
+    publications and niche academic texts. FBI-seized but operates via
+    rotating clearnet mirrors and Tor.
+
+    Tries direct connection first, then retries with proxy if available.
+    """
+    import httpx
+
+    results = []
+
+    for use_proxy in ([False, True] if _has_proxy() else [False]):
+        for domain in ZLIB_DOMAINS:
+            try:
+                search_url = f"{domain}/s/{quote_plus(query)}"
+
+                with _get_http_client(timeout=45 if use_proxy else 30,
+                                      use_proxy=use_proxy) as client:
+                    resp = client.get(search_url, follow_redirects=True)
+
+                if resp.status_code != 200:
+                    continue
+
+                html = resp.text
+
+                # Z-Library uses /book/ links for results
+                book_pattern = re.compile(
+                    r'href="(/book/\d+/[^"]*)"[^>]*>.*?'
+                    r'(?:class="bookTitle"[^>]*>|itemprop="name"[^>]*>)(.*?)</(?:a|h3)',
+                    re.DOTALL | re.IGNORECASE,
+                )
+                matches = book_pattern.findall(html)
+
+                if not matches:
+                    # Simpler fallback pattern
+                    matches = re.findall(
+                        r'href="(/book/\d+/[^"]*)"[^>]*>(.*?)</a>',
+                        html,
+                    )
+
+                seen_urls = set()
+                for book_path, title_html in matches:
+                    if book_path in seen_urls:
+                        continue
+                    seen_urls.add(book_path)
+
+                    title = _strip_html(title_html).strip()
+                    if not title or len(title) < 3:
+                        continue
+
+                    results.append({
+                        "title": title[:300],
+                        "url": f"{domain}{book_path}",
+                        "source": "Z-Library",
+                    })
+
+                    if len(results) >= max_results:
+                        break
+
+                if results:
+                    if use_proxy:
+                        logger.info("Z-Library search succeeded via proxy (%s)", domain)
+                    return results
+
+            except Exception as exc:
+                logger.debug("Z-Library %s failed (%s): %s",
+                             domain, "proxy" if use_proxy else "direct", exc)
+                continue
+
+        if results:
+            break
+
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # SOURCE 4: SCI-HUB (DOI → PDF)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -1181,10 +1271,10 @@ def search_books(
 ) -> str:
     """Search for books, textbooks, and documents across multiple sources.
 
-    Searches up to 9 sources simultaneously: Open Library, Library Genesis,
-    Anna's Archive, Project Gutenberg, Google Books, ISBNdb, HathiTrust,
-    and Internet Archive. Returns unified results with metadata and
-    download availability.
+    Searches up to 10 sources simultaneously: Open Library, Library Genesis,
+    Anna's Archive, Z-Library, Project Gutenberg, Google Books, ISBNdb,
+    HathiTrust, and Internet Archive. Returns unified results with metadata
+    and download availability.
 
     Use this to find books for documentary research, knowledge base
     construction, or any task requiring deep reading.
@@ -1192,7 +1282,7 @@ def search_books(
     Args:
         query: Search query — title, author, ISBN, topic, etc.
         sources: Which sources to search: "all", "openlibrary", "libgen",
-                 "annas", "gutenberg", "googlebooks", "isbndb",
+                 "annas", "zlibrary", "gutenberg", "googlebooks", "isbndb",
                  "hathitrust", "internetarchive".
                  Comma-separated for multiple (default "all").
         max_results: Maximum results per source (default 10).
@@ -1225,6 +1315,13 @@ def search_books(
             all_results.extend(aa_results)
         except Exception as exc:
             logger.debug("Anna's Archive search error: %s", exc)
+
+    if search_all or "zlibrary" in source_list or "zlib" in source_list:
+        try:
+            zl_results = _search_zlibrary(query, max_results)
+            all_results.extend(zl_results)
+        except Exception as exc:
+            logger.debug("Z-Library search error: %s", exc)
 
     if search_all or "gutenberg" in source_list:
         try:
