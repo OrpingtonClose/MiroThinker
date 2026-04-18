@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote, quote_plus, urljoin
 
+import httpx
 from strands import tool
 from async_http import async_get
 
