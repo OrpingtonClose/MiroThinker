@@ -1071,29 +1071,30 @@ def _search_hathitrust(query: str, max_results: int = 10) -> list[dict]:
 
         data = resp.json()
 
-        # Handle brief/volumes response
-        if "items" in data:
-            for item_id, info in list(data.get("items", {}).items())[:max_results]:
-                records = info.get("records", {})
-                for rec_id, rec in records.items():
-                    ht_items = info.get("items", [])
-                    has_fulltext = any(
-                        i.get("usRightsString", "") == "Full view"
-                        for i in ht_items
-                    )
-                    first_item = ht_items[0] if ht_items else {}
+        # Handle brief/volumes response — items is a LIST, records is a DICT
+        records_dict = data.get("records", {})
+        items_list = data.get("items", [])
+        if isinstance(items_list, list) and items_list:
+            for item in items_list[:max_results]:
+                htid = item.get("htid", "")
+                from_record = item.get("fromRecord", "")
+                rec = records_dict.get(from_record, {}) if from_record else {}
+                has_fulltext = item.get("usRightsString", "") == "Full view"
 
-                    results.append({
-                        "title": " ".join(rec.get("titles", ["Unknown"])),
-                        "authors": rec.get("authors", {}).keys() if isinstance(rec.get("authors"), dict) else [],
-                        "year": rec.get("publishDates", [""])[0] if rec.get("publishDates") else "",
-                        "isbn": rec.get("isbns", [""])[0] if rec.get("isbns") else "",
-                        "has_fulltext": has_fulltext,
-                        "ht_id": first_item.get("htid", ""),
-                        "rights": first_item.get("usRightsString", ""),
-                        "url": f"https://babel.hathitrust.org/cgi/pt?id={first_item.get('htid', '')}",
-                        "source": "HathiTrust",
-                    })
+                authors_raw = rec.get("authors", {})
+                author_list = list(authors_raw.keys()) if isinstance(authors_raw, dict) else []
+
+                results.append({
+                    "title": " ".join(rec.get("titles", ["Unknown"])),
+                    "authors": author_list,
+                    "year": rec.get("publishDates", [""])[0] if rec.get("publishDates") else "",
+                    "isbn": rec.get("isbns", [""])[0] if rec.get("isbns") else "",
+                    "has_fulltext": has_fulltext,
+                    "ht_id": htid,
+                    "rights": item.get("usRightsString", ""),
+                    "url": f"https://babel.hathitrust.org/cgi/pt?id={htid}",
+                    "source": "HathiTrust",
+                })
         # Handle search response
         elif isinstance(data, list):
             for item in data[:max_results]:
@@ -2068,8 +2069,9 @@ def crossref_citation_graph(
                     for i, item in enumerate(citing_items[:max_refs], 1):
                         c_title = " ".join(item.get("title", ["?"]))[:120]
                         c_doi = item.get("DOI", "")
-                        c_year = str(item.get("published-print", item.get("published-online", {}))
-                                     .get("date-parts", [[""]])[0][0])
+                        c_pub = item.get("published-print") or item.get("published-online") or {}
+                        c_year_parts = c_pub.get("date-parts", [[""]])
+                        c_year = str(c_year_parts[0][0]) if c_year_parts and c_year_parts[0] else ""
                         c_cited = item.get("is-referenced-by-count", 0)
                         lines.append(f"  {i}. ({c_year}) {c_title} [cited by {c_cited}] DOI:{c_doi}")
         except Exception:
