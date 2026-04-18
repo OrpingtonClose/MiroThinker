@@ -528,11 +528,7 @@ def _transcriptapi_search(query: str, max_results: int) -> str | None:
             channel = v.get("channel", v.get("author", ""))
             duration = v.get("duration", v.get("length", ""))
             views = v.get("views", v.get("view_count", ""))
-            pub = (
-                v.get("published", v.get("upload_date", ""))[:10]
-                if v.get("published") or v.get("upload_date")
-                else ""
-            )
+            pub = (v.get("published", v.get("upload_date", "")) or "")[:10]
             meta_parts = []
             if channel:
                 meta_parts.append(channel)
