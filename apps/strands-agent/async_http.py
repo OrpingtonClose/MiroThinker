@@ -44,7 +44,6 @@ _TIMEOUT = httpx.Timeout(
 
 _HEADERS = {
     "User-Agent": _USER_AGENT,
-    "Accept": "application/json",
 }
 
 # Module-level client — created lazily on first use.
