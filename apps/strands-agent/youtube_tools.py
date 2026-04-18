@@ -500,7 +500,7 @@ def _transcriptapi_search(query: str, max_results: int) -> str | None:
     try:
         resp = httpx.get(
             "https://transcriptapi.com/api/v2/youtube/search",
-            params={"query": query, "limit": max_results},
+            params={"q": query, "limit": max_results},
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=30,
         )
@@ -523,12 +523,15 @@ def _transcriptapi_search(query: str, max_results: int) -> str | None:
             f"YouTube search results for '{query}' ({len(videos)} found, via TranscriptAPI):\n"
         ]
         for i, v in enumerate(videos[:max_results], 1):
-            vid = v.get("video_id", v.get("id", "???"))
+            vid = v.get("videoId", v.get("video_id", v.get("id", "???")))
             title = v.get("title", "Unknown")[:80]
-            channel = v.get("channel", v.get("author", ""))
-            duration = v.get("duration", v.get("length", ""))
-            views = v.get("views", v.get("view_count", ""))
-            pub = (v.get("published", v.get("upload_date", "")) or "")[:10]
+            channel = v.get("channelTitle", v.get("channel", v.get("author", "")))
+            duration = v.get("lengthText", v.get("duration", v.get("length", "")))
+            views = v.get("viewCountText", v.get("views", v.get("view_count", "")))
+            pub = (
+                v.get("publishedTimeText", v.get("published", v.get("upload_date", "")))
+                or ""
+            )[:20]
             meta_parts = []
             if channel:
                 meta_parts.append(channel)
@@ -642,7 +645,7 @@ def youtube_channel_search(
                 "https://transcriptapi.com/api/v2/youtube/channel/search",
                 params={
                     "channel": channel_id,
-                    "query": query,
+                    "q": query,
                     "limit": max_results,
                 },
                 headers={"Authorization": f"Bearer {api_key}"},
@@ -662,10 +665,18 @@ def youtube_channel_search(
                         f"Channel search '{query}' in {channel_id} ({len(videos)} found):\n"
                     ]
                     for i, v in enumerate(videos[:max_results], 1):
-                        vid = v.get("video_id", v.get("id", "???"))
+                        vid = v.get("videoId", v.get("video_id", v.get("id", "???")))
                         title = v.get("title", "Unknown")[:80]
-                        duration = v.get("duration", v.get("length", ""))
-                        pub = (v.get("published", v.get("upload_date", "")) or "")[:10]
+                        duration = v.get(
+                            "lengthText", v.get("duration", v.get("length", ""))
+                        )
+                        pub = (
+                            v.get(
+                                "publishedTimeText",
+                                v.get("published", v.get("upload_date", "")),
+                            )
+                            or ""
+                        )[:20]
                         meta_parts = []
                         if duration:
                             meta_parts.append(str(duration))
@@ -1074,10 +1085,13 @@ def _transcriptapi_channel_list(channel_id: str, max_videos: int) -> str | None:
             f"Channel videos for {channel_id} ({len(videos)} found, via TranscriptAPI):\n"
         ]
         for i, v in enumerate(videos[:max_videos], 1):
-            vid = v.get("video_id", v.get("id", "???"))
+            vid = v.get("videoId", v.get("video_id", v.get("id", "???")))
             title = v.get("title", "Unknown")[:80]
-            duration = v.get("duration", v.get("length", ""))
-            pub = (v.get("published", v.get("upload_date", "")) or "")[:10]
+            duration = v.get("lengthText", v.get("duration", v.get("length", "")))
+            pub = (
+                v.get("publishedTimeText", v.get("published", v.get("upload_date", "")))
+                or ""
+            )[:20]
             meta_parts = []
             if duration:
                 meta_parts.append(str(duration))
