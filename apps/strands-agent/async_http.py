@@ -109,7 +109,7 @@ async def async_get(
     client = _get_client()
     retries = max_retries if max_retries is not None else _MAX_RETRIES
     request_timeout = (
-        httpx.Timeout(connect=_CONNECT_TIMEOUT, read=timeout, write=30.0, pool=10.0)
+        httpx.Timeout(connect=min(_CONNECT_TIMEOUT, timeout), read=timeout, write=30.0, pool=10.0)
         if timeout is not None
         else _TIMEOUT
     )
@@ -204,7 +204,7 @@ async def async_head(
     client = _get_client()
     retries = max_retries if max_retries is not None else _MAX_RETRIES
     request_timeout = (
-        httpx.Timeout(connect=_CONNECT_TIMEOUT, read=timeout, write=30.0, pool=10.0)
+        httpx.Timeout(connect=min(_CONNECT_TIMEOUT, timeout), read=timeout, write=30.0, pool=10.0)
         if timeout is not None
         else _TIMEOUT
     )
@@ -265,7 +265,7 @@ async def async_post(
     client = _get_client()
     retries = max_retries if max_retries is not None else _MAX_RETRIES
     request_timeout = (
-        httpx.Timeout(connect=_CONNECT_TIMEOUT, read=timeout, write=30.0, pool=10.0)
+        httpx.Timeout(connect=min(_CONNECT_TIMEOUT, timeout), read=timeout, write=30.0, pool=10.0)
         if timeout is not None
         else _TIMEOUT
     )
