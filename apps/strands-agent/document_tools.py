@@ -914,6 +914,9 @@ def search_core(
             year_filter += f"yearPublished<={year_to}"
         body["q"] = f"({query}) AND ({year_filter})"
 
+    if full_text:
+        body["q"] = f"({body['q']}) AND _exists_:fullText"
+
     try:
         resp = httpx.post(
             "https://api.core.ac.uk/v3/search/works",
