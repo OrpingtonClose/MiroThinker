@@ -1277,8 +1277,13 @@ def _clean_srt(srt_text: str) -> str:
 def _get_video_title(url: str) -> str:
     """Get video title via yt-dlp."""
     try:
+        cmd = ["yt-dlp", "--get-title", "--no-playlist"]
+        proxy_url = _build_proxy_url()
+        if proxy_url:
+            cmd.extend(["--proxy", proxy_url])
+        cmd.append(url)
         result = subprocess.run(
-            ["yt-dlp", "--get-title", "--no-playlist", url],
+            cmd,
             capture_output=True,
             text=True,
             timeout=30,
