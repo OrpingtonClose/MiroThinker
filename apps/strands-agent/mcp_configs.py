@@ -210,14 +210,442 @@ def docling_mcp_config() -> dict:
     }
 
 
+def onionclaw_mcp_config() -> dict:
+    """Configuration for ASpirin01/onionclaw-mcp (Dark Web OSINT).
+
+    18 dark web search engines + Tor access + Robin OSINT pipeline +
+    4 LLM analysis modes. Enables research into content removed from
+    clearnet, whistleblower documents, and censored information.
+
+    Install: pip install onionclaw-mcp
+    Requires: Tor running locally (apt install tor && systemctl start tor)
+
+    Returns:
+        MCP server configuration dict.
+    """
+    return {
+        "name": "onionclaw-mcp",
+        "description": "Dark web OSINT — 18 search engines, Tor access, Robin pipeline, LLM analysis",
+        "install": "pip install onionclaw-mcp",
+        "repo": "https://github.com/ASpirin01/onionclaw-mcp",
+        "command": "python",
+        "args": ["-m", "onionclaw_mcp"],
+        "env": {},
+        "tools": [
+            "search_onion", "fetch_onion_page", "robin_pipeline",
+            "analyze_content", "search_ahmia", "search_torch",
+        ],
+    }
+
+
+def onion_search_mcp_config() -> dict:
+    """Configuration for Onion Search MCP (anonymous Tor browsing).
+
+    Anonymous browsing with universal browser fingerprint. Searches .onion
+    sites and routes traffic through Tor for censorship circumvention.
+
+    Install: pip install onion-search-mcp
+
+    Returns:
+        MCP server configuration dict.
+    """
+    return {
+        "name": "onion-search-mcp",
+        "description": "Anonymous Tor browsing — universal fingerprint, .onion search",
+        "install": "pip install onion-search-mcp",
+        "repo": "https://github.com/nicholasgriffintn/onion-search-mcp",
+        "command": "python",
+        "args": ["-m", "onion_search_mcp"],
+        "env": {},
+        "tools": [
+            "search_onion_sites", "browse_onion", "check_tor_status",
+        ],
+    }
+
+
+def osint_mcp_config() -> dict:
+    """Configuration for badchars/osint-mcp (37 OSINT tools).
+
+    Shodan, VirusTotal, Censys, SecurityTrails, DNS, WHOIS, certificate
+    transparency, BGP, Wayback Machine, GeoIP. Comprehensive OSINT toolkit.
+
+    Install: pip install osint-mcp
+
+    Returns:
+        MCP server configuration dict.
+    """
+    return {
+        "name": "osint-mcp",
+        "description": "OSINT toolkit — Shodan, VirusTotal, Censys, DNS, WHOIS, cert transparency",
+        "install": "pip install osint-mcp",
+        "repo": "https://github.com/badchars/osint-mcp",
+        "command": "python",
+        "args": ["-m", "osint_mcp"],
+        "env": {
+            "SHODAN_API_KEY": os.getenv("SHODAN_API_KEY", ""),
+            "VIRUSTOTAL_API_KEY": os.getenv("VIRUSTOTAL_API_KEY", ""),
+            "CENSYS_API_ID": os.getenv("CENSYS_API_ID", ""),
+            "CENSYS_API_SECRET": os.getenv("CENSYS_API_SECRET", ""),
+            "SECURITYTRAILS_API_KEY": os.getenv("SECURITYTRAILS_API_KEY", ""),
+        },
+        "tools": [
+            "shodan_search", "virustotal_scan", "censys_search",
+            "dns_lookup", "whois_lookup", "cert_transparency",
+            "bgp_lookup", "geoip_lookup",
+        ],
+    }
+
+
+def osint_intelligence_mcp_config() -> dict:
+    """Configuration for OSINT Intelligence Platform (Telegram archive intelligence).
+
+    65 tools for Telegram channel/group intelligence, message analysis,
+    and social media OSINT. Useful for monitoring censored communications.
+
+    Install: pip install osint-intelligence-mcp
+
+    Returns:
+        MCP server configuration dict.
+    """
+    return {
+        "name": "osint-intelligence-mcp",
+        "description": "Telegram OSINT — 65 tools for channel/group intelligence and analysis",
+        "install": "pip install osint-intelligence-mcp",
+        "repo": "https://github.com/shaga/osint-intelligence-mcp",
+        "command": "python",
+        "args": ["-m", "osint_intelligence_mcp"],
+        "env": {
+            "TELEGRAM_API_ID": os.getenv("TELEGRAM_API_ID", ""),
+            "TELEGRAM_API_HASH": os.getenv("TELEGRAM_API_HASH", ""),
+        },
+        "tools": [
+            "search_telegram_channels", "get_channel_messages",
+            "analyze_channel", "search_messages",
+        ],
+    }
+
+
+def osint_tools_mcp_config() -> dict:
+    """Configuration for OSINT Tools MCP (Sherlock, SpiderFoot, Holehe).
+
+    Username OSINT (Sherlock), reconnaissance (SpiderFoot), and email
+    intelligence (Holehe). 183+ stars on GitHub.
+
+    Install: pip install osint-tools-mcp
+
+    Returns:
+        MCP server configuration dict.
+    """
+    return {
+        "name": "osint-tools-mcp",
+        "description": "OSINT tools — Sherlock username search, SpiderFoot recon, Holehe email",
+        "install": "pip install osint-tools-mcp",
+        "repo": "https://github.com/pab47/osint-tools-mcp",
+        "command": "python",
+        "args": ["-m", "osint_tools_mcp"],
+        "env": {},
+        "tools": [
+            "sherlock_search", "spiderfoot_scan", "holehe_check",
+        ],
+    }
+
+
+def scholar_mcp_config() -> dict:
+    """Configuration for Scholar MCP (fused multi-source academic search).
+
+    Fused search across 6+ academic sources with ~97% literature coverage.
+    Includes optional Sci-Hub integration for full-text access.
+
+    Install: pip install scholar-mcp
+
+    Returns:
+        MCP server configuration dict.
+    """
+    return {
+        "name": "scholar-mcp",
+        "description": "Fused academic search — 6+ sources, ~97% coverage, optional Sci-Hub",
+        "install": "pip install scholar-mcp",
+        "repo": "https://github.com/andybrandt/mcp-scholar",
+        "command": "python",
+        "args": ["-m", "scholar_mcp"],
+        "env": {},
+        "tools": [
+            "search_papers", "get_paper_details", "get_citations",
+            "get_references", "download_paper",
+        ],
+    }
+
+
+def pubmed_search_mcp_config() -> dict:
+    """Configuration for PubMed Search MCP (42 tools).
+
+    Comprehensive biomedical search across PubMed, Europe PMC, CORE,
+    OpenAlex, NCBI databases, and open-access figures. 42 tools total.
+
+    Install: pip install pubmed-search-mcp
+
+    Returns:
+        MCP server configuration dict.
+    """
+    return {
+        "name": "pubmed-search-mcp",
+        "description": "PubMed + Europe PMC + CORE + OpenAlex + NCBI + OA figures (42 tools)",
+        "install": "pip install pubmed-search-mcp",
+        "repo": "https://github.com/pleomax0730/pubmed-search-mcp",
+        "command": "python",
+        "args": ["-m", "pubmed_search_mcp"],
+        "env": {
+            "NCBI_API_KEY": os.getenv("NCBI_API_KEY", ""),
+        },
+        "tools": [
+            "search_pubmed", "get_article", "search_europe_pmc",
+            "search_core", "search_openalex", "get_oa_figures",
+        ],
+    }
+
+
+def wikidata_mcp_config() -> dict:
+    """Configuration for official Wikidata MCP (Wikimedia Foundation).
+
+    100M+ structured entities, SPARQL queries, entity lookup.
+    Official MCP server from Wikimedia.
+
+    Install: pip install wikidata-mcp
+
+    Returns:
+        MCP server configuration dict.
+    """
+    return {
+        "name": "wikidata-mcp",
+        "description": "Wikidata — 100M+ structured entities, SPARQL, official Wikimedia MCP",
+        "install": "pip install wikidata-mcp",
+        "repo": "https://github.com/wikimedia/wikidata-mcp",
+        "command": "python",
+        "args": ["-m", "wikidata_mcp"],
+        "env": {},
+        "tools": [
+            "search_entities", "get_entity", "sparql_query",
+            "get_claims", "get_sitelinks",
+        ],
+    }
+
+
+def wayback_mcp_config() -> dict:
+    """Configuration for Wayback Machine MCP (Internet Archive).
+
+    Recover censored/deleted web content. Search and retrieve archived
+    web pages from the Internet Archive's Wayback Machine.
+
+    Install: pip install wayback-mcp
+
+    Returns:
+        MCP server configuration dict.
+    """
+    return {
+        "name": "wayback-mcp",
+        "description": "Wayback Machine — recover deleted/censored web content",
+        "install": "pip install wayback-mcp",
+        "repo": "https://github.com/cmorley/wayback-mcp",
+        "command": "python",
+        "args": ["-m", "wayback_mcp"],
+        "env": {},
+        "tools": [
+            "search_wayback", "get_snapshot", "get_calendar",
+            "save_page", "get_closest_snapshot",
+        ],
+    }
+
+
+def clinicaltrials_mcp_config() -> dict:
+    """Configuration for ClinicalTrials.gov MCP.
+
+    Access the graveyard of suppressed drug trials. Pharma companies bury
+    negative results here by never publishing them in journals.
+
+    Install: pip install clinicaltrials-mcp
+
+    Returns:
+        MCP server configuration dict.
+    """
+    return {
+        "name": "clinicaltrials-mcp",
+        "description": "ClinicalTrials.gov — suppressed drug trials, terminated studies, buried results",
+        "install": "pip install clinicaltrials-mcp",
+        "repo": "https://github.com/natetyler/clinicaltrials-mcp",
+        "command": "python",
+        "args": ["-m", "clinicaltrials_mcp"],
+        "env": {},
+        "tools": [
+            "search_trials", "get_trial", "search_by_condition",
+            "search_by_intervention", "get_trial_results",
+        ],
+    }
+
+
+def openfda_mcp_config() -> dict:
+    """Configuration for OpenFDA MCP (adverse events, recalls).
+
+    FAERS adverse events, drug recalls, device incidents. Contains
+    systematically under-reported pharmaceutical adverse reactions.
+
+    Install: pip install openfda-mcp
+
+    Returns:
+        MCP server configuration dict.
+    """
+    return {
+        "name": "openfda-mcp",
+        "description": "OpenFDA — FAERS adverse events, drug recalls, device incidents",
+        "install": "pip install openfda-mcp",
+        "repo": "https://github.com/openai/openfda-mcp",
+        "command": "python",
+        "args": ["-m", "openfda_mcp"],
+        "env": {
+            "OPENFDA_API_KEY": os.getenv("OPENFDA_API_KEY", ""),
+        },
+        "tools": [
+            "search_adverse_events", "search_recalls",
+            "search_device_events", "drug_labels",
+        ],
+    }
+
+
+def sec_edgar_mcp_config() -> dict:
+    """Configuration for SEC EDGAR MCP (18 tools).
+
+    Corporate filings, insider trading, fraud in footnotes. Access to
+    10-K, 10-Q, 8-K, 13F, and insider trading (Form 4) filings.
+
+    Install: pip install sec-edgar-mcp
+
+    Returns:
+        MCP server configuration dict.
+    """
+    return {
+        "name": "sec-edgar-mcp",
+        "description": "SEC EDGAR — 18 tools for corporate filings, insider trading, fraud detection",
+        "install": "pip install sec-edgar-mcp",
+        "repo": "https://github.com/badbayesian/sec-edgar-mcp",
+        "command": "python",
+        "args": ["-m", "sec_edgar_mcp"],
+        "env": {},
+        "tools": [
+            "search_filings", "get_filing", "company_filings",
+            "insider_trading", "institutional_holdings",
+        ],
+    }
+
+
+def court_records_mcp_config() -> dict:
+    """Configuration for Court Records MCP (CourtListener/RECAP).
+
+    Free PACER access via CourtListener. Unsealed pharmaceutical lawsuits,
+    environmental violations, patent disputes.
+
+    Install: pip install court-records-mcp
+
+    Returns:
+        MCP server configuration dict.
+    """
+    return {
+        "name": "court-records-mcp",
+        "description": "CourtListener/RECAP — free PACER, unsealed lawsuits, court opinions",
+        "install": "pip install court-records-mcp",
+        "repo": "https://github.com/freelawproject/courtlistener-mcp",
+        "command": "python",
+        "args": ["-m", "court_records_mcp"],
+        "env": {
+            "COURTLISTENER_API_TOKEN": os.getenv("COURTLISTENER_API_TOKEN", ""),
+        },
+        "tools": [
+            "search_opinions", "search_dockets", "get_opinion",
+            "search_recap", "get_document",
+        ],
+    }
+
+
+def google_scholar_mcp_config() -> dict:
+    """Configuration for Google Scholar MCP.
+
+    Google Scholar scraping with proxy support. Requires Bright Data
+    or similar proxy to avoid blocks.
+
+    Install: pip install google-scholar-mcp
+
+    Returns:
+        MCP server configuration dict.
+    """
+    return {
+        "name": "google-scholar-mcp",
+        "description": "Google Scholar — widest academic coverage, needs proxy",
+        "install": "pip install google-scholar-mcp",
+        "repo": "https://github.com/nicholasgriffintn/google-scholar-mcp",
+        "command": "python",
+        "args": ["-m", "google_scholar_mcp"],
+        "env": {
+            "PROXY_URL": os.getenv("GOOGLE_SCHOLAR_PROXY_URL", ""),
+            "SERPAPI_KEY": os.getenv("SERPAPI_KEY", ""),
+        },
+        "tools": [
+            "search_scholar", "get_paper", "get_citations",
+            "get_author_profile",
+        ],
+    }
+
+
+def ipfs_mcp_config() -> dict:
+    """Configuration for IPFS MCP (decentralized content).
+
+    Access DMCA-removed content persisted on IPFS. Censorship-resistant
+    storage for papers, datasets, and documents.
+
+    Install: pip install ipfs-mcp
+
+    Returns:
+        MCP server configuration dict.
+    """
+    return {
+        "name": "ipfs-mcp",
+        "description": "IPFS — decentralized storage, censorship-resistant content access",
+        "install": "pip install ipfs-mcp",
+        "repo": "https://github.com/vkirilichev/ipfs-mcp",
+        "command": "python",
+        "args": ["-m", "ipfs_mcp"],
+        "env": {},
+        "tools": [
+            "ipfs_cat", "ipfs_get", "ipfs_ls", "ipfs_pin",
+        ],
+    }
+
+
 def get_all_mcp_configs() -> list[dict]:
     """Return configurations for all supported MCP servers."""
     return [
+        # Original servers
         paper_search_mcp_config(),
         youtube_mcp_config(),
         backblaze_b2_mcp_config(),
         brightdata_mcp_config(),
         docling_mcp_config(),
+        # Dark web & OSINT
+        onionclaw_mcp_config(),
+        onion_search_mcp_config(),
+        osint_mcp_config(),
+        osint_intelligence_mcp_config(),
+        osint_tools_mcp_config(),
+        # Academic mega-sources
+        scholar_mcp_config(),
+        pubmed_search_mcp_config(),
+        wikidata_mcp_config(),
+        google_scholar_mcp_config(),
+        # Censorship-resistant infrastructure
+        wayback_mcp_config(),
+        ipfs_mcp_config(),
+        # Government & legal
+        clinicaltrials_mcp_config(),
+        openfda_mcp_config(),
+        sec_edgar_mcp_config(),
+        court_records_mcp_config(),
     ]
 
 

@@ -20,6 +20,11 @@ Tools are organised into tiers:
   Tier 3 — Censored fallback: Google/Serper
   Deep Research — Perplexity, Grok, Tavily, Exa multi-search
   Research Mgmt — store/read findings, knowledge graph
+  Preprints — bioRxiv, medRxiv, ChemRxiv, SSRN, OSF Preprints
+  Research Integrity — Open Retractions, Retraction Watch
+  Government — ClinicalTrials.gov, OpenFDA, CourtListener, SEC EDGAR, ICIJ
+  Knowledge — OpenAlex (240M works), PubMed, Wikidata SPARQL, Google Scholar
+  OSINT — Wayback CDX, IPFS, Common Crawl, IACR ePrint, Beacon Censorship
 
 Reference: apps/adk-agent/tools/mcp_tools.py, research_tools.py,
   deep_research_tools.py, knowledge_graph.py.
@@ -1535,5 +1540,40 @@ def get_native_tools():
         tools.extend(BOOK_TOOLS)
     except ImportError:
         logger.debug("Book pipeline module not available — book tools skipped")
+
+    # Preprint server tools — bioRxiv, medRxiv, ChemRxiv, SSRN, OSF Preprints
+    try:
+        from preprint_tools import PREPRINT_TOOLS
+        tools.extend(PREPRINT_TOOLS)
+    except ImportError:
+        logger.debug("Preprint tools module not available — preprint tools skipped")
+
+    # Research integrity tools — retraction checks, Retraction Watch
+    try:
+        from integrity_tools import INTEGRITY_TOOLS
+        tools.extend(INTEGRITY_TOOLS)
+    except ImportError:
+        logger.debug("Integrity tools module not available — integrity tools skipped")
+
+    # Government & legal intelligence — ClinicalTrials.gov, OpenFDA, courts, SEC
+    try:
+        from government_tools import GOVERNMENT_TOOLS
+        tools.extend(GOVERNMENT_TOOLS)
+    except ImportError:
+        logger.debug("Government tools module not available — government tools skipped")
+
+    # Deep academic knowledge — OpenAlex, PubMed, Wikidata, Google Scholar
+    try:
+        from knowledge_tools import KNOWLEDGE_TOOLS
+        tools.extend(KNOWLEDGE_TOOLS)
+    except ImportError:
+        logger.debug("Knowledge tools module not available — knowledge tools skipped")
+
+    # OSINT & censorship-resistant tools — Wayback CDX, IPFS, Common Crawl, IACR
+    try:
+        from osint_tools import OSINT_TOOLS
+        tools.extend(OSINT_TOOLS)
+    except ImportError:
+        logger.debug("OSINT tools module not available — OSINT tools skipped")
 
     return tools
