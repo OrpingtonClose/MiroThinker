@@ -440,7 +440,7 @@ def youtube_download_transcript(
         with tempfile.TemporaryDirectory() as tmpdir:
             return _whisper_transcribe(url, video_id, language, tmpdir)
 
-    backends_tried = "yt-dlp, TranscriptAPI, Bright Data"
+    backends_tried = "yt-dlp, youtube-transcript-api, youtube-transcript-api+proxy, TranscriptAPI"
     return (
         f"No transcript found for {url} in language '{language}'. "
         f"Tried: {backends_tried}. "
