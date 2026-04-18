@@ -768,13 +768,13 @@ def youtube_search_transcripts(
         Formatted search results with context snippets from matching transcripts.
     """
     try:
-        from cache import _get_conn
+        from cache import CACHE_DIR, get_db
     except ImportError:
         return (
             "[TOOL_ERROR] Cache module not available. Download some transcripts first."
         )
 
-    conn = _get_conn()
+    conn = get_db()
     query_lower = query.lower()
 
     # Search the cache for youtube transcript entries
@@ -801,11 +801,11 @@ def youtube_search_transcripts(
         blob_path = row[2]
         blob_size = row[3]
 
-        if not blob_path or not Path(blob_path).exists():
+        if not blob_path or not (CACHE_DIR / blob_path).exists():
             continue
 
         try:
-            text = Path(blob_path).read_text(encoding="utf-8", errors="replace")
+            text = (CACHE_DIR / blob_path).read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
 
