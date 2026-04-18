@@ -2019,7 +2019,8 @@ def crossref_citation_graph(
         f"{a.get('given', '')} {a.get('family', '')}".strip()
         for a in data.get("author", [])[:5]
     ]
-    year_parts = data.get("published-print", data.get("published-online", {})).get("date-parts", [[""]])
+    pub_info = data.get("published-print") or data.get("published-online") or {}
+    year_parts = pub_info.get("date-parts", [[""]])
     year = str(year_parts[0][0]) if year_parts and year_parts[0] else ""
     journal = " ".join(data.get("container-title", [""]))
     cited_by = data.get("is-referenced-by-count", 0)
@@ -2153,7 +2154,9 @@ def hathitrust_read(
                 r'id=([^&"]+).*?class="result-title"[^>]*>(.*?)</a>',
                 html, re_mod.DOTALL
             )
-            if not items:
+            if items:
+                results = [{"ht_id": hid, "title": re_mod.sub(r'<[^>]+>', '', title_html).strip() or f"[Volume {hid}]"} for hid, title_html in items[:10]]
+            else:
                 # Fallback: just find HT IDs and titles
                 items = re_mod.findall(
                     r'id=([a-z]+\.\d+)',
