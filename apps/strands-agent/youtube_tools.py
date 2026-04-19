@@ -887,7 +887,8 @@ def youtube_export_corpus(
             "Run youtube_harvest_channel first to populate the cache."
         )
 
-    # Search for harvested transcripts
+    # Search for harvested transcripts — track which source_type matched
+    active_source_type = "youtube_harvest"
     results = cache_search(
         source_type="youtube_harvest",
         tag="transcript",
@@ -896,6 +897,7 @@ def youtube_export_corpus(
 
     if not results:
         # Also check the older source_type
+        active_source_type = "video_transcript"
         results = cache_search(
             source_type="video_transcript",
             tag="youtube",
@@ -918,12 +920,13 @@ def youtube_export_corpus(
 
     if topics_filter:
         # Topic tags are stored as cache tags — re-query with tag filter
+        # Use the same source_type that produced the initial results
         filter_topics = [t.strip().lower() for t in topics_filter.split(",")]
         topic_results: list[dict] = []
         seen_ids: set[int] = set()
         for topic_tag in filter_topics:
             tagged = cache_search(
-                source_type="youtube_harvest",
+                source_type=active_source_type,
                 tag=topic_tag,
                 limit=10000,
             )
