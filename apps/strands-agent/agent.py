@@ -469,15 +469,20 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
             researcher.as_tool(
                 name="researcher",
                 description=(
-                    "Deep web research agent with uncensored-first tool "
-                    "priority: DuckDuckGo, Brave, Exa, Mojeek for search; "
+                    "Deep research agent with uncensored-first tool "
+                    "priority. For YouTube research: search_youtube and "
+                    "search_channel_videos (TranscriptAPI — searches inside "
+                    "actual video transcripts), get_channel_latest_videos, "
+                    "youtube_download_transcript, youtube_harvest_channel. "
+                    "For web: DuckDuckGo, Brave, Exa, Mojeek for search; "
                     "Jina Reader, Firecrawl, Kagi for extraction; "
                     "Semantic Scholar, arXiv for academic papers; "
                     "Wikipedia, DuckDB for reference data; "
                     "Perplexity, Grok, Tavily for deep research; "
+                    "Reddit for community intelligence; "
                     "store_finding/read_findings + knowledge graph for "
                     "persisting research; Google/Serper as censored fallback. "
-                    "Delegate any web search, scrape, or data retrieval task "
+                    "Delegate any search, scrape, or data retrieval task "
                     "to this tool."
                 ),
             ),

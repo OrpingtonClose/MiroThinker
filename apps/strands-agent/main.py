@@ -392,6 +392,11 @@ def query_multi(req: QueryRequest):
 
         _multi_agent.messages.clear()
         original_prompts: dict[str, str | None] = {}
+        # Inject skill into BOTH planner and researcher — the planner needs
+        # the methodology to decompose the query correctly, the researcher
+        # needs it to choose the right tools for each sub-task.
+        original_prompts["planner"] = _multi_agent.system_prompt
+        _auto_activate_skills(req.query, _multi_agent)
         if _multi_researcher is not None:
             _multi_researcher.messages.clear()
             original_prompts["researcher"] = _multi_researcher.system_prompt
@@ -408,6 +413,8 @@ def query_multi(req: QueryRequest):
             logger.exception("Agent error")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         finally:
+            if "planner" in original_prompts:
+                _multi_agent.system_prompt = original_prompts["planner"]
             if _multi_researcher is not None and "researcher" in original_prompts:
                 _multi_researcher.system_prompt = original_prompts["researcher"]
 
