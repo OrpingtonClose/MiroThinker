@@ -392,7 +392,7 @@ RESEARCH MANAGEMENT:
 SKILLS: You have access to specialised research skills via the `skills` tool. \
 Check the <available_skills> section of your system prompt and activate the \
 relevant skill BEFORE starting your search, not after. Key triggers:
-- YouTube/video channel discovery or corpus building → activate youtube-research
+- YouTube/video channel discovery or corpus building → activate osint-censored-discovery
 - Censored, restricted, or hard-to-find information → activate osint-censored-discovery
 
 EXECUTION MODEL — SEQUENTIAL:
@@ -570,7 +570,7 @@ RESEARCH MANAGEMENT:
 SKILLS: You have access to specialised research skills via the `skills` tool. \
 Check the <available_skills> section of your system prompt and activate the \
 relevant skill FIRST to load the full methodology. Key triggers:
-- YouTube/video channel discovery or corpus building → activate youtube-research
+- YouTube/video channel discovery or corpus building → activate osint-censored-discovery
 - Censored, restricted, or hard-to-find information → activate osint-censored-discovery
 This ensures you follow a proven protocol rather than ad-hoc searching.
 
