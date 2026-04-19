@@ -211,7 +211,10 @@ class GossipSwarm:
             for a in assignments:
                 a.prev_summary = a.summary
 
+            gossip_failures = 0
+
             async def _bounded_gossip(assignment: WorkerAssignment) -> None:
+                nonlocal gossip_failures
                 async with sem:
                     peer_sums = [
                         other.summary for other in assignments
@@ -231,6 +234,7 @@ class GossipSwarm:
                             complete_fn=self.complete,
                         )
                     except Exception:
+                        gossip_failures += 1
                         logger.warning(
                             "worker_id=<%d>, angle=<%s>, round=<%d> | gossip refinement failed, keeping previous summary",
                             assignment.worker_id, assignment.angle, gossip_round,
@@ -241,21 +245,28 @@ class GossipSwarm:
             rounds_executed = gossip_round
 
             logger.info(
-                "gossip_round=<%d> | gossip round complete",
-                gossip_round,
+                "gossip_round=<%d>, failures=<%d> | gossip round complete",
+                gossip_round, gossip_failures,
             )
 
-            # Adaptive stopping: check convergence
+            # Adaptive stopping: check convergence (skip if failures caused
+            # unchanged summaries — that's not real convergence)
             if config.enable_adaptive_rounds and gossip_round < config.gossip_rounds:
-                current = [a.summary for a in assignments]
-                previous = [a.prev_summary for a in assignments]
-                if check_convergence(current, previous, config.convergence_threshold):
-                    logger.info(
-                        "gossip_round=<%d> | convergence detected, stopping early",
+                if gossip_failures >= len(assignments):
+                    logger.warning(
+                        "gossip_round=<%d> | all workers failed, skipping convergence check",
                         gossip_round,
                     )
-                    metrics.gossip_converged_early = True
-                    break
+                else:
+                    current = [a.summary for a in assignments]
+                    previous = [a.prev_summary for a in assignments]
+                    if check_convergence(current, previous, config.convergence_threshold):
+                        logger.info(
+                            "gossip_round=<%d> | convergence detected, stopping early",
+                            gossip_round,
+                        )
+                        metrics.gossip_converged_early = True
+                        break
 
         metrics.gossip_rounds_executed = rounds_executed
         metrics.phase_times["gossip"] = time.monotonic() - phase_start
