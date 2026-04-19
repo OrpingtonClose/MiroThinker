@@ -354,13 +354,21 @@ def _build_tool_list(mcp_tools):
     native_mgmt = [t for t in native if _tool_name(t) in mgmt_names]
     native_last = [t for t in native if _tool_name(t) in tier3_names]
 
+    # Deduplicate: MCP tools take precedence over native tools with the same
+    # name (e.g. TranscriptAPI MCP's search_youtube vs native REST fallback).
+    # Native fallbacks are only kept when the MCP version is absent.
+    mcp_names = {_tool_name(t) for t in mcp_tools}
+
+    def _dedup(tools: list) -> list:
+        return [t for t in tools if _tool_name(t) not in mcp_names]
+
     return [
-        *native_first,   # Tier 1: duckduckgo_search, mojeek_search
-        *mcp_tools,      # MCP: Brave, Exa, Semantic Scholar, arXiv, Wikipedia, etc.
-        *native_mid,     # Tier 2: jina_read_url
-        *native_deep,    # Deep research: perplexity, grok, tavily, exa_multi
-        *native_mgmt,    # Research mgmt: findings store, knowledge graph
-        *native_last,    # Tier 3: google_search (censored fallback — always last)
+        *_dedup(native_first),  # Tier 1: duckduckgo_search, mojeek_search
+        *mcp_tools,             # MCP: Brave, Exa, Semantic Scholar, arXiv, Wikipedia, etc.
+        *_dedup(native_mid),    # Tier 2: jina_read_url, YouTube tools (deduped)
+        *_dedup(native_deep),   # Deep research: perplexity, grok, tavily, exa_multi
+        *_dedup(native_mgmt),   # Research mgmt: findings store, knowledge graph
+        *_dedup(native_last),   # Tier 3: google_search (censored fallback — always last)
     ]
 
 
