@@ -70,9 +70,11 @@ from swarm.angles import (
     assign_workers,
     detect_angles_via_llm,
     detect_sections,
+    score_section_angle_pairs,
+    _prepare_sections,
 )
 from swarm.config import CompleteFn, SwarmConfig
-from swarm.convergence import check_convergence, information_gain
+from swarm.convergence import check_convergence, information_gain, select_diverse_peers
 from swarm.lineage import LineageEntry
 from swarm.quality_manifest import SwarmQualityManifest
 from swarm.queen import build_knowledge_report, queen_merge
@@ -221,11 +223,34 @@ class GossipSwarm:
         if not angles:
             angles = [s.title for s in sections[:config.max_workers]]
 
+        # Semantic assignment: score section-angle pairs via LLM
+        score_matrix = None
+        if config.enable_semantic_assignment and angles and len(sections) >= 2:
+            prepared = _prepare_sections(
+                list(sections), config.max_workers, config.max_section_chars,
+            )
+            if prepared and len(prepared) >= 2:
+                try:
+                    score_matrix = await score_section_angle_pairs(
+                        prepared, angles, self.complete,
+                    )
+                    metrics.total_llm_calls += 1
+                    logger.info(
+                        "sections=<%d>, angles=<%d> | semantic scoring complete",
+                        len(prepared), len(angles),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "error=<%s> | semantic scoring failed, falling back to keyword",
+                        exc,
+                    )
+
         # Assign workers
         assignments = assign_workers(
             sections, angles,
             max_workers=config.max_workers,
             max_section_chars=config.max_section_chars,
+            score_matrix=score_matrix,
         )
 
         if not assignments:
@@ -332,6 +357,15 @@ class GossipSwarm:
                         other.summary for other in assignments
                         if other.worker_id != assignment.worker_id and other.summary
                     ]
+                    # Diversity-Aware Retention (DAR): select maximally
+                    # disagreeing peers to reduce echo-chamber effects.
+                    # From "Hear Both Sides" (arXiv 2603.20640v1).
+                    if config.enable_diversity_aware_gossip and assignment.summary:
+                        peer_sums = select_diverse_peers(
+                            own_summary=assignment.summary,
+                            peer_summaries=peer_sums,
+                            top_k=config.dar_top_k,
+                        )
                     # Full-corpus gossip: pass raw section content
                     raw = assignment.raw_content if config.enable_full_corpus_gossip else None
 

@@ -103,6 +103,16 @@ class SwarmConfig:
         queen_temperature: Temperature for the queen merge call.
         worker_max_tokens: Max output tokens per worker call.
         queen_max_tokens: Max output tokens for the queen merge.
+        enable_semantic_assignment: If True, use LLM-scored semantic matching
+            to optimally assign sections to angles (Hungarian algorithm).
+            Costs 1 extra LLM call but ensures each section goes to the
+            specialist who would extract the most value.
+        enable_diversity_aware_gossip: If True, apply Diversity-Aware
+            Retention (DAR) during gossip — select the ``dar_top_k`` most
+            disagreeing peer summaries instead of all peers.  Reduces
+            echo-chamber effects (arXiv 2603.20640v1).
+        dar_top_k: Number of most-diverse peers to retain per worker
+            during DAR gossip filtering.
     """
 
     max_workers: int = int(os.getenv("SWARM_MAX_WORKERS", "6"))
@@ -121,6 +131,9 @@ class SwarmConfig:
     queen_temperature: float = 0.3
     worker_max_tokens: int = 4096
     queen_max_tokens: int = 8192
+    enable_semantic_assignment: bool = os.getenv("SWARM_SEMANTIC_ASSIGNMENT", "1") == "1"
+    enable_diversity_aware_gossip: bool = os.getenv("SWARM_DAR_GOSSIP", "1") == "1"
+    dar_top_k: int = int(os.getenv("SWARM_DAR_TOP_K", "3"))
     lineage_store: LineageStore | None = None
     enable_quality_manifest: bool = True
 

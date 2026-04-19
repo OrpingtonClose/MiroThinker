@@ -113,6 +113,50 @@ def information_gain(
     return len(new_trigrams) / len(curr_pool) if curr_pool else 0.0
 
 
+# ── Diversity-Aware Retention (DAR) ──────────────────────────────────
+# From "Hear Both Sides" (arXiv 2603.20640v1):
+# "What agents hear is as important as what agents say."
+# Select the subset of peer summaries that maximally DISAGREE with the
+# worker's own summary before broadcasting.  This reduces echo-chamber
+# effects and forces workers to engage with contradictory evidence.
+
+
+def select_diverse_peers(
+    own_summary: str,
+    peer_summaries: list[str],
+    top_k: int = 3,
+) -> list[str]:
+    """Select the K most diverse peer summaries relative to own summary.
+
+    Diversity is measured by (1 - Jaccard similarity) between the worker's
+    own summary and each peer.  Peers that disagree the most are selected
+    first because they carry the highest information value for refinement.
+
+    When ``top_k >= len(peer_summaries)``, all peers are returned (no
+    filtering).  This preserves backward compatibility for small swarms.
+
+    Args:
+        own_summary: The worker's current summary.
+        peer_summaries: All peer summaries to select from.
+        top_k: Number of most-diverse peers to retain.
+
+    Returns:
+        Selected peer summaries ordered by decreasing diversity.
+    """
+    if top_k >= len(peer_summaries) or len(peer_summaries) <= 1:
+        return peer_summaries
+
+    # Score each peer by diversity (1 - similarity to own)
+    scored = []
+    for ps in peer_summaries:
+        diversity = 1.0 - jaccard_similarity(own_summary, ps)
+        scored.append((diversity, ps))
+
+    # Sort by diversity descending, take top_k
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [ps for _, ps in scored[:top_k]]
+
+
 # ── Corpus-delta convergence (structural metric) ────────────────────
 
 # Patterns for extracting cross-references between workers
