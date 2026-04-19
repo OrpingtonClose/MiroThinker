@@ -13,7 +13,10 @@ prompt as a dedicated section so the queen can weave them into the narrative.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 
 def _build_queen_prompt(
@@ -53,7 +56,9 @@ def _build_queen_prompt(
         f"data dumps. Weave findings into causal explanations and connected arguments.\n"
         f"10. If serendipity insights are provided above, integrate them naturally "
         f"into the appropriate sections — they represent cross-angle connections "
-        f"that individual specialists missed.\n\n"
+        f"that individual specialists missed.\n"
+        f"11. AIM FOR 3000-6000 WORDS. Be comprehensive but not redundant. "
+        f"Merge overlapping findings — do not repeat the same point from different workers.\n\n"
         f"Produce the final comprehensive synthesis:"
     )
 
@@ -109,8 +114,12 @@ async def queen_merge(
         result = await complete_fn(prompt)
         if result and len(result.strip()) > 100:
             return result
-    except Exception:
-        pass
+        logger.warning(
+            "queen merge returned short/empty response (%d chars), falling back to concatenation",
+            len(result.strip()) if result else 0,
+        )
+    except Exception as exc:
+        logger.warning("queen merge LLM call failed: %s, falling back to concatenation", exc)
 
     # Fallback: concatenate worker summaries
     parts = []

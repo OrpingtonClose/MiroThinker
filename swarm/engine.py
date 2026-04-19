@@ -178,13 +178,20 @@ class GossipSwarm:
 
         async def _bounded_synthesize(assignment: WorkerAssignment) -> None:
             async with sem:
-                assignment.summary = await worker_synthesize(
-                    angle=assignment.angle,
-                    section_content=assignment.raw_content,
-                    query=query,
-                    max_chars=config.max_summary_chars,
-                    complete_fn=self.complete,
-                )
+                try:
+                    assignment.summary = await worker_synthesize(
+                        angle=assignment.angle,
+                        section_content=assignment.raw_content,
+                        query=query,
+                        max_chars=config.max_summary_chars,
+                        complete_fn=self.complete,
+                    )
+                except Exception:
+                    logger.warning(
+                        "worker_id=<%d>, angle=<%s> | worker synthesis failed, using raw truncation",
+                        assignment.worker_id, assignment.angle,
+                    )
+                    assignment.summary = assignment.raw_content[:config.max_summary_chars]
 
         await asyncio.gather(*[_bounded_synthesize(a) for a in assignments])
         metrics.total_llm_calls += len(assignments)
@@ -213,15 +220,21 @@ class GossipSwarm:
                     # Full-corpus gossip: pass raw section content
                     raw = assignment.raw_content if config.enable_full_corpus_gossip else None
 
-                    assignment.summary = await worker_gossip_refine(
-                        angle=assignment.angle,
-                        own_summary=assignment.summary,
-                        peer_summaries=peer_sums,
-                        raw_section=raw,
-                        query=query,
-                        max_chars=config.max_summary_chars,
-                        complete_fn=self.complete,
-                    )
+                    try:
+                        assignment.summary = await worker_gossip_refine(
+                            angle=assignment.angle,
+                            own_summary=assignment.summary,
+                            peer_summaries=peer_sums,
+                            raw_section=raw,
+                            query=query,
+                            max_chars=config.max_summary_chars,
+                            complete_fn=self.complete,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "worker_id=<%d>, angle=<%s>, round=<%d> | gossip refinement failed, keeping previous summary",
+                            assignment.worker_id, assignment.angle, gossip_round,
+                        )
 
             await asyncio.gather(*[_bounded_gossip(a) for a in assignments])
             metrics.total_llm_calls += len(assignments)
