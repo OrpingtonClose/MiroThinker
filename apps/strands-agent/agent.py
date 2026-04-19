@@ -280,26 +280,40 @@ def _setup_otel() -> None:
 
 
 def _enter_mcp_clients(mcp_clients):
-    """Enter MCP client contexts and collect tools, with rollback on failure.
+    """Enter MCP client contexts and collect tools, skipping failed clients.
 
-    If the Nth client's ``__enter__()`` or ``list_tools_sync()`` raises,
-    all previously-entered clients are cleaned up so their subprocesses
-    (npx, node, uvx) don't leak.
+    Each client is entered independently.  If a client's ``__enter__()`` or
+    ``list_tools_sync()`` raises, that client is cleaned up and skipped —
+    the remaining clients still load normally.  This prevents a single
+    flaky MCP server (e.g. TranscriptAPI) from killing ALL MCP tools.
+
+    Failed clients are removed from *mcp_clients* in-place so that the
+    caller's shutdown cleanup (``_cleanup_mcp``) only calls ``__exit__``
+    on clients that are in a properly-entered state.
     """
     entered: list = []
     tool_list: list = []
-    try:
-        for client in mcp_clients:
+    for client in mcp_clients:
+        enter_succeeded = False
+        try:
             client.__enter__()
-            entered.append(client)
+            enter_succeeded = True
             tool_list.extend(client.list_tools_sync())
-    except Exception:
-        for c in entered:
-            try:
-                c.__exit__(None, None, None)
-            except Exception:
-                pass
-        raise
+            entered.append(client)
+        except Exception:
+            logger.warning(
+                "MCP client failed to initialise, skipping: %s",
+                getattr(client, "_transport_factory", client),
+                exc_info=True,
+            )
+            # Only call __exit__ if __enter__ succeeded (context manager protocol)
+            if enter_succeeded:
+                try:
+                    client.__exit__(None, None, None)
+                except Exception:
+                    pass
+    # Remove failed clients so _cleanup_mcp at shutdown won't double-exit them
+    mcp_clients[:] = entered
     return tool_list
 
 
@@ -340,13 +354,21 @@ def _build_tool_list(mcp_tools):
     native_mgmt = [t for t in native if _tool_name(t) in mgmt_names]
     native_last = [t for t in native if _tool_name(t) in tier3_names]
 
+    # Deduplicate: MCP tools take precedence over native tools with the same
+    # name (e.g. TranscriptAPI MCP's search_youtube vs native REST fallback).
+    # Native fallbacks are only kept when the MCP version is absent.
+    mcp_names = {_tool_name(t) for t in mcp_tools}
+
+    def _dedup(tools: list) -> list:
+        return [t for t in tools if _tool_name(t) not in mcp_names]
+
     return [
-        *native_first,   # Tier 1: duckduckgo_search, mojeek_search
-        *mcp_tools,      # MCP: Brave, Exa, Semantic Scholar, arXiv, Wikipedia, etc.
-        *native_mid,     # Tier 2: jina_read_url
-        *native_deep,    # Deep research: perplexity, grok, tavily, exa_multi
-        *native_mgmt,    # Research mgmt: findings store, knowledge graph
-        *native_last,    # Tier 3: google_search (censored fallback — always last)
+        *_dedup(native_first),  # Tier 1: duckduckgo_search, mojeek_search
+        *mcp_tools,             # MCP: Brave, Exa, Semantic Scholar, arXiv, Wikipedia, etc.
+        *_dedup(native_mid),    # Tier 2: jina_read_url, YouTube tools (deduped)
+        *_dedup(native_deep),   # Deep research: perplexity, grok, tavily, exa_multi
+        *_dedup(native_mgmt),   # Research mgmt: findings store, knowledge graph
+        *_dedup(native_last),   # Tier 3: google_search (censored fallback — always last)
     ]
 
 
@@ -447,15 +469,20 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
             researcher.as_tool(
                 name="researcher",
                 description=(
-                    "Deep web research agent with uncensored-first tool "
-                    "priority: DuckDuckGo, Brave, Exa, Mojeek for search; "
+                    "Deep research agent with uncensored-first tool "
+                    "priority. For YouTube research: search_youtube and "
+                    "search_channel_videos (TranscriptAPI — searches inside "
+                    "actual video transcripts), get_channel_latest_videos, "
+                    "youtube_download_transcript, youtube_harvest_channel. "
+                    "For web: DuckDuckGo, Brave, Exa, Mojeek for search; "
                     "Jina Reader, Firecrawl, Kagi for extraction; "
                     "Semantic Scholar, arXiv for academic papers; "
                     "Wikipedia, DuckDB for reference data; "
                     "Perplexity, Grok, Tavily for deep research; "
+                    "Reddit for community intelligence; "
                     "store_finding/read_findings + knowledge graph for "
                     "persisting research; Google/Serper as censored fallback. "
-                    "Delegate any web search, scrape, or data retrieval task "
+                    "Delegate any search, scrape, or data retrieval task "
                     "to this tool."
                 ),
             ),

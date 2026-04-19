@@ -20,6 +20,9 @@ allowed-tools: >
   kagi_search kagi_summarize kagi_enrich_web reddit_search
   reddit_get_subreddit_posts reddit_get_post_details exa_multi_search
   perplexity_deep_research grok_deep_research tavily_deep_research
+  search_youtube search_channel_videos get_channel_latest_videos
+  list_channel_videos list_playlist_videos get_youtube_transcript
+  youtube_harvest_channel youtube_export_corpus brave_video_search
   store_finding read_findings add_entity add_edge query_graph find_gaps
 ---
 
@@ -100,7 +103,85 @@ fastest path to answering Q1/Q2/Q3:
   importers, marketplaces, communities." — LLMs often know vendor names
   that would take many searches to discover.
 
-### Tier B — Human voices: forums, communities & anecdotes (ALWAYS valuable)
+### Tier B — Video & audio content (YouTube, podcasts)
+
+For any research that touches YouTube, video creators, or audio content,
+you have **TranscriptAPI** — tools that search directly inside YouTube
+video transcripts and metadata. This is ground truth: not what someone
+*says* about a channel, but what the channel *actually contains*.
+
+- `search_youtube` — Search across all of YouTube by keyword. Returns
+  video titles, channel names, view counts, publish dates. This tells
+  you which channels actually produce content on a topic — and how much.
+- `search_channel_videos` — Search within a specific channel. This is
+  your depth validation tool: a channel that has 30 videos mentioning
+  "insulin protocol" is fundamentally different from one that mentioned
+  it once.
+- `get_channel_latest_videos` / `list_channel_videos` — Browse a
+  channel's full catalogue. Useful for assessing current activity and
+  topic focus.
+- `brave_video_search` — Cross-platform video search for non-YouTube
+  sources (Rumble, Odysee, etc.).
+
+**Why this matters for OSINT:** YouTube creators are often primary
+sources — practitioners sharing direct experience, not secondhand
+reporting. A bodybuilder's video showing bloodwork after a tren cycle
+is higher-signal than a blog post summarizing what bodybuilders do.
+TranscriptAPI lets you find these primary sources by searching what
+people actually *said* in their videos, not just video titles or
+descriptions.
+
+**Breadth → Depth → Quality (the three-stage pipeline):**
+
+1. **Breadth** (`search_youtube`): Which channels exist? Search target
+   keywords, collect every unique channel that appears. This is Q1.
+
+2. **Depth** (`search_channel_videos`): How thoroughly does each
+   channel cover the topic? A channel with 30 insulin videos is
+   categorically different from one that mentioned it once. This is
+   the numeric side of Q2.
+
+3. **Quality** (`get_youtube_transcript` on sample videos): Does this
+   channel have knowledge at the level we actually need? Pull full
+   transcripts from 2-3 random videos on a candidate channel and
+   read them. Look for **practitioner-grade specificity**: actual
+   dosage numbers, timing protocols, bloodwork values, stacking
+   rationale, side effect management with concrete data. A channel
+   where someone says "I ran tren at 300mg and my hematocrit went
+   to 54% so I donated blood" is categorically different from one
+   that says "trenbolone can increase red blood cell count." The
+   first is primary-source intelligence; the second is a Wikipedia
+   summary. **The channels worth harvesting are the ones that contain
+   knowledge at the depth the research actually requires** — detail
+   that would teach something beyond what textbooks or LLMs already
+   know. Keyword counts alone cannot tell you this; only reading the
+   actual content can.
+
+   **What to look for in transcripts (quality signals):**
+   - **Uncommon connections between things.** Does this creator link
+     concepts across domains in ways others don't? Insulin timing
+     connected to GH pulse dynamics. Tren's progestogenic activity
+     explaining why certain AI protocols fail. Gut microbiome changes
+     from orals affecting nutrient partitioning. These cross-domain
+     connections are the highest-value content — they represent
+     understanding that can't be found in any single textbook.
+   - **Specificity from direct experience.** Concrete numbers from
+     their own use or their clients: "at 4IU GH my IGF-1 was 380,
+     at 6IU it was 410 — diminishing returns." Not "GH increases
+     IGF-1 levels."
+   - **Reasoning, not just claims.** Do they explain WHY a protocol
+     works the way it does? The mechanism, not just the outcome?
+   - **Disagreement with conventional wisdom, backed by evidence.**
+     Creators who say "everyone does X but here's why Y works better,
+     and here's the bloodwork" are more valuable than those who
+     repeat the consensus.
+   
+   Channels that show these signals are the ones worth harvesting.
+   Channels that just summarize what's already common knowledge —
+   even if they have millions of subscribers — add nothing that Miro
+   doesn't already know.
+
+### Tier C — Human voices: forums, communities & anecdotes (ALWAYS valuable)
 
 Real people's opinions are **irreplaceable intelligence**. No LLM or search
 engine can replicate the signal from someone who actually grows, eats, sells,
@@ -145,7 +226,7 @@ comment extraction tools become available, they should be a primary
 source for this tier. Similarly: Telegram groups, VK communities,
 WeChat/Weibo for Chinese markets, Line for Thai/Japanese markets.
 
-### Tier C — Uncensored search engines (ground truth)
+### Tier D — Uncensored search engines (ground truth)
 
 No content filtering. What you find is what exists on the open web.
 - `duckduckgo_search`, `stract_search`, `brave_web_search`, `mojeek_search`
@@ -155,7 +236,7 @@ No content filtering. What you find is what exists on the open web.
 Always use these to **verify and extend** what Advisory LLMs report. LLMs
 can hallucinate vendor names or URLs. Uncensored search provides ground truth.
 
-### Tier D — Censored but powerful search engines
+### Tier E — Censored but powerful search engines
 
 - `google_search` — Best ranking algorithm, broadest index. Actively
   suppresses results for restricted topics, but for non-restricted topics
@@ -163,7 +244,7 @@ can hallucinate vendor names or URLs. Uncensored search provides ground truth.
 - `kagi_search` / `kagi_summarize` / `kagi_enrich_web` — High-quality
   curated results, good for finding indie/small-web content.
 
-### Tier E — Content extraction & archive
+### Tier F — Content extraction & archive
 
 - `jina_read_url`, `firecrawl_scrape` — Full page content extraction
 - `wayback_search`, `wayback_fetch`, `archive_today_fetch` — Historical

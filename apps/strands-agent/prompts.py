@@ -390,10 +390,10 @@ RESEARCH MANAGEMENT:
     + """
 
 SKILLS: You have access to specialised research skills via the `skills` tool. \
-Check the <available_skills> section of your system prompt — when a query \
-requires exhaustive discovery of censored, restricted, or hard-to-find \
-information, activate the relevant skill to load the full methodology. \
-Do this BEFORE starting your search, not after.
+Check the <available_skills> section of your system prompt and activate the \
+relevant skill BEFORE starting your search, not after. Key triggers:
+- YouTube/video channel discovery or corpus building → activate osint-censored-discovery
+- Censored, restricted, or hard-to-find information → activate osint-censored-discovery
 
 EXECUTION MODEL — SEQUENTIAL:
 Execute ONE tool call at a time. After each result, review it and decide \
@@ -568,11 +568,11 @@ RESEARCH MANAGEMENT:
     + """
 
 SKILLS: You have access to specialised research skills via the `skills` tool. \
-Check the <available_skills> section of your system prompt — when a query \
-requires exhaustive discovery of censored, restricted, or hard-to-find \
-information (vendors, substances, grey-market sources, forbidden knowledge), \
-activate the relevant skill FIRST to load the full methodology. This ensures \
-you follow a proven multi-round OSINT protocol rather than ad-hoc searching.
+Check the <available_skills> section of your system prompt and activate the \
+relevant skill FIRST to load the full methodology. Key triggers:
+- YouTube/video channel discovery or corpus building → activate osint-censored-discovery
+- Censored, restricted, or hard-to-find information → activate osint-censored-discovery
+This ensures you follow a proven protocol rather than ad-hoc searching.
 
 Only after you have accumulated substantial verified evidence across multiple \
 searches should you synthesize a response.
