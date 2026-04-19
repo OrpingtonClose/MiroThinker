@@ -132,8 +132,9 @@ _CROSS_REF_PATTERNS = [
 # Patterns for entity-like mentions (capitalized multi-word, technical terms)
 _ENTITY_PATTERN = re.compile(
     r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b"  # capitalized multi-word
-    r"|\b[A-Z]{2,}[a-z]*(?:-\d+)?\b"  # acronyms like mTORC1, S6K1
-    r"|\b\d+(?:\.\d+)?(?:\s*(?:mg|mcg|IU|ng|µg|mmol|%|kg))\b",  # quantities
+    r"|\b[A-Z]{2,}[a-z]*(?:-\d+)?\b"  # acronyms like RNA, MAPK, NF-2
+    r"|\b\d+(?:\.\d+)?(?:\s*(?:mg|mcg|IU|ng|µg|mmol|kg))\b"  # quantities with word units
+    r"|\b\d+(?:\.\d+)?%",  # percentage quantities
 )
 
 
