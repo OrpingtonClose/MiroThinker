@@ -221,12 +221,13 @@ async def score_section_angle_pairs(
     sections: list[CorpusSection],
     angles: list[str],
     complete_fn,
-) -> list[list[float]]:
+) -> list[list[float]] | None:
     """Use LLM to score how well each section matches each angle.
 
     Returns an NxM score matrix where N=sections, M=angles.
-    Higher scores mean better fit.  Falls back to uniform scores
-    if the LLM call fails or produces unparseable output.
+    Higher scores mean better fit.  Returns ``None`` if the LLM call
+    fails or produces unparseable output, so the caller can fall back
+    to keyword matching.
 
     The LLM sees truncated previews of each section (first 500 chars)
     to keep the prompt compact.  This costs 1 extra LLM call.
@@ -237,7 +238,8 @@ async def score_section_angle_pairs(
         complete_fn: Async LLM completion callable.
 
     Returns:
-        Score matrix (list of lists of floats, 0-10 scale).
+        Score matrix (list of lists of floats, 0-10 scale), or ``None``
+        on any failure.
     """
     n_sections = len(sections)
     n_angles = len(angles)
@@ -294,22 +296,22 @@ async def score_section_angle_pairs(
 
         logger.warning(
             "section_count=<%d>, angle_count=<%d> | "
-            "LLM score matrix has wrong shape, falling back to uniform",
+            "LLM score matrix has wrong shape, falling back to keyword",
             n_sections, n_angles,
         )
     except (json.JSONDecodeError, ValueError, TypeError, KeyError) as exc:
         logger.warning(
-            "error=<%s> | LLM score matrix parse failed, falling back to uniform",
+            "error=<%s> | LLM score matrix parse failed, falling back to keyword",
             exc,
         )
     except Exception as exc:
         logger.warning(
-            "error=<%s> | LLM scoring call failed, falling back to uniform",
+            "error=<%s> | LLM scoring call failed, falling back to keyword",
             exc,
         )
 
-    # Uniform fallback — every section-angle pair gets 5.0
-    return [[5.0] * n_angles for _ in range(n_sections)]
+    # Return None so caller falls back to keyword matching
+    return None
 
 
 def _optimal_assignment(

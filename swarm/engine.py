@@ -235,10 +235,17 @@ class GossipSwarm:
                         prepared, angles, self.complete,
                     )
                     metrics.total_llm_calls += 1
-                    logger.info(
-                        "sections=<%d>, angles=<%d> | semantic scoring complete",
-                        len(prepared), len(angles),
-                    )
+                    if score_matrix is not None:
+                        logger.info(
+                            "sections=<%d>, angles=<%d> | semantic scoring complete",
+                            len(prepared), len(angles),
+                        )
+                    else:
+                        logger.info(
+                            "sections=<%d>, angles=<%d> | semantic scoring "
+                            "returned None, using keyword fallback",
+                            len(prepared), len(angles),
+                        )
                 except Exception as exc:
                     logger.warning(
                         "error=<%s> | semantic scoring failed, falling back to keyword",
