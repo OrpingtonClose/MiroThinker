@@ -20,7 +20,10 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
+
+if TYPE_CHECKING:
+    from swarm.lineage import LineageStore
 
 
 # Type alias for the LLM completion callable.
@@ -118,6 +121,8 @@ class SwarmConfig:
     queen_temperature: float = 0.3
     worker_max_tokens: int = 4096
     queen_max_tokens: int = 8192
+    lineage_store: LineageStore | None = None
+    enable_quality_manifest: bool = True
 
     def __post_init__(self) -> None:
         """Resolve defaults that depend on other fields."""

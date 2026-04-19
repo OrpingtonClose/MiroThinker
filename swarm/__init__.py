@@ -8,21 +8,43 @@ Supports per-phase model selection:
 - Queen: best available writer (e.g. Qwen-Claude-Opus or remote Claude)
 - Serendipity: best cross-domain reasoner
 
-Usage:
-    from swarm import GossipSwarm, SwarmConfig
+Lineage tracking:
+- Pass ``lineage_store=InMemoryLineageStore()`` in SwarmConfig to record
+  every phase output with parent pointers forming a DAG.
 
+Quality manifest:
+- Computed provenance footer appended to every report (not LLM-generated).
+
+Usage:
+    from swarm import GossipSwarm, SwarmConfig, InMemoryLineageStore
+
+    store = InMemoryLineageStore()
     swarm = GossipSwarm(
-        complete=my_worker_llm,                # used for workers by default
-        queen_complete=my_queen_llm,           # optional: better model for queen
-        serendipity_complete=my_polymath_llm,  # optional: cross-domain model
-        config=SwarmConfig(gossip_rounds=3),
+        complete=my_worker_llm,
+        queen_complete=my_queen_llm,
+        config=SwarmConfig(gossip_rounds=3, lineage_store=store),
     )
     result = await swarm.synthesize(corpus="...", query="...")
-    print(result.user_report)          # concise narrative (3000-6000 words)
-    print(result.knowledge_report)     # full structured report (arbitrary length)
+    print(result.user_report)
+    print(result.knowledge_report)
+    print(result.quality_manifest.to_markdown())
+    for entry in store.entries:
+        print(entry.phase, entry.angle, len(entry.content))
 """
 
 from swarm.config import CompleteFn, SwarmConfig
-from swarm.engine import GossipSwarm, SwarmResult
+from swarm.engine import GossipSwarm, SwarmMetrics, SwarmResult
+from swarm.lineage import InMemoryLineageStore, LineageEntry, LineageStore
+from swarm.quality_manifest import SwarmQualityManifest
 
-__all__ = ["CompleteFn", "GossipSwarm", "SwarmConfig", "SwarmResult"]
+__all__ = [
+    "CompleteFn",
+    "GossipSwarm",
+    "InMemoryLineageStore",
+    "LineageEntry",
+    "LineageStore",
+    "SwarmConfig",
+    "SwarmMetrics",
+    "SwarmQualityManifest",
+    "SwarmResult",
+]
