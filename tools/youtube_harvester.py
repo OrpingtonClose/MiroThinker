@@ -966,8 +966,9 @@ class Harvester:
                 if transcript:
                     rec.transcript = transcript
                     rec.transcript_chars = len(transcript)
-                    rec.comments = comments
-                    rec.comment_count = len(comments)
+                    if self.config.fetch_comments:
+                        rec.comments = comments
+                        rec.comment_count = len(comments)
                     rec.status = "downloaded"
                     rec.backend_used = "apify"
                     rec.harvested_at = datetime.now(timezone.utc).isoformat()
@@ -1096,7 +1097,7 @@ class Harvester:
             rec.transcript,
         ]
 
-        if rec.comments:
+        if rec.comments and self.config.fetch_comments:
             content_parts.append(_format_comments_md(rec.comments))
 
         content = "\n".join(content_parts)
