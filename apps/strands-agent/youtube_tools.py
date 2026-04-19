@@ -728,6 +728,268 @@ def _format_comments(video_id: str, comments: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# CHANNEL HARVESTER — bulk download transcripts + comments via
+# Apify / Bright Data / yt-dlp cascade.  Results stored in Miro's cache
+# as first-class resources for later swarm synthesis.
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@tool
+def youtube_harvest_channel(
+    channel: str,
+    max_videos: int = 0,
+    language: str = "en",
+    include_comments: bool = True,
+) -> str:
+    """Download ALL transcripts and comments from a YouTube channel for later swarm processing.
+
+    This is the bulk harvester — it enumerates every video on the channel,
+    downloads transcripts and top comments via multiple backends
+    (Apify → Bright Data → yt-dlp → youtube-transcript-api) with automatic
+    fallback, and stores everything in Miro's cache so it's recognized as a
+    first-class research resource.
+
+    Use this when you want to stockpile an entire channel's knowledge for
+    later analysis.  The corpus can then be exported and fed to the swarm
+    engine for deep synthesis.
+
+    Backends tried in order:
+    1. Apify visita/youtube-scraper ($8/1K videos — transcripts + comments + metadata)
+    2. Bright Data YouTube Scraper API (comments only — separate dataset)
+    3. yt-dlp (needs cookies or proxy for cloud IPs)
+    4. youtube-transcript-api (needs proxy for cloud IPs)
+
+    Args:
+        channel: YouTube channel URL, handle (@MorePlatesMoreDates),
+            or channel ID (UCxxxx).
+        max_videos: Maximum videos to harvest (0 = all videos on channel).
+        language: Preferred transcript language code (default "en").
+        include_comments: Whether to also download top comments per video.
+
+    Returns:
+        Summary of harvest results including counts, chars, and any errors.
+    """
+    import asyncio as _asyncio
+
+    # Import harvester library
+    try:
+        import sys as _sys
+        _sys.path.insert(0, os.path.join(
+            os.path.dirname(__file__), "..", "..", "tools",
+        ))
+        from youtube_harvester import Harvester, HarvestConfig
+    except ImportError:
+        return (
+            "[TOOL_ERROR] youtube_harvester module not found. "
+            "Ensure tools/youtube_harvester.py exists in the MiroThinker repo."
+        )
+
+    # Wire in Miro cache
+    cache_fn = None
+    try:
+        from cache import cache_put
+        cache_fn = cache_put
+    except ImportError:
+        logger.debug("Cache module not available — transcripts will not be cached")
+
+    config = HarvestConfig.from_env()
+    config.language = language
+    config.fetch_comments = include_comments
+
+    harvester = Harvester(config=config, cache_fn=cache_fn)
+
+    # Run the async harvester in a sync context
+    try:
+        loop = _asyncio.get_event_loop()
+        if loop.is_running():
+            # Inside an existing event loop — use nest_asyncio or thread
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                result = pool.submit(
+                    _asyncio.run,
+                    harvester.harvest_channel(channel, max_videos=max_videos),
+                ).result(timeout=3600)
+        else:
+            result = _asyncio.run(
+                harvester.harvest_channel(channel, max_videos=max_videos)
+            )
+    except Exception as exc:
+        return f"[TOOL_ERROR] Harvest failed: {exc}"
+
+    # Format output
+    lines = [
+        f"# Channel Harvest Complete: {result.channel_name}\n",
+        result.summary(),
+    ]
+
+    if result.errors:
+        lines.append("\n**Errors:**")
+        for err in result.errors[:10]:
+            lines.append(f"- {err}")
+
+    # Show backend distribution
+    backend_counts: dict[str, int] = {}
+    for v in result.videos:
+        if v.status == "downloaded":
+            backend_counts[v.backend_used] = backend_counts.get(v.backend_used, 0) + 1
+    if backend_counts:
+        lines.append("\n**Backends used:**")
+        for backend, count in sorted(backend_counts.items()):
+            lines.append(f"- {backend}: {count} videos")
+
+    # Show topic distribution
+    topic_counts: dict[str, int] = {}
+    for v in result.videos:
+        for t in v.topics:
+            topic_counts[t] = topic_counts.get(t, 0) + 1
+    if topic_counts:
+        lines.append("\n**Topics detected:**")
+        for topic, count in sorted(topic_counts.items(), key=lambda x: -x[1])[:15]:
+            lines.append(f"- {topic}: {count} videos")
+
+    lines.append(
+        "\nAll transcripts and comments are now stored in Miro's cache "
+        "and available for swarm synthesis via youtube_export_corpus."
+    )
+
+    return "\n".join(lines)
+
+
+@tool
+def youtube_export_corpus(
+    channel: str = "",
+    max_chars: int = 0,
+    include_comments: bool = True,
+    topics_filter: str = "",
+) -> str:
+    """Export cached YouTube transcripts as a corpus file ready for swarm processing.
+
+    Searches Miro's cache for previously harvested YouTube transcripts and
+    assembles them into a single markdown corpus document.  This can then
+    be fed directly to the swarm engine for deep synthesis.
+
+    Args:
+        channel: Filter by channel name (empty = all channels).
+        max_chars: Maximum corpus size in characters (0 = unlimited).
+        include_comments: Whether to include comments in the corpus.
+        topics_filter: Comma-separated topic tags to filter by
+            (e.g. "steroids,testosterone"). Empty = all topics.
+
+    Returns:
+        The assembled corpus text, or a summary if too large to return.
+    """
+    try:
+        from cache import cache_search
+    except ImportError:
+        return (
+            "[TOOL_ERROR] Cache module not available. "
+            "Run youtube_harvest_channel first to populate the cache."
+        )
+
+    # Search for harvested transcripts
+    results = cache_search(
+        source_type="youtube_harvest",
+        tag="transcript",
+        limit=10000,
+    )
+
+    if not results:
+        # Also check the older source_type
+        results = cache_search(
+            source_type="video_transcript",
+            tag="youtube",
+            limit=10000,
+        )
+
+    if not results:
+        return "No harvested YouTube transcripts found in cache. Run youtube_harvest_channel first."
+
+    # Apply filters — cache_search returns url, title, content_hash, etc.
+    # but NOT metadata. Filter on available fields.
+    if channel:
+        channel_lower = channel.lower().lstrip("@")
+        results = [
+            r for r in results
+            if channel_lower in (r.get("title", "") or "").lower()
+            or channel_lower in (r.get("url", "") or "").lower()
+            or channel_lower in (r.get("summary", "") or "").lower()
+        ]
+
+    if topics_filter:
+        # Topic tags are stored as cache tags — re-query with tag filter
+        filter_topics = [t.strip().lower() for t in topics_filter.split(",")]
+        topic_results: list[dict] = []
+        seen_ids: set[int] = set()
+        for topic_tag in filter_topics:
+            tagged = cache_search(
+                source_type="youtube_harvest",
+                tag=topic_tag,
+                limit=10000,
+            )
+            for r in tagged:
+                rid = r.get("id", 0)
+                if rid not in seen_ids:
+                    seen_ids.add(rid)
+                    topic_results.append(r)
+        # Intersect with current results (by content_hash)
+        result_hashes = {r.get("content_hash") for r in results}
+        results = [r for r in topic_results if r.get("content_hash") in result_hashes]
+
+    if not results:
+        return f"No transcripts match the filter (channel={channel!r}, topics={topics_filter!r})."
+
+    # Assemble corpus
+    corpus_parts = []
+    total_chars = 0
+
+    for r in results:
+        try:
+            from cache import read_blob
+            content_bytes = read_blob(r["content_hash"])
+            if not content_bytes:
+                continue
+            content = content_bytes.decode("utf-8", errors="replace")
+        except Exception:
+            continue
+
+        if not include_comments:
+            # Strip comments section if present
+            comment_idx = content.find("\n### Comments (")
+            if comment_idx > 0:
+                content = content[:comment_idx]
+
+        if max_chars > 0 and total_chars + len(content) > max_chars:
+            break
+
+        corpus_parts.append(content)
+        total_chars += len(content)
+
+    if not corpus_parts:
+        return "Found entries but could not read transcript content from cache."
+
+    header = (
+        f"# YouTube Corpus Export\n\n"
+        f"**Videos:** {len(corpus_parts)}\n"
+        f"**Total chars:** {total_chars:,}\n"
+        f"**Channel filter:** {channel or 'all'}\n"
+        f"**Topic filter:** {topics_filter or 'all'}\n\n"
+        f"---\n\n"
+    )
+    corpus = header + "\n\n---\n\n".join(corpus_parts)
+
+    # If corpus is very large, return summary + first chunk
+    if len(corpus) > 100_000:
+        return (
+            f"Corpus assembled: {len(corpus_parts)} videos, {total_chars:,} chars total.\n"
+            f"Too large to return inline — use this tool's output as input to the swarm engine.\n\n"
+            f"**First 50K chars preview:**\n\n{corpus[:50000]}\n\n"
+            f"[...truncated — {total_chars - 50000:,} more chars available...]"
+        )
+
+    return corpus
+
+
 # ── Tool registry ─────────────────────────────────────────────────────
 
 YOUTUBE_TOOLS = [
@@ -736,4 +998,6 @@ YOUTUBE_TOOLS = [
     youtube_channel_list,
     youtube_bulk_transcribe,
     youtube_get_comments,
+    youtube_harvest_channel,
+    youtube_export_corpus,
 ]
