@@ -286,24 +286,34 @@ def _enter_mcp_clients(mcp_clients):
     ``list_tools_sync()`` raises, that client is cleaned up and skipped —
     the remaining clients still load normally.  This prevents a single
     flaky MCP server (e.g. TranscriptAPI) from killing ALL MCP tools.
+
+    Failed clients are removed from *mcp_clients* in-place so that the
+    caller's shutdown cleanup (``_cleanup_mcp``) only calls ``__exit__``
+    on clients that are in a properly-entered state.
     """
     entered: list = []
     tool_list: list = []
     for client in mcp_clients:
+        enter_succeeded = False
         try:
             client.__enter__()
-            entered.append(client)
+            enter_succeeded = True
             tool_list.extend(client.list_tools_sync())
+            entered.append(client)
         except Exception:
             logger.warning(
                 "MCP client failed to initialise, skipping: %s",
                 getattr(client, "_transport_factory", client),
                 exc_info=True,
             )
-            try:
-                client.__exit__(None, None, None)
-            except Exception:
-                pass
+            # Only call __exit__ if __enter__ succeeded (context manager protocol)
+            if enter_succeeded:
+                try:
+                    client.__exit__(None, None, None)
+                except Exception:
+                    pass
+    # Remove failed clients so _cleanup_mcp at shutdown won't double-exit them
+    mcp_clients[:] = entered
     return tool_list
 
 

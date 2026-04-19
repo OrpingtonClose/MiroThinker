@@ -73,7 +73,7 @@ _SKILLS_DIR = Path(__file__).parent / "skills"
 _SKILL_TRIGGERS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(
-            r"youtube|video.?channel|transcript|harvest.?channel",
+            r"youtube|video.?channel|youtube.?transcript|harvest.?channel",
             re.IGNORECASE,
         ),
         "youtube-research",
