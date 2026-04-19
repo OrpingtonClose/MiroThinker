@@ -252,14 +252,20 @@ class GossipSwarm:
         worker_summaries = {a.angle: a.summary for a in assignments}
 
         # ── Phase 3: Serendipity Bridge ──────────────────────────────
+        # Wrapped in try/except: serendipity is optional bonus insight and
+        # must not crash the pipeline, discarding expensive phases 0-2.
         serendipity_insights = ""
         if config.enable_serendipity and len(assignments) >= 2:
             phase_start = time.monotonic()
-            serendipity_insights = await find_serendipitous_connections(
-                worker_summaries=worker_summaries,
-                query=query,
-                complete_fn=self.complete,
-            )
+            try:
+                serendipity_insights = await find_serendipitous_connections(
+                    worker_summaries=worker_summaries,
+                    query=query,
+                    complete_fn=self.complete,
+                )
+            except Exception:
+                logger.warning("serendipity bridge failed, continuing without it")
+                serendipity_insights = ""
             metrics.total_llm_calls += 1
             metrics.serendipity_produced = bool(serendipity_insights)
             metrics.phase_times["serendipity"] = time.monotonic() - phase_start
