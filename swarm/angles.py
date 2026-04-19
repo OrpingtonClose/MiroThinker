@@ -3,23 +3,34 @@
 
 """Angle detection and corpus splitting for the gossip swarm.
 
-Two strategies for assigning work to specialist workers:
+Three strategies for assigning work to specialist workers:
 
-1. **Angle-based** (preferred): Detect semantic sections/topics in the corpus
-   and assign each to a specialist. Workers get coherent, topic-aligned chunks.
-   Scored 9/10 cross-referencing in benchmarks.
+1. **LLM-semantic** (best): Ask the LLM to score each section-angle pair,
+   then solve optimal assignment via the Hungarian algorithm.  This ensures
+   sections go to the angle that will extract the MOST value, not just the
+   first substring match.  Costs 1 extra LLM call (~2-5s).
 
-2. **Size-based** (fallback): Split the corpus into roughly equal chunks by
-   character count. Workers get arbitrary slices. Scored 8/10 in benchmarks.
+2. **Keyword** (fast fallback): Match sections to angles by substring overlap
+   in titles.  Zero extra cost but greedy — a section about "trenbolone and
+   sleep" always goes to the trenbolone worker, even if the sleep/circadian
+   worker would extract more value.
 
-Angle-based is preferred because it produces better specialist depth and
-enables the serendipity bridge to find cross-angle connections.
+3. **Size-based** (structural fallback): Split the corpus into roughly equal
+   chunks by character count.  Workers get arbitrary slices.
+
+LLM-semantic is preferred and used by default when a ``complete_fn`` is
+available.  Set ``SwarmConfig.enable_semantic_assignment = False`` to
+fall back to keyword matching.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import re
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -145,33 +156,28 @@ async def detect_angles_via_llm(
         return []
 
 
-def assign_workers(
+def _prepare_sections(
     sections: list[CorpusSection],
-    angles: list[str] | None = None,
-    max_workers: int = 6,
-    max_section_chars: int = 30000,
-) -> list[WorkerAssignment]:
-    """Assign corpus sections to workers.
+    max_workers: int,
+    max_section_chars: int,
+) -> list[CorpusSection]:
+    """Merge small sections and split large ones to fit worker count.
 
-    If angles are provided (from LLM detection), maps sections to the
-    closest matching angle. Otherwise, uses section titles as angles.
+    Args:
+        sections: Raw corpus sections.
+        max_workers: Maximum number of workers.
+        max_section_chars: Maximum chars per section.
 
-    Sections larger than max_section_chars are split into sub-sections.
-    Small sections are merged together.
+    Returns:
+        Prepared sections list (at most ``max_workers`` entries).
     """
     if not sections:
         return []
 
-    # If no LLM angles, use section titles as angles
-    if not angles:
-        angles = [s.title for s in sections]
-
-    # Cap sections to max_workers
+    # Cap sections to max_workers by merging smallest
     if len(sections) > max_workers:
-        # Merge smallest sections together
         sections = sorted(sections, key=lambda s: s.char_count, reverse=True)
         while len(sections) > max_workers:
-            # Merge the two smallest
             smallest = sections.pop()
             second_smallest = sections.pop()
             merged = CorpusSection(
@@ -187,7 +193,6 @@ def assign_workers(
         if section.char_count <= max_section_chars:
             final_sections.append(section)
         else:
-            # Split into sub-sections at paragraph boundaries
             parts = re.split(r'\n\s*\n', section.content)
             current_chunk: list[str] = []
             current_size = 0
@@ -209,29 +214,241 @@ def assign_workers(
                     content="\n\n".join(current_chunk),
                 ))
 
-    # Cap to max_workers after splitting
-    final_sections = final_sections[:max_workers]
+    return final_sections[:max_workers]
 
-    # Create worker assignments — each must have a UNIQUE angle key
-    # to prevent dict-keyed data loss downstream (engine.py builds
-    # worker_summaries = {angle: summary}).
+
+async def score_section_angle_pairs(
+    sections: list[CorpusSection],
+    angles: list[str],
+    complete_fn,
+) -> list[list[float]] | None:
+    """Use LLM to score how well each section matches each angle.
+
+    Returns an NxM score matrix where N=sections, M=angles.
+    Higher scores mean better fit.  Returns ``None`` if the LLM call
+    fails or produces unparseable output, so the caller can fall back
+    to keyword matching.
+
+    The LLM sees truncated previews of each section (first 500 chars)
+    to keep the prompt compact.  This costs 1 extra LLM call.
+
+    Args:
+        sections: Prepared corpus sections.
+        angles: Detected research angles.
+        complete_fn: Async LLM completion callable.
+
+    Returns:
+        Score matrix (list of lists of floats, 0-10 scale), or ``None``
+        on any failure.
+    """
+    n_sections = len(sections)
+    n_angles = len(angles)
+
+    # Build compact section previews
+    section_descs = []
+    for i, s in enumerate(sections):
+        preview = s.content[:500].replace("\n", " ")
+        section_descs.append(f"S{i}: \"{s.title}\" — {preview}")
+
+    angle_descs = []
+    for j, a in enumerate(angles):
+        angle_descs.append(f"A{j}: {a}")
+
+    prompt = (
+        "You are an assignment optimizer. Score how well each SECTION "
+        "matches each ANGLE for a research synthesis task. Each section "
+        "should go to the angle whose specialist would extract the MOST "
+        "value from it — not just keyword overlap, but deep semantic "
+        "relevance.\n\n"
+        "SECTIONS:\n" + "\n".join(section_descs) + "\n\n"
+        "ANGLES:\n" + "\n".join(angle_descs) + "\n\n"
+        f"Return a JSON array of {n_sections} arrays, each with {n_angles} "
+        "scores (0-10). Example for 2 sections, 3 angles:\n"
+        "[[8, 2, 5], [1, 9, 3]]\n\n"
+        "Return ONLY the JSON array, no explanation:"
+    )
+
+    try:
+        response = await complete_fn(prompt)
+        # Extract JSON array from response (handle markdown code blocks)
+        cleaned = response.strip()
+        if "```" in cleaned:
+            cleaned = cleaned.split("```")[1]
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:]
+            cleaned = cleaned.strip()
+        scores = json.loads(cleaned)
+
+        # Validate shape
+        if (
+            isinstance(scores, list)
+            and len(scores) == n_sections
+            and all(
+                isinstance(row, list) and len(row) == n_angles
+                for row in scores
+            )
+        ):
+            # Clamp to 0-10 and convert to float
+            return [
+                [max(0.0, min(10.0, float(v))) for v in row]
+                for row in scores
+            ]
+
+        logger.warning(
+            "section_count=<%d>, angle_count=<%d> | "
+            "LLM score matrix has wrong shape, falling back to keyword",
+            n_sections, n_angles,
+        )
+    except (json.JSONDecodeError, ValueError, TypeError, KeyError) as exc:
+        logger.warning(
+            "error=<%s> | LLM score matrix parse failed, falling back to keyword",
+            exc,
+        )
+    except Exception as exc:
+        logger.warning(
+            "error=<%s> | LLM scoring call failed, falling back to keyword",
+            exc,
+        )
+
+    # Return None so caller falls back to keyword matching
+    return None
+
+
+def _optimal_assignment(
+    scores: list[list[float]],
+    n_sections: int,
+    n_angles: int,
+) -> list[int]:
+    """Solve optimal section-to-angle assignment from a score matrix.
+
+    Uses the Hungarian algorithm (scipy) for optimal bipartite matching
+    that maximizes total assignment quality.  Falls back to greedy
+    assignment if scipy is not available.
+
+    Args:
+        scores: NxM score matrix (higher = better fit).
+        n_sections: Number of sections.
+        n_angles: Number of angles.
+
+    Returns:
+        List of angle indices, one per section.
+    """
+    try:
+        from scipy.optimize import linear_sum_assignment  # type: ignore[import-untyped]
+
+        # Hungarian algorithm minimizes cost, so negate scores
+        # Handle case where sections != angles by padding
+        max_dim = max(n_sections, n_angles)
+        cost_matrix = [[0.0] * max_dim for _ in range(max_dim)]
+        for i in range(n_sections):
+            for j in range(n_angles):
+                cost_matrix[i][j] = -scores[i][j]
+
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+        # Extract assignment for actual sections
+        assignment = [0] * n_sections
+        for r, c in zip(row_ind, col_ind):
+            if r < n_sections:
+                assignment[r] = c if c < n_angles else r % n_angles
+        return assignment
+
+    except ImportError:
+        logger.info("scipy not available, using greedy assignment")
+
+    # Greedy fallback: for each section, pick the highest-scoring
+    # unused angle.  If more sections than angles, angles repeat.
+    used: set[int] = set()
+    assignment = []
+    for i in range(n_sections):
+        row = scores[i]
+        # Sort angles by score descending
+        ranked = sorted(range(n_angles), key=lambda j: row[j], reverse=True)
+        # Pick the best unused angle, or the best overall if all used
+        chosen = ranked[0]
+        for j in ranked:
+            if j not in used:
+                chosen = j
+                break
+        assignment.append(chosen)
+        used.add(chosen)
+    return assignment
+
+
+def assign_workers(
+    sections: list[CorpusSection],
+    angles: list[str] | None = None,
+    max_workers: int = 6,
+    max_section_chars: int = 30000,
+    score_matrix: list[list[float]] | None = None,
+) -> list[WorkerAssignment]:
+    """Assign corpus sections to workers.
+
+    Three assignment strategies (in order of preference):
+
+    1. **Optimal (score_matrix provided)**: Uses pre-computed LLM scores
+       and Hungarian algorithm for globally optimal assignment.
+    2. **Keyword (no score_matrix, angles provided)**: Substring matching
+       between section titles and angle names.
+    3. **Positional (no angles)**: Section titles become angle names.
+
+    Sections larger than ``max_section_chars`` are split into sub-sections.
+    Small sections are merged together.
+
+    Args:
+        sections: Raw corpus sections from ``detect_sections()``.
+        angles: Detected research angles (from LLM or structural).
+        max_workers: Maximum number of workers.
+        max_section_chars: Maximum chars per worker section.
+        score_matrix: Optional NxM score matrix from
+            ``score_section_angle_pairs()``.  If provided, uses optimal
+            assignment instead of keyword matching.
+
+    Returns:
+        List of WorkerAssignment objects, one per worker.
+    """
+    if not sections:
+        return []
+
+    if not angles:
+        angles = [s.title for s in sections]
+
+    final_sections = _prepare_sections(sections, max_workers, max_section_chars)
+    if not final_sections:
+        return []
+
+    # Determine section-to-angle mapping
+    if score_matrix is not None and len(score_matrix) == len(final_sections):
+        # Optimal assignment via score matrix
+        angle_indices = _optimal_assignment(
+            score_matrix, len(final_sections), len(angles),
+        )
+        logger.info(
+            "sections=<%d>, angles=<%d> | using optimal semantic assignment",
+            len(final_sections), len(angles),
+        )
+    else:
+        # Keyword fallback
+        angle_indices = []
+        for i, section in enumerate(final_sections):
+            best_idx = i % len(angles)
+            for j, angle in enumerate(angles):
+                if (
+                    angle.lower() in section.title.lower()
+                    or section.title.lower() in angle.lower()
+                ):
+                    best_idx = j
+                    break
+            angle_indices.append(best_idx)
+
+    # Create worker assignments with unique angle keys
     assignments: list[WorkerAssignment] = []
-    used_angles: dict[str, int] = {}  # angle -> count of uses
+    used_angles: dict[str, int] = {}
 
     for i, section in enumerate(final_sections):
-        # Match section to closest angle (simple substring matching)
-        best_angle = section.title
-        if angles:
-            for angle in angles:
-                if angle.lower() in section.title.lower() or section.title.lower() in angle.lower():
-                    best_angle = angle
-                    break
-            else:
-                # No match — use the angle at this index if available
-                if i < len(angles):
-                    best_angle = angles[i]
+        angle_idx = angle_indices[i]
+        best_angle = angles[angle_idx] if angle_idx < len(angles) else section.title
 
-        # Disambiguate: if this angle was already used, append a part number
         if best_angle in used_angles:
             used_angles[best_angle] += 1
             unique_angle = f"{best_angle} (part {used_angles[best_angle]})"

@@ -3,12 +3,29 @@
 
 """Queen merge — combines all worker summaries into the final synthesis.
 
+The queen is a senior synthesis editor, not a summarizer.  Its role is
+informed by SOTA multi-agent merge techniques:
+
+- **Mixture-of-Agents** (ICLR 2025, arXiv 2406.04692): The queen acts
+  as the final aggregation layer reading all previous-layer outputs.
+  It must produce a response strictly better than any individual input.
+
+- **Evidence hierarchy**: The queen evaluates claims by source quality,
+  cross-worker agreement, and specificity.  Consensus across 3+ workers
+  is near-certain; single-worker claims are flagged for confidence.
+
+- **Contradiction resolution protocol**: When workers disagree, the queen
+  does not average -- it evaluates evidence strength, identifies the
+  methodological reason for disagreement, and either resolves or
+  explicitly preserves both positions with reasoning.
+
+- **Narrative integration**: Serendipity insights are not appended but
+  woven into the causal flow at the points where they illuminate
+  connections between specialist domains.
+
 The queen sees ~6-7K tokens instead of the full corpus (which may be 20K+).
 This is a 3x context reduction while retaining all cross-referenced
 analytical depth from the gossip rounds.
-
-If serendipity insights are available, they are injected into the merge
-prompt as a dedicated section so the queen can weave them into the narrative.
 """
 
 from __future__ import annotations
@@ -33,32 +50,50 @@ def _build_queen_prompt(
     re-scanned by a subsequent replacement pass.
     """
     return (
-        f"You are the queen synthesizer in a research swarm. Today is: {date}\n\n"
+        f"You are the QUEEN SYNTHESIZER — a senior research editor whose output "
+        f"must be strictly superior to any individual worker's summary. "
+        f"Today is: {date}\n\n"
         f"{n_workers} specialist workers have independently processed different "
-        f"sections of a research corpus, then refined their summaries through a "
-        f"gossip protocol where each worker cross-referenced peers' findings.\n\n"
-        f"Your job: merge all worker summaries into ONE comprehensive, well-structured "
-        f"final answer to the user's question.\n\n"
+        f"sections of a research corpus, then refined their summaries through "
+        f"multiple rounds of peer gossip where each worker cross-referenced "
+        f"findings from all other specialists.\n\n"
         f"USER QUERY: {query}\n\n"
         f"WORKER SUMMARIES (post-gossip refinement):\n"
         f"{summaries_text}\n\n"
         f"{serendipity_block}"
-        f"MERGE RULES:\n"
-        f"1. Cross-reference across ALL workers. Where multiple workers agree, note consensus.\n"
-        f"2. Where workers contradict, resolve using source quality and confidence.\n"
-        f"3. Structure with clear headings and logical flow.\n"
-        f"4. Cite sources with URLs where available.\n"
-        f"5. Every sentence must deliver information. No filler, no disclaimers.\n"
-        f"6. Keep speculative findings, clearly labeled as hypotheses.\n"
-        f"7. Do NOT add unsolicited warnings or ethical disclaimers.\n"
-        f"8. Mark areas where evidence is weak with [NEEDS VERIFICATION].\n"
-        f"9. SYNTHESIZE into a flowing narrative — do NOT produce bullet-point lists or "
-        f"data dumps. Weave findings into causal explanations and connected arguments.\n"
-        f"10. If serendipity insights are provided above, integrate them naturally "
-        f"into the appropriate sections — they represent cross-angle connections "
-        f"that individual specialists missed.\n"
-        f"11. AIM FOR 3000-6000 WORDS. Be comprehensive but not redundant. "
-        f"Merge overlapping findings — do not repeat the same point from different workers.\n\n"
+        f"═══ SYNTHESIS PROTOCOL ═══\n\n"
+        f"PHASE 1 — EVIDENCE HIERARCHY:\n"
+        f"Before writing, mentally classify every claim by confidence:\n"
+        f"  • CONSENSUS (3+ workers agree): Near-certain. State directly.\n"
+        f"  • CORROBORATED (2 workers agree): High confidence. Note the agreement.\n"
+        f"  • SINGLE-SOURCE (1 worker only): Flag confidence level explicitly.\n"
+        f"  • CONTRADICTED (workers disagree): Apply contradiction protocol below.\n\n"
+        f"PHASE 2 — CONTRADICTION RESOLUTION:\n"
+        f"When workers disagree, do NOT average or hand-wave. For each conflict:\n"
+        f"  a) Identify WHAT exactly they disagree about\n"
+        f"  b) Evaluate the evidence QUALITY behind each position\n"
+        f"  c) Determine if the disagreement is real (different conclusions from "
+        f"same data) or apparent (different aspects of the same phenomenon)\n"
+        f"  d) Either RESOLVE with reasoning, or PRESERVE both positions with "
+        f"explicit evidence assessment for each\n\n"
+        f"PHASE 3 — NARRATIVE SYNTHESIS:\n"
+        f"  1. Structure with clear headings building a causal argument.\n"
+        f"  2. WEAVE findings into connected explanations — show how mechanism A "
+        f"leads to consequence B which interacts with pathway C.\n"
+        f"  3. Cite sources with URLs where available.\n"
+        f"  4. Every sentence must deliver information. No filler, no disclaimers.\n"
+        f"  5. Keep speculative findings, clearly labeled as hypotheses.\n"
+        f"  6. Do NOT add unsolicited warnings or ethical disclaimers.\n"
+        f"  7. Mark weak evidence with [NEEDS VERIFICATION].\n"
+        f"  8. Do NOT produce bullet-point lists or data dumps.\n"
+        f"  9. If serendipity insights are provided, integrate them at the "
+        f"causal points where they illuminate cross-domain connections — do NOT "
+        f"append them as a separate section.\n"
+        f"  10. Identify at least one EMERGENT INSIGHT that exists in the "
+        f"combined evidence but was not explicitly stated by any individual worker.\n\n"
+        f"AIM FOR 3000-6000 WORDS. Be comprehensive but not redundant. "
+        f"Merge overlapping findings — do not repeat the same point from different "
+        f"workers. Your synthesis must be worth more than the sum of its parts.\n\n"
         f"Produce the final comprehensive synthesis:"
     )
 
@@ -149,17 +184,29 @@ def _build_knowledge_exec_summary_prompt(
         f"WORKER FINDINGS (condensed for overview):\n"
         f"{summaries_text}\n\n"
         f"{serendipity_block}"
-        f"PRODUCE EXACTLY:\n"
+        f"PRODUCE EXACTLY:\n\n"
         f"1. An EXECUTIVE SUMMARY (800-1500 words) that:\n"
-        f"   - States the core findings and their significance\n"
+        f"   - Opens with the single most important finding or resolution\n"
+        f"   - States the core findings ranked by EVIDENCE STRENGTH:\n"
+        f"     • CONSENSUS findings (3+ workers agree) first\n"
+        f"     • CORROBORATED findings (2 workers agree) second\n"
+        f"     • NOVEL single-source findings third\n"
         f"   - Identifies the most important cross-angle connections\n"
-        f"   - Highlights key contradictions or unresolved questions\n"
-        f"   - Does NOT repeat specific data points — those are in the full sections below\n"
-        f"   - Reads as a standalone overview for someone who may not read the full report\n\n"
-        f"2. A CROSS-REFERENCE MATRIX (markdown table) showing which angles share "
-        f"findings, contradict each other, or have complementary insights.\n\n"
-        f"3. A KEY FINDINGS list (5-10 bullet points) — the most important "
-        f"individual discoveries across all angles.\n\n"
+        f"   - Highlights key contradictions WITH assessment of which "
+        f"position has stronger evidence (do not just list them neutrally)\n"
+        f"   - Does NOT repeat specific data points — those are in the full "
+        f"sections below\n"
+        f"   - Reads as a standalone overview for someone who may not read "
+        f"the full report\n\n"
+        f"2. A CROSS-REFERENCE MATRIX (markdown table) showing which angles "
+        f"share findings, contradict each other, or have complementary insights. "
+        f"Use symbols: ✓ (agreement), ✗ (contradiction), ↔ (complementary), "
+        f"— (no overlap).\n\n"
+        f"3. A KEY FINDINGS list (5-10 items) — the most important individual "
+        f"discoveries across all angles. Each must include:\n"
+        f"   - The finding itself\n"
+        f"   - Evidence strength indicator (consensus/corroborated/single-source)\n"
+        f"   - Which angle(s) contributed it\n\n"
         f"Do NOT include disclaimers, safety warnings, or moral commentary. "
         f"Do NOT summarize the full worker findings — those will appear in full "
         f"after your summary. Focus on the META-VIEW: what patterns emerge when "
