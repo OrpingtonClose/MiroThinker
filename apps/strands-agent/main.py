@@ -21,11 +21,13 @@ import html
 import json
 import logging
 import queue
+import re
 import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -59,6 +61,72 @@ _multi_agent = None
 _mcp_clients: list = []
 _multi_researcher = None
 _agent_lock = threading.Lock()
+
+# ── Skill auto-activation ─────────────────────────────────────────────
+# Weaker models don't reliably call the `skills` tool when instructed to.
+# Auto-detect query intent and inject the full skill content directly into
+# the system prompt so the agent follows the methodology without needing
+# the meta-reasoning step of activating it.
+
+_SKILLS_DIR = Path(__file__).parent / "skills"
+
+_SKILL_TRIGGERS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(
+            r"youtube|video.?channel|transcript|harvest.?channel",
+            re.IGNORECASE,
+        ),
+        "youtube-research",
+    ),
+]
+
+_skill_cache: dict[str, str] = {}
+
+
+def _load_skill_content(skill_name: str) -> str | None:
+    """Read and cache a skill's SKILL.md content."""
+    if skill_name in _skill_cache:
+        return _skill_cache[skill_name]
+    path = _SKILLS_DIR / skill_name / "SKILL.md"
+    if not path.is_file():
+        return None
+    content = path.read_text(encoding="utf-8")
+    # Strip YAML frontmatter
+    if content.startswith("---"):
+        end = content.find("---", 3)
+        if end != -1:
+            content = content[end + 3:].strip()
+    _skill_cache[skill_name] = content
+    return content
+
+
+def _auto_activate_skills(query: str, agent: object) -> None:
+    """Detect query intent and inject matching skill content into system prompt.
+
+    Modifies agent.system_prompt in-place before invocation.  The injected
+    block is wrapped in XML tags so the AgentSkills plugin's own injection
+    doesn't conflict.
+    """
+    for pattern, skill_name in _SKILL_TRIGGERS:
+        if pattern.search(query):
+            content = _load_skill_content(skill_name)
+            if content:
+                marker = f"<!-- auto-skill:{skill_name} -->"
+                current = getattr(agent, "system_prompt", "") or ""
+                if marker in current:
+                    return  # already injected
+                injection = (
+                    f"\n\n{marker}\n"
+                    f"<active_skill name=\"{skill_name}\">\n"
+                    f"{content}\n"
+                    f"</active_skill>\n"
+                )
+                agent.system_prompt = current + injection  # type: ignore[attr-defined]
+                logger.info(
+                    "auto-activated skill=%s for query (pattern matched)",
+                    skill_name,
+                )
+                return  # one skill per query is enough
 
 
 # ── Observability wrappers ────────────────────────────────────────────
@@ -285,6 +353,7 @@ def query_single(req: QueryRequest):
 
         _single_agent.messages.clear()
         reset_budget()
+        _auto_activate_skills(req.query, _single_agent)
         try:
             response = _single_agent(req.query)
             metrics = None
@@ -321,6 +390,7 @@ def query_multi(req: QueryRequest):
         _multi_agent.messages.clear()
         if _multi_researcher is not None:
             _multi_researcher.messages.clear()
+            _auto_activate_skills(req.query, _multi_researcher)
         reset_budget()
         try:
             response = _multi_agent(req.query)
