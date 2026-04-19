@@ -984,7 +984,7 @@ def youtube_export_corpus(
             f"Corpus assembled: {len(corpus_parts)} videos, {total_chars:,} chars total.\n"
             f"Too large to return inline — use this tool's output as input to the swarm engine.\n\n"
             f"**First 50K chars preview:**\n\n{corpus[:50000]}\n\n"
-            f"[...truncated — {total_chars - 50000:,} more chars available...]"
+            f"[...truncated — {len(corpus) - 50000:,} more chars available...]"
         )
 
     return corpus
