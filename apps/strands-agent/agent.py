@@ -33,6 +33,7 @@ from strands.handlers.callback_handler import (
     PrintingCallbackHandler,
 )
 from strands.agent.conversation_manager import SlidingWindowConversationManager
+
 from strands.vended_plugins.skills import AgentSkills
 
 from config import build_model
@@ -448,7 +449,11 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
     if skills_plugin is not None:
         plugins.append(skills_plugin)
 
-    # Researcher: tool-capable agent that does the actual searching
+    # Researcher: tool-capable agent that does the actual searching.
+    # Note: concurrent invocation is NOT enabled because the researcher
+    # shares mutable conversation state (messages list). Concurrent calls
+    # would interleave messages from different sub-questions, corrupting
+    # context. If parallel research is needed, spawn separate Agent instances.
     researcher = Agent(
         model=model,
         system_prompt=RESEARCHER_PROMPT,

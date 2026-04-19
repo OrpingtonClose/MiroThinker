@@ -25,6 +25,7 @@ import logging
 import os
 
 from strands import tool
+from async_http import async_get
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 @tool
-def check_retraction(doi: str) -> str:
+async def check_retraction(doi: str) -> str:
     """Check if a paper has been retracted using the Open Retractions API.
 
     Fast, free check against the retraction database. Use this to verify
@@ -48,7 +49,6 @@ def check_retraction(doi: str) -> str:
     Returns:
         Retraction status: whether the paper is retracted, and if so, details.
     """
-    import httpx
 
     # Normalize DOI
     doi = doi.strip()
@@ -58,7 +58,7 @@ def check_retraction(doi: str) -> str:
         doi = doi[len("http://doi.org/"):]
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             f"https://api.openalex.org/works/doi:{doi}",
             timeout=15,
             headers={"User-Agent": "MiroThinker/1.0 (research agent)"},
@@ -85,7 +85,7 @@ def check_retraction(doi: str) -> str:
 
     # Fallback: check CrossRef for retraction notices
     try:
-        resp = httpx.get(
+        resp = await async_get(
             f"https://api.crossref.org/works/{doi}",
             timeout=15,
             headers={"User-Agent": "MiroThinker/1.0 (research agent)"},
@@ -124,7 +124,7 @@ def check_retraction(doi: str) -> str:
 
 
 @tool
-def batch_check_retractions(dois: str) -> str:
+async def batch_check_retractions(dois: str) -> str:
     """Check multiple DOIs for retractions in one call.
 
     Args:
@@ -133,7 +133,6 @@ def batch_check_retractions(dois: str) -> str:
     Returns:
         Retraction status for each DOI.
     """
-    import httpx
 
     doi_list = [d.strip() for d in dois.split(",") if d.strip()]
     if not doi_list:
@@ -148,7 +147,7 @@ def batch_check_retractions(dois: str) -> str:
         status = "UNKNOWN"
         title = doi
         try:
-            resp = httpx.get(
+            resp = await async_get(
                 f"https://api.openalex.org/works/doi:{doi}",
                 timeout=10,
                 headers={"User-Agent": "MiroThinker/1.0 (research agent)"},
@@ -175,7 +174,7 @@ def batch_check_retractions(dois: str) -> str:
 
 
 @tool
-def search_retractions(
+async def search_retractions(
     query: str = "",
     reason: str = "",
     max_results: int = 20,
@@ -195,7 +194,6 @@ def search_retractions(
     Returns:
         List of retracted papers with retraction reasons and dates.
     """
-    import httpx
 
     # CrossRef now includes Retraction Watch data
     # Filter for retracted works
@@ -207,7 +205,7 @@ def search_retractions(
         params["query"] = query
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://api.crossref.org/works",
             params=params,
             timeout=30,

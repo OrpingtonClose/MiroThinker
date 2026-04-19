@@ -23,9 +23,12 @@ Environment variables:
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import os
+
+from async_http import async_get, async_post
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -133,7 +136,7 @@ def extract_with_docling(
 # ── Mathpix backend ───────────────────────────────────────────────────
 
 
-def extract_with_mathpix(
+async def extract_with_mathpix(
     pdf_bytes: bytes,
     max_pages: int = 100,
     output_format: str = "text",
@@ -156,9 +159,7 @@ def extract_with_mathpix(
         return None
 
     try:
-        import httpx
         import base64
-        import time
 
         # Mathpix PDF API: POST the PDF and poll for results
         b64_pdf = base64.b64encode(pdf_bytes).decode("ascii")
@@ -170,7 +171,7 @@ def extract_with_mathpix(
         }
 
         # Submit PDF for processing
-        resp = httpx.post(
+        resp = await async_post(
             "https://api.mathpix.com/v3/pdf",
             headers=headers,
             json={
@@ -194,8 +195,8 @@ def extract_with_mathpix(
 
         # Poll for completion (Mathpix processes async)
         for _ in range(60):  # max 5 minutes
-            time.sleep(5)
-            status_resp = httpx.get(
+            await asyncio.sleep(5)
+            status_resp = await async_get(
                 f"https://api.mathpix.com/v3/pdf/{pdf_id}",
                 headers=headers,
                 timeout=30,
@@ -206,7 +207,7 @@ def extract_with_mathpix(
             status = status_resp.json().get("status", "")
             if status == "completed":
                 # Fetch the output
-                out_resp = httpx.get(
+                out_resp = await async_get(
                     f"https://api.mathpix.com/v3/pdf/{pdf_id}.{output_format}",
                     headers=headers,
                     timeout=60,
@@ -259,7 +260,7 @@ def extract_with_pdfplumber(pdf_bytes: bytes, max_pages: int = 100) -> str:
 # ── Unified extraction entry point ────────────────────────────────────
 
 
-def extract_pdf(
+async def extract_pdf(
     pdf_bytes: bytes,
     max_pages: int = 100,
     enable_ocr: bool = False,
@@ -293,7 +294,7 @@ def extract_pdf(
 
     if backend == "mathpix":
         fmt = "latex" if prefer_latex else "text"
-        result = extract_with_mathpix(pdf_bytes, max_pages, fmt)
+        result = await extract_with_mathpix(pdf_bytes, max_pages, fmt)
         if result:
             return f"[Extracted via Mathpix]\n{result}"
         logger.warning("Mathpix forced but unavailable, falling back to pdfplumber")
@@ -310,7 +311,7 @@ def extract_pdf(
 
     if _mathpix_configured():
         fmt = "latex" if prefer_latex else "text"
-        result = extract_with_mathpix(pdf_bytes, max_pages, fmt)
+        result = await extract_with_mathpix(pdf_bytes, max_pages, fmt)
         if result:
             return f"[Extracted via Mathpix]\n{result}"
 

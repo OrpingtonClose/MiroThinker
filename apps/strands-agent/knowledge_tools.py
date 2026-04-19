@@ -24,6 +24,7 @@ import os
 from urllib.parse import quote, quote_plus
 
 from strands import tool
+from async_http import async_get
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 @tool
-def openalex_search(
+async def openalex_search(
     query: str,
     max_results: int = 15,
     filter_oa: bool = False,
@@ -56,7 +57,6 @@ def openalex_search(
     Returns:
         Formatted list of works with full metadata and download links.
     """
-    import httpx
 
     params: dict = {
         "search": query,
@@ -70,7 +70,7 @@ def openalex_search(
         params["filter"] = "open_access.is_oa:true"
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://api.openalex.org/works",
             params=params,
             headers={"User-Agent": "MiroThinker/1.0 (mailto:support@miromind.ai)"},
@@ -144,7 +144,7 @@ def openalex_search(
 
 
 @tool
-def openalex_get_work(work_id: str) -> str:
+async def openalex_get_work(work_id: str) -> str:
     """Get full details for an OpenAlex work by ID or DOI.
 
     Args:
@@ -154,7 +154,6 @@ def openalex_get_work(work_id: str) -> str:
     Returns:
         Full metadata including abstract, references, and related works.
     """
-    import httpx
 
     # Accept DOI or OpenAlex ID
     if work_id.startswith("10."):
@@ -165,7 +164,7 @@ def openalex_get_work(work_id: str) -> str:
         url = f"https://api.openalex.org/works/{work_id}"
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             url,
             headers={"User-Agent": "MiroThinker/1.0 (mailto:support@miromind.ai)"},
             timeout=30,
@@ -224,7 +223,7 @@ def openalex_get_work(work_id: str) -> str:
 
 
 @tool
-def openalex_citation_network(
+async def openalex_citation_network(
     work_id: str,
     direction: str = "citations",
     max_results: int = 10,
@@ -240,13 +239,12 @@ def openalex_citation_network(
     Returns:
         List of citing/referenced works with metadata.
     """
-    import httpx
 
     # Resolve ID
     if work_id.startswith("10.") or work_id.startswith("https://doi.org/"):
         doi = work_id.replace("https://doi.org/", "")
         try:
-            resp = httpx.get(
+            resp = await async_get(
                 f"https://api.openalex.org/works/doi:{doi}",
                 headers={"User-Agent": "MiroThinker/1.0 (mailto:support@miromind.ai)"},
                 timeout=15,
@@ -264,7 +262,7 @@ def openalex_citation_network(
         filter_param = f"cited_by:{oa_id}"
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://api.openalex.org/works",
             params={
                 "filter": filter_param,
@@ -316,7 +314,7 @@ def openalex_citation_network(
 
 
 @tool
-def search_pubmed(
+async def search_pubmed(
     query: str,
     max_results: int = 10,
     sort: str = "relevance",
@@ -335,13 +333,12 @@ def search_pubmed(
     Returns:
         Formatted list of PubMed articles with abstracts.
     """
-    import httpx
 
     email = os.environ.get("NCBI_EMAIL", os.environ.get("UNPAYWALL_EMAIL", "research@miromind.ai"))
 
     # Step 1: Search for PMIDs
     try:
-        search_resp = httpx.get(
+        search_resp = await async_get(
             "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
             params={
                 "db": "pubmed",
@@ -367,7 +364,7 @@ def search_pubmed(
 
     # Step 2: Fetch details for each PMID
     try:
-        fetch_resp = httpx.get(
+        fetch_resp = await async_get(
             "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
             params={
                 "db": "pubmed",
@@ -420,7 +417,7 @@ def search_pubmed(
 
 
 @tool
-def pubmed_get_abstract(pmid: str) -> str:
+async def pubmed_get_abstract(pmid: str) -> str:
     """Get full abstract for a PubMed article by PMID.
 
     Args:
@@ -429,12 +426,11 @@ def pubmed_get_abstract(pmid: str) -> str:
     Returns:
         Full article metadata with abstract text.
     """
-    import httpx
 
     email = os.environ.get("NCBI_EMAIL", os.environ.get("UNPAYWALL_EMAIL", "research@miromind.ai"))
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
             params={
                 "db": "pubmed",
@@ -458,7 +454,7 @@ def pubmed_get_abstract(pmid: str) -> str:
 
 
 @tool
-def wikidata_search(query: str, max_results: int = 10) -> str:
+async def wikidata_search(query: str, max_results: int = 10) -> str:
     """Search Wikidata for structured entities. Free, no key needed.
 
     100M+ entities with structured properties and relationships. Useful
@@ -473,10 +469,9 @@ def wikidata_search(query: str, max_results: int = 10) -> str:
     Returns:
         List of matching Wikidata entities with descriptions.
     """
-    import httpx
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://www.wikidata.org/w/api.php",
             params={
                 "action": "wbsearchentities",
@@ -514,7 +509,7 @@ def wikidata_search(query: str, max_results: int = 10) -> str:
 
 
 @tool
-def wikidata_sparql(query: str) -> str:
+async def wikidata_sparql(query: str) -> str:
     """Execute a SPARQL query on Wikidata. Free, no key needed.
 
     Wikidata's SPARQL endpoint allows complex structured queries across
@@ -529,10 +524,9 @@ def wikidata_sparql(query: str) -> str:
     Returns:
         Query results in formatted table.
     """
-    import httpx
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://query.wikidata.org/sparql",
             params={"query": query, "format": "json"},
             timeout=60,
@@ -578,7 +572,7 @@ def wikidata_sparql(query: str) -> str:
 
 
 @tool
-def wikidata_get_entity(qid: str) -> str:
+async def wikidata_get_entity(qid: str) -> str:
     """Get detailed properties for a Wikidata entity by QID.
 
     Args:
@@ -587,10 +581,9 @@ def wikidata_get_entity(qid: str) -> str:
     Returns:
         Entity properties including labels, descriptions, aliases, and claims.
     """
-    import httpx
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://www.wikidata.org/w/api.php",
             params={
                 "action": "wbgetentities",
@@ -658,7 +651,7 @@ def wikidata_get_entity(qid: str) -> str:
 
 
 @tool
-def search_google_scholar(
+async def search_google_scholar(
     query: str,
     max_results: int = 10,
 ) -> str:
@@ -675,13 +668,12 @@ def search_google_scholar(
     Returns:
         Formatted list of Google Scholar results.
     """
-    import httpx
 
     # Try SerpAPI first (most reliable)
     serpapi_key = os.environ.get("SERPAPI_KEY", "")
     if serpapi_key:
         try:
-            resp = httpx.get(
+            resp = await async_get(
                 "https://serpapi.com/search.json",
                 params={
                     "engine": "google_scholar",
@@ -723,13 +715,19 @@ def search_google_scholar(
     if bright_data_key:
         proxy_url = f"http://{customer_id}-zone-{zone}:{bright_data_key}@brd.superproxy.io:33335"
         try:
-            resp = httpx.get(
-                "https://scholar.google.com/scholar",
-                params={"q": query, "num": max_results},
+            # proxy= is a client-construction-time setting in httpx, so we need
+            # a dedicated AsyncClient for proxy-routed requests.
+            import httpx as _httpx
+            async with _httpx.AsyncClient(
                 proxy=proxy_url,
-                timeout=30,
-                headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/120.0"},
-            )
+                timeout=_httpx.Timeout(connect=30, read=30, write=30, pool=10),
+                follow_redirects=True,
+            ) as proxy_client:
+                resp = await proxy_client.get(
+                    "https://scholar.google.com/scholar",
+                    params={"q": query, "num": max_results},
+                    headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/120.0"},
+                )
             resp.raise_for_status()
             # Basic parsing of Google Scholar HTML
             import re

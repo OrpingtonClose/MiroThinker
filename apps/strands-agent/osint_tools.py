@@ -25,6 +25,7 @@ import os
 from urllib.parse import quote, quote_plus
 
 from strands import tool
+from async_http import async_get, async_head
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 @tool
-def wayback_cdx_search(
+async def wayback_cdx_search(
     url: str,
     match_type: str = "prefix",
     from_date: str = "",
@@ -61,7 +62,6 @@ def wayback_cdx_search(
     Returns:
         List of archived snapshots with timestamps and access URLs.
     """
-    import httpx
 
     params: dict = {
         "url": url,
@@ -78,7 +78,7 @@ def wayback_cdx_search(
         params["filter"] = f"statuscode:{filter_status}"
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://web.archive.org/cdx/search/cdx",
             params=params,
             timeout=30,
@@ -158,7 +158,7 @@ def wayback_diff(url: str, timestamp1: str, timestamp2: str) -> str:
 
 
 @tool
-def ipfs_fetch(cid: str, path: str = "") -> str:
+async def ipfs_fetch(cid: str, path: str = "") -> str:
     """Fetch content from IPFS via public gateway. Free.
 
     IPFS content is censorship-resistant — once pinned, it can't be
@@ -172,7 +172,6 @@ def ipfs_fetch(cid: str, path: str = "") -> str:
     Returns:
         Content fetched from IPFS (text preview for text, info for binary).
     """
-    import httpx
 
     # Try multiple gateways
     gateways = [
@@ -184,14 +183,14 @@ def ipfs_fetch(cid: str, path: str = "") -> str:
 
     for gateway_url in gateways:
         try:
-            resp = httpx.head(gateway_url, timeout=15, follow_redirects=True)
+            resp = await async_head(gateway_url, timeout=15)
             if resp.status_code == 200:
                 content_type = resp.headers.get("content-type", "")
                 content_length = resp.headers.get("content-length", "unknown")
 
                 if "text" in content_type or "json" in content_type:
                     # Fetch text content
-                    text_resp = httpx.get(gateway_url, timeout=30, follow_redirects=True)
+                    text_resp = await async_get(gateway_url, timeout=30, follow_redirects=True)
                     return (
                         f"**IPFS content: {cid}{path}**\n"
                         f"Gateway: {gateway_url}\n"
@@ -217,7 +216,7 @@ def ipfs_fetch(cid: str, path: str = "") -> str:
 
 
 @tool
-def search_common_crawl(
+async def search_common_crawl(
     url: str,
     max_results: int = 10,
     index: str = "",
@@ -236,12 +235,11 @@ def search_common_crawl(
     Returns:
         List of matching pages from Common Crawl archive.
     """
-    import httpx
 
     # Get latest index if not specified
     if not index:
         try:
-            idx_resp = httpx.get(
+            idx_resp = await async_get(
                 "https://index.commoncrawl.org/collinfo.json",
                 timeout=15,
             )
@@ -253,7 +251,7 @@ def search_common_crawl(
             index = "CC-MAIN-2024-10"
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             f"https://index.commoncrawl.org/{index}-index",
             params={
                 "url": url,
@@ -333,7 +331,7 @@ def beacon_censorship_info() -> str:
 
 
 @tool
-def search_iacr_eprint(query: str, max_results: int = 10) -> str:
+async def search_iacr_eprint(query: str, max_results: int = 10) -> str:
     """Search IACR ePrint Archive for cryptography research. Free, no key.
 
     Contains research on encryption, privacy, surveillance countermeasures,
@@ -347,11 +345,10 @@ def search_iacr_eprint(query: str, max_results: int = 10) -> str:
     Returns:
         Formatted list of cryptography papers with PDF links.
     """
-    import httpx
 
     try:
         # IACR ePrint has a simple search endpoint
-        resp = httpx.get(
+        resp = await async_get(
             "https://eprint.iacr.org/search",
             params={
                 "q": query,

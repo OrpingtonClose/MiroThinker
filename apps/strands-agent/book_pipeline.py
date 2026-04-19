@@ -48,7 +48,11 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote, quote_plus, urljoin
 
+import asyncio
+
+import httpx
 from strands import tool
+from async_http import async_get
 
 logger = logging.getLogger(__name__)
 
@@ -292,7 +296,6 @@ def _get_http_client(timeout: int = 30, use_proxy: bool = False):
     When use_proxy=True, routes through Bright Data or Oxylabs residential
     proxy to bypass cloud IP blocks on shadow libraries.
     """
-    import httpx
 
     proxy_url = None
     if use_proxy:
@@ -338,7 +341,6 @@ def _try_mirrors(mirrors: list[str], path_fn, **kwargs) -> Optional[object]:
     First attempts direct connection on all mirrors, then retries with
     proxy if available (shadow libraries often block cloud IPs).
     """
-    import httpx
 
     # Pass 1: direct connection
     for mirror in mirrors:
@@ -515,7 +517,6 @@ def _datalake_lookup(content_hash: str) -> Optional[str]:
 
 def _search_open_library(query: str, max_results: int = 10) -> list[dict]:
     """Search Open Library's public API."""
-    import httpx
 
     results = []
     try:
@@ -566,7 +567,6 @@ def _search_libgen(query: str, max_results: int = 10) -> list[dict]:
 
     Tries direct connection first, then retries with proxy if available.
     """
-    import httpx
 
     results = []
 
@@ -682,7 +682,6 @@ def _download_libgen_book(md5: str) -> Optional[tuple[bytes, str]]:
 
     Tries direct connection first, then retries with proxy if available.
     """
-    import httpx
 
     for use_proxy in ([False, True] if _has_proxy() else [False]):
         for mirror in LIBGEN_MIRRORS:
@@ -759,7 +758,6 @@ def _search_annas_archive(query: str, max_results: int = 10,
 
     Tries direct connection first, then retries with proxy if available.
     """
-    import httpx
 
     results = []
     content_filter = f"&content={content_type}" if content_type else ""
@@ -833,7 +831,6 @@ def _search_zlibrary(query: str, max_results: int = 10) -> list[dict]:
 
     Tries direct connection first, then retries with proxy if available.
     """
-    import httpx
 
     results = []
 
@@ -911,7 +908,6 @@ def _download_from_scihub(doi: str) -> Optional[tuple[bytes, str]]:
 
     Tries direct connection first, then retries with proxy if available.
     """
-    import httpx
 
     for use_proxy in ([False, True] if _has_proxy() else [False]):
         for domain in SCIHUB_DOMAINS:
@@ -970,7 +966,6 @@ def _download_from_scihub(doi: str) -> Optional[tuple[bytes, str]]:
 
 def _search_gutenberg(query: str, max_results: int = 10) -> list[dict]:
     """Search Project Gutenberg via the Gutendex API."""
-    import httpx
 
     results = []
     try:
@@ -1025,7 +1020,6 @@ def _search_gutenberg(query: str, max_results: int = 10) -> list[dict]:
 
 def _search_google_books(query: str, max_results: int = 10) -> list[dict]:
     """Search Google Books API for metadata enrichment."""
-    import httpx
 
     results = []
     try:
@@ -1086,7 +1080,6 @@ def _search_google_books(query: str, max_results: int = 10) -> list[dict]:
 
 def _search_isbndb(query: str, max_results: int = 10) -> list[dict]:
     """Search ISBNdb for detailed book metadata."""
-    import httpx
 
     if not ISBNDB_API_KEY:
         return []
@@ -1133,7 +1126,6 @@ def _search_isbndb(query: str, max_results: int = 10) -> list[dict]:
 
 def _search_hathitrust(query: str, max_results: int = 10) -> list[dict]:
     """Search HathiTrust catalog for digitized books."""
-    import httpx
 
     results = []
     try:
@@ -1214,7 +1206,6 @@ def _search_internet_archive(query: str, max_results: int = 10) -> list[dict]:
     Goes beyond Open Library to find audiobooks, magazines, historical
     texts, and other formats in the Archive's 40M+ items.
     """
-    import httpx
 
     results = []
     try:
@@ -1431,7 +1422,6 @@ def download_book(
     Returns:
         Extracted text from the book, or an error message.
     """
-    import httpx
 
     if not url and not md5 and not doi:
         return "[ERROR] Provide at least one of: url, md5, or doi"
@@ -1543,7 +1533,7 @@ def download_book(
 
 
 @tool
-def download_book_by_doi(
+async def download_book_by_doi(
     doi: str,
     title: str = "",
     author: str = "",
@@ -1573,13 +1563,12 @@ def download_book_by_doi(
     if cached:
         return f"[FROM CACHE]\nDOI: {doi}\nTitle: {title or 'Unknown'}\n---\n{cached}"
 
-    import httpx
 
     # Strategy 1: Unpaywall — find legal open access version FIRST
     # This is free, fast, and legal — check before anything else
     if UNPAYWALL_EMAIL:
         try:
-            resp = httpx.get(
+            resp = await async_get(
                 f"https://api.unpaywall.org/v2/{doi}",
                 params={"email": UNPAYWALL_EMAIL},
                 timeout=15,
@@ -1594,8 +1583,9 @@ def download_book_by_doi(
                     if pdf_url:
                         logger.info("Unpaywall found OA version: %s (%s)",
                                     doi, best_oa.get("host_type", ""))
-                        result = download_book(
-                            url=pdf_url, doi=doi, title=title, author=author, source="direct"
+                        result = await asyncio.to_thread(
+                            download_book,
+                            url=pdf_url, doi=doi, title=title, author=author, source="direct",
                         )
                         if "[DOWNLOAD FAILED]" not in result and "[ERROR]" not in result:
                             _doi_cache_alias(cache_key, result, title)
@@ -1605,7 +1595,7 @@ def download_book_by_doi(
 
     # Strategy 2: CrossRef for open access PDF link
     try:
-        resp = httpx.get(
+        resp = await async_get(
             f"https://api.crossref.org/works/{doi}",
             headers={"User-Agent": "MiroThinker/1.0 (mailto:{})".format(
                 UNPAYWALL_EMAIL or "research@mirothinker.ai"
@@ -1628,8 +1618,9 @@ def download_book_by_doi(
                 if link.get("content-type") == "application/pdf":
                     pdf_url = link.get("URL", "")
                     if pdf_url:
-                        result = download_book(
-                            url=pdf_url, doi=doi, title=title, author=author, source="direct"
+                        result = await asyncio.to_thread(
+                            download_book,
+                            url=pdf_url, doi=doi, title=title, author=author, source="direct",
                         )
                         if "[DOWNLOAD FAILED]" not in result and "[ERROR]" not in result:
                             _doi_cache_alias(cache_key, result, title)
@@ -1638,7 +1629,9 @@ def download_book_by_doi(
         pass
 
     # Strategy 3: Sci-Hub (last resort for paywalled papers)
-    return download_book(doi=doi, title=title, author=author, source="scihub")
+    return await asyncio.to_thread(
+        download_book, doi=doi, title=title, author=author, source="scihub",
+    )
 
 
 @tool
@@ -1891,7 +1884,7 @@ def search_book_content(
 
 
 @tool
-def unpaywall_lookup(doi: str) -> str:
+async def unpaywall_lookup(doi: str) -> str:
     """Look up open access availability for a paper via Unpaywall.
 
     Given a DOI, checks Unpaywall's database of 50,000+ repositories to find
@@ -1907,7 +1900,6 @@ def unpaywall_lookup(doi: str) -> str:
     Returns:
         Open access information including PDF links and OA status.
     """
-    import httpx
 
     doi = doi.strip()
     doi = re.sub(r"^https?://doi\.org/", "", doi)
@@ -1920,7 +1912,7 @@ def unpaywall_lookup(doi: str) -> str:
         )
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             f"https://api.unpaywall.org/v2/{doi}",
             params={"email": email},
             timeout=15,
@@ -1977,7 +1969,7 @@ def unpaywall_lookup(doi: str) -> str:
 
 
 @tool
-def google_books_metadata(
+async def google_books_metadata(
     query: str = "",
     isbn: str = "",
     max_results: int = 5,
@@ -1997,7 +1989,6 @@ def google_books_metadata(
     Returns:
         Detailed book metadata from Google Books.
     """
-    import httpx
 
     if not query and not isbn:
         return "[ERROR] Provide a query or ISBN"
@@ -2013,7 +2004,7 @@ def google_books_metadata(
         params["key"] = GOOGLE_BOOKS_API_KEY
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://www.googleapis.com/books/v1/volumes",
             params=params,
             timeout=15,
@@ -2071,7 +2062,7 @@ def google_books_metadata(
 
 
 @tool
-def crossref_citation_graph(
+async def crossref_citation_graph(
     doi: str,
     depth: int = 1,
     max_refs: int = 20,
@@ -2092,7 +2083,6 @@ def crossref_citation_graph(
     Returns:
         Citation graph with paper metadata.
     """
-    import httpx
 
     doi = doi.strip()
     doi = re.sub(r"^https?://doi\.org/", "", doi)
@@ -2100,7 +2090,7 @@ def crossref_citation_graph(
     polite_email = UNPAYWALL_EMAIL or "research@mirothinker.ai"
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             f"https://api.crossref.org/works/{doi}",
             headers={"User-Agent": f"MiroThinker/1.0 (mailto:{polite_email})"},
             timeout=30,
@@ -2147,7 +2137,7 @@ def crossref_citation_graph(
     # Citing works (who cites this paper) — requires a separate query
     if cited_by > 0 and depth >= 1:
         try:
-            citing_resp = httpx.get(
+            citing_resp = await async_get(
                 "https://api.crossref.org/works",
                 params={
                     "query": title[:200],
@@ -2178,7 +2168,7 @@ def crossref_citation_graph(
 
 
 @tool
-def hathitrust_read(
+async def hathitrust_read(
     ht_id: str = "",
     query: str = "",
     page: int = 1,
@@ -2198,13 +2188,12 @@ def hathitrust_read(
     Returns:
         Page text or search results from HathiTrust.
     """
-    import httpx
 
     if ht_id:
         # Read a specific page from a known volume
         try:
             # HathiTrust Data API — get OCR text for a page
-            resp = httpx.get(
+            resp = await async_get(
                 f"https://babel.hathitrust.org/cgi/imgsrv/ocr?id={ht_id}&seq={page}",
                 headers={"User-Agent": _BROWSER_UA},
                 timeout=30,
@@ -2229,7 +2218,7 @@ def hathitrust_read(
     elif query:
         # Full-text search
         try:
-            resp = httpx.get(
+            resp = await async_get(
                 "https://babel.hathitrust.org/cgi/ls",
                 params={
                     "a": "srchls",
@@ -2289,7 +2278,7 @@ def hathitrust_read(
 
 
 @tool
-def internet_archive_download(
+async def internet_archive_download(
     ia_id: str,
     file_format: str = "auto",
     title: str = "",
@@ -2312,7 +2301,6 @@ def internet_archive_download(
     Returns:
         Extracted text from the downloaded book.
     """
-    import httpx
 
     cache_key = f"ia://{ia_id}"
     cached = _cache_lookup_book(cache_key)
@@ -2321,7 +2309,7 @@ def internet_archive_download(
 
     # Get item metadata to find downloadable files
     try:
-        resp = httpx.get(
+        resp = await async_get(
             f"https://archive.org/metadata/{ia_id}",
             timeout=30,
             follow_redirects=True,
@@ -2377,16 +2365,19 @@ def internet_archive_download(
     file_name = download_file["name"]
     download_url = f"https://archive.org/download/{ia_id}/{quote(file_name)}"
 
-    # Download the file
+    # Download the file (sync HTTP — run in thread to avoid blocking event loop)
+    def _sync_ia_download(url, hdrs):
+        with _get_http_client(timeout=120) as client:
+            resp = client.get(url, headers=hdrs)
+            resp.raise_for_status()
+            return resp.content
+
     try:
         headers = {"User-Agent": _BROWSER_UA}
         if IA_ACCESS_KEY and IA_SECRET_KEY:
             headers["Authorization"] = f"LOW {IA_ACCESS_KEY}:{IA_SECRET_KEY}"
 
-        with _get_http_client(timeout=120) as client:
-            resp = client.get(download_url, headers=headers)
-            resp.raise_for_status()
-            content = resp.content
+        content = await asyncio.to_thread(_sync_ia_download, download_url, headers)
     except Exception as exc:
         return f"[TOOL_ERROR] Download failed for {download_url}: {exc}"
 

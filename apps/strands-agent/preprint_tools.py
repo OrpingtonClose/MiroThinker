@@ -28,6 +28,7 @@ import os
 from datetime import datetime, timedelta
 
 from strands import tool
+from async_http import async_get
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 @tool
-def search_biorxiv(
+async def search_biorxiv(
     query: str,
     server: str = "biorxiv",
     max_results: int = 10,
@@ -63,7 +64,6 @@ def search_biorxiv(
     Returns:
         Formatted list of preprints with metadata and PDF links.
     """
-    import httpx
 
     if server not in ("biorxiv", "medrxiv"):
         return "[TOOL_ERROR] server must be 'biorxiv' or 'medrxiv'"
@@ -77,7 +77,7 @@ def search_biorxiv(
 
     try:
         # Use the content detail endpoint for richer metadata
-        resp = httpx.get(
+        resp = await async_get(
             f"https://api.biorxiv.org/details/{server}/{date_from}/{date_to}/0/{max_results}",
             timeout=30,
             headers={"User-Agent": "MiroThinker/1.0 (research agent)"},
@@ -135,7 +135,7 @@ def search_biorxiv(
 
 
 @tool
-def search_biorxiv_by_doi(doi: str, server: str = "biorxiv") -> str:
+async def search_biorxiv_by_doi(doi: str, server: str = "biorxiv") -> str:
     """Get full details for a specific bioRxiv/medRxiv preprint by DOI.
 
     Args:
@@ -145,10 +145,9 @@ def search_biorxiv_by_doi(doi: str, server: str = "biorxiv") -> str:
     Returns:
         Full metadata including title, authors, abstract, dates, and PDF link.
     """
-    import httpx
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             f"https://api.biorxiv.org/details/{server}/{doi}",
             timeout=30,
             headers={"User-Agent": "MiroThinker/1.0 (research agent)"},
@@ -183,7 +182,7 @@ def search_biorxiv_by_doi(doi: str, server: str = "biorxiv") -> str:
 
 
 @tool
-def search_chemrxiv(query: str, max_results: int = 10) -> str:
+async def search_chemrxiv(query: str, max_results: int = 10) -> str:
     """Search ChemRxiv for chemistry preprints. Free, no API key needed.
 
     Contains research on banned substance synthesis, environmental contaminant
@@ -197,11 +196,10 @@ def search_chemrxiv(query: str, max_results: int = 10) -> str:
     Returns:
         Formatted list of chemistry preprints with metadata.
     """
-    import httpx
 
     try:
         # ChemRxiv uses Cambridge Open Engage API
-        resp = httpx.get(
+        resp = await async_get(
             "https://chemrxiv.org/engage/chemrxiv/public-api/v1/items",
             params={
                 "term": query,
@@ -262,7 +260,7 @@ def search_chemrxiv(query: str, max_results: int = 10) -> str:
 
 
 @tool
-def search_ssrn(query: str, max_results: int = 10) -> str:
+async def search_ssrn(query: str, max_results: int = 10) -> str:
     """Search SSRN for social science, economics, and law preprints.
 
     1M+ papers covering politically sensitive economics papers, studies on
@@ -276,11 +274,10 @@ def search_ssrn(query: str, max_results: int = 10) -> str:
     Returns:
         Formatted list of SSRN papers with metadata and download links.
     """
-    import httpx
 
     try:
         # SSRN search via their public API endpoint
-        resp = httpx.get(
+        resp = await async_get(
             "https://api.ssrn.com/content/v1/papers",
             params={
                 "query": query,
@@ -294,7 +291,7 @@ def search_ssrn(query: str, max_results: int = 10) -> str:
             papers = data.get("papers", data.get("results", []))
         else:
             # Fallback: scrape SSRN search results
-            resp2 = httpx.get(
+            resp2 = await async_get(
                 "https://papers.ssrn.com/sol3/results.cfm",
                 params={"txtKey_Words": query, "npage": 1},
                 timeout=30,
@@ -359,7 +356,7 @@ def search_ssrn(query: str, max_results: int = 10) -> str:
 
 
 @tool
-def search_osf_preprints(
+async def search_osf_preprints(
     query: str,
     provider: str = "",
     max_results: int = 10,
@@ -379,7 +376,6 @@ def search_osf_preprints(
     Returns:
         Formatted list of preprints from multiple communities.
     """
-    import httpx
 
     params: dict = {
         "filter[title,description]": query,
@@ -389,7 +385,7 @@ def search_osf_preprints(
         params["filter[provider]"] = provider
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://api.osf.io/v2/preprints/",
             params=params,
             timeout=30,
@@ -446,7 +442,7 @@ def search_osf_preprints(
 
 
 @tool
-def list_osf_providers() -> str:
+async def list_osf_providers() -> str:
     """List all available OSF preprint providers (30+ communities).
 
     Returns the full list of preprint communities accessible via the
@@ -455,10 +451,9 @@ def list_osf_providers() -> str:
     Returns:
         List of provider names and IDs.
     """
-    import httpx
 
     try:
-        resp = httpx.get(
+        resp = await async_get(
             "https://api.osf.io/v2/preprint_providers/",
             params={"page[size]": 50},
             timeout=30,
