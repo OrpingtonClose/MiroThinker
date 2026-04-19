@@ -353,6 +353,7 @@ def query_single(req: QueryRequest):
 
         _single_agent.messages.clear()
         reset_budget()
+        original_prompt = _single_agent.system_prompt
         _auto_activate_skills(req.query, _single_agent)
         try:
             response = _single_agent(req.query)
@@ -364,6 +365,8 @@ def query_single(req: QueryRequest):
         except Exception as exc:
             logger.exception("Agent error")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+        finally:
+            _single_agent.system_prompt = original_prompt
 
     elapsed = round(time.time() - start, 2)
     _write_metrics_jsonl(req_id, _MODEL_SINGLE, req.query, elapsed, metrics, [])
@@ -388,8 +391,10 @@ def query_multi(req: QueryRequest):
         from agent import reset_budget
 
         _multi_agent.messages.clear()
+        original_prompts: dict[str, str | None] = {}
         if _multi_researcher is not None:
             _multi_researcher.messages.clear()
+            original_prompts["researcher"] = _multi_researcher.system_prompt
             _auto_activate_skills(req.query, _multi_researcher)
         reset_budget()
         try:
@@ -402,6 +407,9 @@ def query_multi(req: QueryRequest):
         except Exception as exc:
             logger.exception("Agent error")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+        finally:
+            if _multi_researcher is not None and "researcher" in original_prompts:
+                _multi_researcher.system_prompt = original_prompts["researcher"]
 
     elapsed = round(time.time() - start, 2)
     _write_metrics_jsonl(req_id, _MODEL_MULTI, req.query, elapsed, metrics, [])
@@ -461,22 +469,35 @@ def _dispatch_agent(model: str, user_message: str) -> tuple[str, dict | None]:
         _multi_agent.messages.clear()
         if _multi_researcher is not None:
             _multi_researcher.messages.clear()
+            original_prompt = _multi_researcher.system_prompt
+            _auto_activate_skills(user_message, _multi_researcher)
+        else:
+            original_prompt = None
         reset_budget()
-        agent_result = _multi_agent(user_message)
-        result = str(agent_result)
         try:
-            metrics_summary = agent_result.metrics.get_summary()
-        except Exception:
-            pass
+            agent_result = _multi_agent(user_message)
+            result = str(agent_result)
+            try:
+                metrics_summary = agent_result.metrics.get_summary()
+            except Exception:
+                pass
+        finally:
+            if _multi_researcher is not None and original_prompt is not None:
+                _multi_researcher.system_prompt = original_prompt
     elif _single_agent is not None:
         _single_agent.messages.clear()
+        original_prompt = _single_agent.system_prompt
+        _auto_activate_skills(user_message, _single_agent)
         reset_budget()
-        agent_result = _single_agent(user_message)
-        result = str(agent_result)
         try:
-            metrics_summary = agent_result.metrics.get_summary()
-        except Exception:
-            pass
+            agent_result = _single_agent(user_message)
+            result = str(agent_result)
+            try:
+                metrics_summary = agent_result.metrics.get_summary()
+            except Exception:
+                pass
+        finally:
+            _single_agent.system_prompt = original_prompt
     else:
         raise RuntimeError("No agent initialised")
 
