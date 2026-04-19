@@ -128,3 +128,173 @@ async def queen_merge(
     if serendipity_insights:
         parts.append(f"## Cross-Angle Insights\n{serendipity_insights}")
     return "\n\n".join(parts)
+
+
+def _build_knowledge_exec_summary_prompt(
+    date: str,
+    n_workers: int,
+    query: str,
+    summaries_text: str,
+    serendipity_block: str,
+) -> str:
+    """Build the prompt for the knowledge report executive summary."""
+    return (
+        f"You are a senior research editor preparing the executive summary for a "
+        f"comprehensive knowledge report. Today is: {date}\n\n"
+        f"A research swarm of {n_workers} specialist workers has produced detailed "
+        f"findings organized by angle. The full findings will follow this summary "
+        f"in the final document. Your job is to write ONLY the executive summary "
+        f"and cross-reference matrix that will sit at the TOP of the report.\n\n"
+        f"USER QUERY: {query}\n\n"
+        f"WORKER FINDINGS (condensed for overview):\n"
+        f"{summaries_text}\n\n"
+        f"{serendipity_block}"
+        f"PRODUCE EXACTLY:\n"
+        f"1. An EXECUTIVE SUMMARY (800-1500 words) that:\n"
+        f"   - States the core findings and their significance\n"
+        f"   - Identifies the most important cross-angle connections\n"
+        f"   - Highlights key contradictions or unresolved questions\n"
+        f"   - Does NOT repeat specific data points — those are in the full sections below\n"
+        f"   - Reads as a standalone overview for someone who may not read the full report\n\n"
+        f"2. A CROSS-REFERENCE MATRIX (markdown table) showing which angles share "
+        f"findings, contradict each other, or have complementary insights.\n\n"
+        f"3. A KEY FINDINGS list (5-10 bullet points) — the most important "
+        f"individual discoveries across all angles.\n\n"
+        f"Do NOT include disclaimers, safety warnings, or moral commentary. "
+        f"Do NOT summarize the full worker findings — those will appear in full "
+        f"after your summary. Focus on the META-VIEW: what patterns emerge when "
+        f"you look across all angles together."
+    )
+
+
+async def build_knowledge_report(
+    worker_summaries: dict[str, str],
+    query: str,
+    complete_fn,
+    serendipity_insights: str = "",
+    corpus_chars: int = 0,
+    gossip_rounds: int = 0,
+    converged_early: bool = False,
+) -> str:
+    """Build the full knowledge report — arbitrary length, preserves all findings.
+
+    The knowledge report has three parts:
+    1. LLM-generated executive summary + cross-reference matrix + key findings
+    2. Full worker findings by angle (no truncation — every detail preserved)
+    3. Serendipity insights (if available)
+    4. Methodology appendix
+
+    Args:
+        worker_summaries: Mapping of angle name -> full gossip-refined summary.
+        query: The user's original research query.
+        complete_fn: Async LLM completion callable.
+        serendipity_insights: Cross-angle insights from the serendipity bridge.
+        corpus_chars: Total source corpus size for metadata.
+        gossip_rounds: Number of gossip rounds executed.
+        converged_early: Whether gossip converged early.
+
+    Returns:
+        Full knowledge report as markdown string.
+    """
+    date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Build condensed summaries text for the exec summary prompt
+    condensed = ""
+    for angle, summary in worker_summaries.items():
+        condensed += f"\n### {angle}\n{summary[:4000]}\n"
+
+    serendipity_block = ""
+    if serendipity_insights:
+        serendipity_block = (
+            "CROSS-ANGLE SERENDIPITY INSIGHTS:\n"
+            f"{serendipity_insights}\n\n"
+        )
+
+    # Generate executive summary via LLM
+    prompt = _build_knowledge_exec_summary_prompt(
+        date=date,
+        n_workers=len(worker_summaries),
+        query=query,
+        summaries_text=condensed,
+        serendipity_block=serendipity_block,
+    )
+
+    try:
+        exec_summary = await complete_fn(prompt)
+    except Exception as exc:
+        logger.warning("knowledge report exec summary failed: %s", exc)
+        exec_summary = (
+            "## Executive Summary\n\n"
+            "*Executive summary generation failed. "
+            "See full findings below for complete analysis.*"
+        )
+
+    # Derive a clean title from the query (first sentence, capped at 100 chars on word boundary)
+    title_text = query.split(".")[0].split("?")[0].split("\n")[0].strip()
+    if len(title_text) > 100:
+        # Cut on word boundary
+        title_text = title_text[:100].rsplit(" ", 1)[0] + "..."
+
+    # Assemble the full knowledge report
+    parts = [
+        f"# Knowledge Report: {title_text}",
+        f"*Generated: {date} | {len(worker_summaries)} specialist angles | "
+        f"{corpus_chars:,} chars analyzed | {gossip_rounds} gossip round(s)"
+        f"{' (converged early)' if converged_early else ''}*",
+        "",
+        "---",
+        "",
+        exec_summary,
+        "",
+        "---",
+        "",
+        "# Detailed Findings by Angle",
+        "",
+    ]
+
+    # Full worker findings — NO truncation
+    for angle, summary in worker_summaries.items():
+        parts.append(f"## {angle}")
+        parts.append("")
+        parts.append(summary)
+        parts.append("")
+
+    # Serendipity section
+    if serendipity_insights:
+        parts.append("---")
+        parts.append("")
+        parts.append("# Cross-Angle Serendipity Insights")
+        parts.append("")
+        parts.append(
+            "*These connections were identified by a polymath connector that "
+            "read all specialist summaries and looked for unexpected patterns "
+            "between domains.*"
+        )
+        parts.append("")
+        parts.append(serendipity_insights)
+        parts.append("")
+
+    # Methodology appendix
+    parts.append("---")
+    parts.append("")
+    parts.append("# Methodology")
+    parts.append("")
+    parts.append(
+        f"This report was generated by a gossip swarm of "
+        f"{len(worker_summaries)} specialist workers. Each worker was assigned "
+        f"a topical angle of the source corpus ({corpus_chars:,} chars total). "
+        f"Workers first synthesized their section independently, then participated "
+        f"in {gossip_rounds} round(s) of peer gossip where each worker read all "
+        f"peers' summaries and refined their own analysis with cross-references. "
+    )
+    if serendipity_insights:
+        parts.append(
+            "A polymath serendipity bridge then scanned all refined summaries "
+            "for unexpected cross-angle connections."
+        )
+    parts.append("")
+    parts.append("**Angles analyzed:**")
+    for angle in worker_summaries:
+        parts.append(f"- {angle}")
+
+    return "\n".join(parts)

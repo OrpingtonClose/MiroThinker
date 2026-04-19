@@ -56,7 +56,7 @@ from swarm.angles import (
 )
 from swarm.config import CompleteFn, SwarmConfig
 from swarm.convergence import check_convergence
-from swarm.queen import queen_merge
+from swarm.queen import build_knowledge_report, queen_merge
 from swarm.serendipity import find_serendipitous_connections
 from swarm.worker import worker_gossip_refine, worker_synthesize
 
@@ -80,13 +80,26 @@ class SwarmMetrics:
 
 @dataclass
 class SwarmResult:
-    """Result of a gossip swarm synthesis."""
+    """Result of a gossip swarm synthesis.
+
+    Contains two reports:
+    - user_report: Concise narrative synthesis (queen merge, 3000-6000 words)
+    - knowledge_report: Full-length structured report preserving all findings
+
+    The legacy ``synthesis`` attribute is an alias for ``user_report``.
+    """
 
     synthesis: str
-    metrics: SwarmMetrics
+    knowledge_report: str = ""
+    metrics: SwarmMetrics = field(default_factory=SwarmMetrics)
     worker_summaries: dict[str, str] = field(default_factory=dict)
     serendipity_insights: str = ""
     angles_detected: list[str] = field(default_factory=list)
+
+    @property
+    def user_report(self) -> str:
+        """Alias for synthesis — the concise end-user narrative."""
+        return self.synthesis
 
 
 class GossipSwarm:
@@ -300,29 +313,48 @@ class GossipSwarm:
                 len(serendipity_insights),
             )
 
-        # ── Phase 4: Queen Merge ─────────────────────────────────────
+        # ── Phase 4: Dual Output (parallel) ──────────────────────────
+        # Build both reports simultaneously — they share the same inputs
+        # but produce different outputs (knowledge = full, user = concise).
         phase_start = time.monotonic()
-        final_synthesis = await queen_merge(
+
+        knowledge_task = build_knowledge_report(
+            worker_summaries=worker_summaries,
+            query=query,
+            complete_fn=self.complete,
+            serendipity_insights=serendipity_insights,
+            corpus_chars=len(corpus),
+            gossip_rounds=rounds_executed,
+            converged_early=metrics.gossip_converged_early,
+        )
+        user_task = queen_merge(
             worker_summaries=worker_summaries,
             query=query,
             complete_fn=self.complete,
             serendipity_insights=serendipity_insights,
             max_summary_chars=config.max_summary_chars,
         )
-        metrics.total_llm_calls += 1
+
+        knowledge_report, user_report = await asyncio.gather(
+            knowledge_task, user_task,
+        )
+        metrics.total_llm_calls += 2  # one for knowledge exec summary, one for queen
         metrics.phase_times["queen_merge"] = time.monotonic() - phase_start
         metrics.total_elapsed_s = time.monotonic() - t0
 
         logger.info(
             "llm_calls=<%d>, elapsed_s=<%.1f>, workers=<%d>, gossip_rounds=<%d>, "
-            "converged_early=<%s>, serendipity=<%s> | swarm synthesis complete",
+            "converged_early=<%s>, serendipity=<%s>, "
+            "knowledge_chars=<%d>, user_chars=<%d> | swarm synthesis complete",
             metrics.total_llm_calls, metrics.total_elapsed_s,
             metrics.total_workers, metrics.gossip_rounds_executed,
             metrics.gossip_converged_early, metrics.serendipity_produced,
+            len(knowledge_report), len(user_report),
         )
 
         return SwarmResult(
-            synthesis=final_synthesis,
+            synthesis=user_report,
+            knowledge_report=knowledge_report,
             metrics=metrics,
             worker_summaries=worker_summaries,
             serendipity_insights=serendipity_insights,

@@ -142,7 +142,7 @@ async def worker_gossip_refine(
 
     peers_text = ""
     for i, ps in enumerate(peer_summaries):
-        peers_text += f"\n--- Worker {i + 1} ---\n{ps[:max_chars]}\n"
+        peers_text += f"\n--- Peer Specialist {i + 1} ---\n{ps[:max_chars]}\n"
 
     prompt = _build_gossip_prompt(
         date=date,
