@@ -799,21 +799,13 @@ def youtube_harvest_channel(
 
     harvester = Harvester(config=config, cache_fn=cache_fn)
 
-    # Run the async harvester in a sync context
+    # Run the async harvester — strands tools always run in sync threads
+    # so asyncio.run() is safe and avoids SQLite check_same_thread issues
+    # that would occur with ThreadPoolExecutor
     try:
-        loop = _asyncio.get_event_loop()
-        if loop.is_running():
-            # Inside an existing event loop — use nest_asyncio or thread
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                result = pool.submit(
-                    _asyncio.run,
-                    harvester.harvest_channel(channel, max_videos=max_videos),
-                ).result(timeout=3600)
-        else:
-            result = _asyncio.run(
-                harvester.harvest_channel(channel, max_videos=max_videos)
-            )
+        result = _asyncio.run(
+            harvester.harvest_channel(channel, max_videos=max_videos)
+        )
     except Exception as exc:
         return f"[TOOL_ERROR] Harvest failed: {exc}"
 
