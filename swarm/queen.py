@@ -219,15 +219,22 @@ async def build_knowledge_report(
         serendipity_block=serendipity_block,
     )
 
+    fallback_summary = (
+        "## Executive Summary\n\n"
+        "*Executive summary generation failed. "
+        "See full findings below for complete analysis.*"
+    )
     try:
         exec_summary = await complete_fn(prompt)
+        if not exec_summary or len(exec_summary.strip()) < 50:
+            logger.warning(
+                "knowledge report exec summary returned short/empty response (%d chars), using fallback",
+                len(exec_summary.strip()) if exec_summary else 0,
+            )
+            exec_summary = fallback_summary
     except Exception as exc:
         logger.warning("knowledge report exec summary failed: %s", exc)
-        exec_summary = (
-            "## Executive Summary\n\n"
-            "*Executive summary generation failed. "
-            "See full findings below for complete analysis.*"
-        )
+        exec_summary = fallback_summary
 
     # Derive a clean title from the query (first sentence, capped at 100 chars on word boundary)
     title_text = query.split(".")[0].split("?")[0].split("\n")[0].strip()
