@@ -280,26 +280,30 @@ def _setup_otel() -> None:
 
 
 def _enter_mcp_clients(mcp_clients):
-    """Enter MCP client contexts and collect tools, with rollback on failure.
+    """Enter MCP client contexts and collect tools, skipping failed clients.
 
-    If the Nth client's ``__enter__()`` or ``list_tools_sync()`` raises,
-    all previously-entered clients are cleaned up so their subprocesses
-    (npx, node, uvx) don't leak.
+    Each client is entered independently.  If a client's ``__enter__()`` or
+    ``list_tools_sync()`` raises, that client is cleaned up and skipped —
+    the remaining clients still load normally.  This prevents a single
+    flaky MCP server (e.g. TranscriptAPI) from killing ALL MCP tools.
     """
     entered: list = []
     tool_list: list = []
-    try:
-        for client in mcp_clients:
+    for client in mcp_clients:
+        try:
             client.__enter__()
             entered.append(client)
             tool_list.extend(client.list_tools_sync())
-    except Exception:
-        for c in entered:
+        except Exception:
+            logger.warning(
+                "MCP client failed to initialise, skipping: %s",
+                getattr(client, "_transport_factory", client),
+                exc_info=True,
+            )
             try:
-                c.__exit__(None, None, None)
+                client.__exit__(None, None, None)
             except Exception:
                 pass
-        raise
     return tool_list
 
 

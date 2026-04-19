@@ -27,9 +27,144 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import httpx
 from strands import tool
 
 logger = logging.getLogger(__name__)
+
+# ── TranscriptAPI REST helpers ────────────────────────────────────────
+
+_TRANSCRIPTAPI_BASE = "https://transcriptapi.com/api/v2/youtube"
+_TRANSCRIPTAPI_TIMEOUT = 30.0
+
+
+def _transcriptapi_headers() -> dict[str, str]:
+    """Build Authorization header for TranscriptAPI."""
+    key = os.environ.get("TRANSCRIPTAPI_KEY", "")
+    return {"Authorization": f"Bearer {key}"}
+
+
+def _transcriptapi_get(path: str, params: dict[str, str | int]) -> dict:
+    """GET request to TranscriptAPI REST endpoint."""
+    url = f"{_TRANSCRIPTAPI_BASE}/{path}"
+    resp = httpx.get(
+        url,
+        params=params,
+        headers=_transcriptapi_headers(),
+        timeout=_TRANSCRIPTAPI_TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+# ── TranscriptAPI search tools (native fallback for MCP) ─────────────
+
+
+@tool
+def search_youtube(
+    query: str,
+    result_type: str = "video",
+    limit: int = 10,
+) -> str:
+    """Search YouTube for videos, channels, or playlists via TranscriptAPI.
+
+    This is the PRIMARY tool for YouTube research — use it FIRST before
+    any web search when looking for YouTube channels or content on a topic.
+    Returns actual YouTube search results with video IDs, titles, channels,
+    view counts, and publish dates.
+
+    Args:
+        query: Search query (e.g. "insulin protocol bodybuilding").
+        result_type: Type of results — "video", "channel", or "playlist".
+        limit: Maximum number of results (1-50, default 10).
+
+    Returns:
+        JSON array of search results with video/channel metadata.
+    """
+    key = os.environ.get("TRANSCRIPTAPI_KEY", "")
+    if not key:
+        return json.dumps({"error": "TRANSCRIPTAPI_KEY not configured"})
+    try:
+        data = _transcriptapi_get(
+            "search",
+            {"q": query, "type": result_type, "limit": min(limit, 50)},
+        )
+        results = data.get("results", data)
+        return json.dumps(results, indent=2, ensure_ascii=False)
+    except httpx.HTTPStatusError as exc:
+        return json.dumps({"error": f"TranscriptAPI HTTP {exc.response.status_code}", "detail": str(exc)})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@tool
+def search_channel_videos(
+    channel: str,
+    query: str,
+    limit: int = 10,
+) -> str:
+    """Search INSIDE a specific YouTube channel for videos matching a query.
+
+    Use this to find which videos within a known channel cover a specific
+    topic. Searches across video titles, descriptions, and transcript content.
+    Returns matching videos with metadata.
+
+    Args:
+        channel: Channel handle (e.g. "@MorePlatesMoreDates") or channel ID.
+        query: Search query to find within the channel's videos.
+        limit: Maximum number of results (1-50, default 10).
+
+    Returns:
+        JSON array of matching videos from the specified channel.
+    """
+    key = os.environ.get("TRANSCRIPTAPI_KEY", "")
+    if not key:
+        return json.dumps({"error": "TRANSCRIPTAPI_KEY not configured"})
+    try:
+        data = _transcriptapi_get(
+            "channel/search",
+            {"channel": channel, "q": query, "limit": min(limit, 50)},
+        )
+        results = data.get("results", data)
+        return json.dumps(results, indent=2, ensure_ascii=False)
+    except httpx.HTTPStatusError as exc:
+        return json.dumps({"error": f"TranscriptAPI HTTP {exc.response.status_code}", "detail": str(exc)})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@tool
+def get_channel_latest_videos(
+    channel: str,
+    limit: int = 30,
+) -> str:
+    """Get the latest videos from a YouTube channel via TranscriptAPI.
+
+    Use this to browse a channel's recent uploads — useful for assessing
+    how active a channel is and what topics they've covered recently.
+
+    Args:
+        channel: Channel handle (e.g. "@MorePlatesMoreDates") or channel ID.
+        limit: Maximum number of videos to return (default 30).
+
+    Returns:
+        JSON array of recent videos with metadata.
+    """
+    key = os.environ.get("TRANSCRIPTAPI_KEY", "")
+    if not key:
+        return json.dumps({"error": "TRANSCRIPTAPI_KEY not configured"})
+    try:
+        data = _transcriptapi_get(
+            "channel/latest",
+            {"channel": channel, "limit": min(limit, 50)},
+        )
+        results = data.get("results", data)
+        return json.dumps(results, indent=2, ensure_ascii=False)
+    except httpx.HTTPStatusError as exc:
+        return json.dumps({"error": f"TranscriptAPI HTTP {exc.response.status_code}", "detail": str(exc)})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -988,6 +1123,11 @@ def youtube_export_corpus(
 # ── Tool registry ─────────────────────────────────────────────────────
 
 YOUTUBE_TOOLS = [
+    # TranscriptAPI search tools (native REST — always available when key is set)
+    search_youtube,
+    search_channel_videos,
+    get_channel_latest_videos,
+    # YouTube intelligence tools (yt-dlp / harvester backends)
     youtube_download_transcript,
     youtube_video_info,
     youtube_channel_list,
