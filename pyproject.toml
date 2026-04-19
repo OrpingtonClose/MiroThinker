@@ -1,0 +1,91 @@
+[project]
+name = "mirothinker"
+version = "0.1.0"
+description = "Autonomous deep-research agent platform — uncensored, multi-agent, self-contained"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+dependencies = [
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+    "httpx>=0.25.0",
+]
+
+[project.optional-dependencies]
+# Proxy layer — CPU-only FastAPI services that call remote LLM APIs
+proxies = [
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "langchain-openai>=0.1.0",
+    "langchain-core>=0.2.0",
+    "langchain-community>=0.2.0",
+    "langchain-text-splitters>=0.2.0",
+    "langgraph>=0.2.0",
+    "langgraph-checkpoint-sqlite>=3.0.0",
+    "neo4j>=5.0.0",
+    "requests[socks]>=2.31.0",
+    "beautifulsoup4>=4.12.0",
+    "stem>=1.8.0",
+    "PySocks>=1.7.0",
+    "langfuse>=2.0.0",
+]
+
+# MCP servers — Model Context Protocol data source servers
+mcp = [
+    "mcp>=1.0.0",
+    "fastmcp>=0.5.0",
+]
+
+# Strands agent — the primary research agent
+agent = [
+    "strands-agents",
+    "strands-agents-tools",
+    "strands-agents-builder",
+    "openai",
+    "fastapi[standard]",
+    "uvicorn[standard]",
+    "ddgs",
+    "pdfplumber",
+    "yt-dlp",
+    "EbookLib",
+    "lxml",
+    "b2sdk",
+    "rocrate",
+]
+
+# Swarm — corpus store + swarm thinkers
+swarm = [
+    "duckdb>=0.10.0",
+]
+
+# Search dispatcher + LiteLLM routing
+dispatcher = [
+    "litellm[proxy]>=1.40.0",
+]
+
+# Browser automation
+browser = [
+    "playwright>=1.40.0",
+]
+
+# All components
+all = [
+    "mirothinker[proxies,mcp,agent,swarm,dispatcher,browser]",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["proxies*", "mcp_servers*", "services*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

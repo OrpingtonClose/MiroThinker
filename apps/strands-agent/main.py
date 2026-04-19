@@ -34,10 +34,9 @@ from pydantic import BaseModel, Field
 
 load_dotenv()
 
-# ── Observability: import from deep-search-portal when available ──────
-# The strands_observability module lives in deep-search-portal/proxies/
-# and is added to PYTHONPATH by scripts/start_strands_agent.sh.
-# If unavailable, we skip external observability (metrics still logged locally).
+# ── Observability ─────────────────────────────────────────────────────
+# strands_observability lives in MiroThinker/proxies/ (consolidated from
+# deep-search-portal).  PYTHONPATH must include the repo root or proxies/.
 try:
     from strands_observability import (
         extract_usage,

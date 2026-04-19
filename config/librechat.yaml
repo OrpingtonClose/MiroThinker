@@ -1,0 +1,300 @@
+# Deep Search Portal - LibreChat Production Configuration
+# Production shows ONLY the Simple group (3 models).
+# All other models (Miro, Experimental, Raw-*) live in staging only.
+version: 1.3.5
+cache: true
+
+modelSpecs:
+  enforce: true
+  prioritize: true
+  list:
+    - name: "xai-grok-420-multiagent"
+      label: "Grok 4.20 Multi-Agent"
+      description: "xAI most powerful model. Coordinates parallel reasoning with built-in web and X/Twitter search. 2M token context."
+      group: "Simple"
+      default: true
+      preset:
+        endpoint: "xAI Native"
+        model: "xai-grok-4.20-multi-agent-0309"
+
+    - name: "heretic-uncensored"
+      label: "Heretic Uncensored"
+      description: "GLM-4.7 Flash Heretic — zero-censorship model with Firecrawl scraping, Exa semantic search, and Brave web search. Fast, powerful, completely unfiltered."
+      group: "Simple"
+      preset:
+        endpoint: "Heretic"
+        model: "glm-4.7-flash-heretic"
+
+    - name: "tier-race-full-throttle"
+      label: "Tier Race (Full Throttle)"
+      description: "Races 9 flagship models (Opus, Gemini Pro, GPT-5.4 High, Grok 4.20, DeepSeek R1, Kimi, GLM, Qwen Max, Mistral). Maximum intelligence."
+      group: "Simple"
+      preset:
+        endpoint: "Tier Chooser"
+        model: "tier-race-full-throttle"
+
+# ── Backend endpoint wiring ──
+endpoints:
+  custom:
+    - name: "Mistral Thinking"
+      apiKey: "not-needed"
+      baseURL: "http://host.docker.internal:9100/v1"
+      models:
+        default:
+          - "mistral-large-thinking"
+        fetch: true
+      titleConvo: true
+      titleModel: "mistral-large-thinking"
+      titleMethod: "completion"
+      summarize: false
+      maxContextTokens: 1000000
+      dropParams:
+        - "stop"
+        - "user"
+        - "frequency_penalty"
+        - "presence_penalty"
+
+    - name: "Persistent MiroFlow"
+      apiKey: "not-needed"
+      baseURL: "http://host.docker.internal:9300/v1"
+      models:
+        default:
+          - "persistent-miroflow"
+        fetch: true
+      titleConvo: true
+      titleModel: "mistral-large-thinking"
+      titleEndpoint: "Mistral Thinking"
+      titleMethod: "completion"
+      summarize: false
+      maxContextTokens: 1000000
+      dropParams:
+        - "stop"
+        - "user"
+        - "frequency_penalty"
+        - "presence_penalty"
+
+    - name: "MiroFlow Sprint"
+      apiKey: "not-needed"
+      baseURL: "http://host.docker.internal:9400/v1"
+      models:
+        default:
+          - "miroflow-sprint"
+        fetch: true
+      titleConvo: true
+      titleModel: "mistral-large-thinking"
+      titleEndpoint: "Mistral Thinking"
+      titleMethod: "completion"
+      summarize: false
+      maxContextTokens: 1000000
+      dropParams:
+        - "stop"
+        - "user"
+        - "frequency_penalty"
+        - "presence_penalty"
+
+    - name: "Persistent MiroFlow Wiki"
+      apiKey: "not-needed"
+      baseURL: "http://host.docker.internal:9800/v1"
+      models:
+        default:
+          - "persistent-miroflow-wiki"
+        fetch: true
+      titleConvo: true
+      titleModel: "mistral-large-thinking"
+      titleEndpoint: "Mistral Thinking"
+      titleMethod: "completion"
+      summarize: false
+      artifacts: true
+      maxContextTokens: 1000000
+      dropParams:
+        - "stop"
+        - "user"
+        - "frequency_penalty"
+        - "presence_penalty"
+
+    - name: "MiroFlow Sprint Wiki"
+      apiKey: "not-needed"
+      baseURL: "http://host.docker.internal:9850/v1"
+      models:
+        default:
+          - "miroflow-sprint-wiki"
+        fetch: true
+      titleConvo: true
+      titleModel: "mistral-large-thinking"
+      titleEndpoint: "Mistral Thinking"
+      titleMethod: "completion"
+      summarize: false
+      artifacts: true
+      maxContextTokens: 1000000
+      dropParams:
+        - "stop"
+        - "user"
+        - "frequency_penalty"
+        - "presence_penalty"
+
+    - name: "Deep Research"
+      apiKey: "not-needed"
+      baseURL: "http://host.docker.internal:9200/v1"
+      models:
+        default:
+          - "miroflow"
+        fetch: true
+      titleConvo: true
+      titleModel: "mistral-large-thinking"
+      titleEndpoint: "Mistral Thinking"
+      titleMethod: "completion"
+      summarize: false
+      maxContextTokens: 1000000
+      dropParams:
+        - "stop"
+        - "user"
+        - "frequency_penalty"
+        - "presence_penalty"
+
+    - name: "Swarm Deep Search"
+      apiKey: "not-needed"
+      baseURL: "http://host.docker.internal:9500/v1"
+      models:
+        default:
+          - "swarm-miroflow"
+        fetch: true
+      titleConvo: true
+      titleModel: "mistral-large-thinking"
+      titleEndpoint: "Mistral Thinking"
+      titleMethod: "completion"
+      summarize: false
+      maxContextTokens: 1000000
+      dropParams:
+        - "stop"
+        - "user"
+        - "frequency_penalty"
+        - "presence_penalty"
+
+    - name: "G0DM0D3"
+      apiKey: "not-needed"
+      baseURL: "http://host.docker.internal:9600/v1"
+      models:
+        default:
+          - "godmode-classic"
+          - "ultraplinian-fast"
+          - "ultraplinian-standard"
+          - "ultraplinian-smart"
+          - "ultraplinian-power"
+          - "ultraplinian-ultra"
+          - "ultraplinian-research"
+        fetch: false
+      titleConvo: true
+      titleModel: "mistral-large-thinking"
+      titleEndpoint: "Mistral Thinking"
+      titleMethod: "completion"
+      summarize: false
+      forcePrompt: false
+      maxContextTokens: 1000000
+      dropParams:
+        - "stop"
+        - "user"
+        - "frequency_penalty"
+        - "presence_penalty"
+
+    - name: "xAI Native"
+      apiKey: "not-needed"
+      baseURL: "http://host.docker.internal:9700/v1"
+      models:
+        default:
+          - "xai-grok-4.20-0309-reasoning"
+          - "xai-grok-4.20-0309-non-reasoning"
+          - "xai-grok-4.20-multi-agent-0309"
+          - "xai-grok-4-1-fast-reasoning"
+          - "xai-grok-4-1-fast-non-reasoning"
+          - "xai-grok-4-fast-reasoning"
+          - "xai-grok-4-fast-non-reasoning"
+          - "xai-grok-4-0709"
+          - "xai-grok-3"
+          - "xai-grok-3-fast"
+          - "xai-grok-3-mini"
+          - "xai-grok-code-fast-1"
+          - "xai-grok-imagine-image"
+          - "xai-grok-imagine-image-pro"
+          - "xai-race-fast"
+          - "xai-race-smart"
+          - "xai-race-all"
+        fetch: false
+      titleConvo: true
+      titleModel: "mistral-large-thinking"
+      titleEndpoint: "Mistral Thinking"
+      titleMethod: "completion"
+      summarize: false
+      forcePrompt: false
+      maxContextTokens: 2000000
+      dropParams:
+        - "stop"
+        - "user"
+        - "frequency_penalty"
+        - "presence_penalty"
+
+    - name: "Tier Chooser"
+      apiKey: "not-needed"
+      baseURL: "http://host.docker.internal:9900/v1"
+      models:
+        default:
+          - "tier-race-quick"
+          - "tier-race-medium"
+          - "tier-race-full-throttle"
+          - "tier-anthropic/claude-haiku-4.6"
+          - "tier-anthropic/claude-sonnet-4.6"
+          - "tier-anthropic/claude-opus-4.6"
+          - "tier-google/gemini-3.1-flash"
+          - "tier-google/gemini-3-pro"
+          - "tier-google/gemini-3.1-pro-preview"
+          - "tier-openai/gpt-5.4-mini"
+          - "tier-openai/gpt-5.4"
+          - "tier-openai/gpt-5.4-high"
+          - "tier-x-ai/grok-4.20-non-reasoning"
+          - "tier-x-ai/grok-4"
+          - "tier-x-ai/grok-4.20"
+          - "tier-deepseek/deepseek-v3.2-lite"
+          - "tier-deepseek/deepseek-v3.2"
+          - "tier-deepseek/deepseek-r1"
+          - "tier-mistralai/mistral-large-3-efficient"
+          - "tier-mistralai/mistral-large-4"
+          - "tier-mistralai/mistral-large-3"
+          - "tier-qwen/qwen3.5-turbo"
+          - "tier-qwen/qwen3.5-72b"
+          - "tier-qwen/qwen3.5-max"
+          - "tier-z-ai/glm-5-light"
+          - "tier-z-ai/glm-5"
+          - "tier-z-ai/glm-5-thinking"
+          - "tier-moonshotai/kimi-k2.5-instant"
+          - "tier-moonshotai/kimi-k2.5-thinking"
+        fetch: true
+      titleConvo: true
+      titleModel: "mistral-large-thinking"
+      titleEndpoint: "Mistral Thinking"
+      titleMethod: "completion"
+      summarize: false
+      forcePrompt: false
+      maxContextTokens: 2000000
+      dropParams:
+        - "stop"
+        - "user"
+        - "frequency_penalty"
+        - "presence_penalty"
+
+    - name: "Heretic"
+      apiKey: "not-needed"
+      baseURL: "http://host.docker.internal:9950/v1"
+      models:
+        default:
+          - "glm-4.7-flash-heretic"
+        fetch: true
+      titleConvo: true
+      titleModel: "mistral-large-thinking"
+      titleEndpoint: "Mistral Thinking"
+      titleMethod: "completion"
+      summarize: false
+      maxContextTokens: 128000
+      dropParams:
+        - "stop"
+        - "user"
+        - "frequency_penalty"
+        - "presence_penalty"
