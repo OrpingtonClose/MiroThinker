@@ -249,13 +249,14 @@ class GossipSwarm:
                 gossip_round, gossip_failures,
             )
 
-            # Adaptive stopping: check convergence (skip if failures caused
-            # unchanged summaries — that's not real convergence)
+            # Adaptive stopping: check convergence (skip if ANY failures —
+            # failed workers have unchanged summaries which inflate Jaccard
+            # similarity and cause false convergence detection)
             if config.enable_adaptive_rounds and gossip_round < config.gossip_rounds:
-                if gossip_failures >= len(assignments):
+                if gossip_failures > 0:
                     logger.warning(
-                        "gossip_round=<%d> | all workers failed, skipping convergence check",
-                        gossip_round,
+                        "gossip_round=<%d>, failures=<%d> | skipping convergence check due to worker failures",
+                        gossip_round, gossip_failures,
                     )
                 else:
                     current = [a.summary for a in assignments]
