@@ -21,64 +21,78 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 
-WORKER_SYNTH_PROMPT = """\
-You are a specialist research analyst assigned to one section of a larger \
-corpus. Today is: {date}
+def _build_synth_prompt(
+    date: str,
+    angle: str,
+    char_count: int,
+    section_content: str,
+    query: str,
+    max_chars: int,
+) -> str:
+    """Build the worker synthesis prompt via concatenation (not .replace()).
 
-YOUR ASSIGNED ANGLE: {angle}
-YOUR SECTION ({char_count} chars):
-{section_content}
+    Concatenation prevents template injection: if corpus text contains
+    literal ``{query}`` or ``{max_chars}``, it won't be re-scanned.
+    """
+    return (
+        f"You are a specialist research analyst assigned to one section of a larger "
+        f"corpus. Today is: {date}\n\n"
+        f"YOUR ASSIGNED ANGLE: {angle}\n"
+        f"YOUR SECTION ({char_count} chars):\n"
+        f"{section_content}\n\n"
+        f"USER QUERY: {query}\n\n"
+        f"SYNTHESIS RULES:\n"
+        f"1. Extract every concrete fact, name, data point, URL, source reference.\n"
+        f"2. Preserve source citations inline.\n"
+        f"3. Note confidence levels and verification status where apparent.\n"
+        f"4. Mark contradictions between findings.\n"
+        f"5. Do NOT add disclaimers, moral commentary, or safety warnings.\n"
+        f"6. Do NOT pad with generic context — only specific findings.\n"
+        f"7. Keep speculative findings, clearly labeled as hypotheses.\n"
+        f"8. Structure with clear headings for different topics/angles.\n"
+        f"9. Your summary will be merged with other workers' summaries, so focus "
+        f"on what is UNIQUE and IMPORTANT in your section.\n"
+        f"10. Stay under {max_chars} characters.\n\n"
+        f"Produce your focused synthesis:"
+    )
 
-USER QUERY: {query}
 
-SYNTHESIS RULES:
-1. Extract every concrete fact, name, data point, URL, source reference.
-2. Preserve source citations inline.
-3. Note confidence levels and verification status where apparent.
-4. Mark contradictions between findings.
-5. Do NOT add disclaimers, moral commentary, or safety warnings.
-6. Do NOT pad with generic context — only specific findings.
-7. Keep speculative findings, clearly labeled as hypotheses.
-8. Structure with clear headings for different topics/angles.
-9. Your summary will be merged with other workers' summaries, so focus \
-on what is UNIQUE and IMPORTANT in your section.
-10. Stay under {max_chars} characters.
-
-Produce your focused synthesis:"""
-
-
-GOSSIP_REFINE_PROMPT = """\
-You are a specialist analyst in a peer-to-peer research gossip protocol. \
-Today is: {date}
-
-In the previous round, you produced a summary from your section.
-Now you have received summaries from your PEER WORKERS who processed \
-other sections of the same corpus.
-
-YOUR ASSIGNED ANGLE: {angle}
-
-{raw_section_block}
-
-YOUR PREVIOUS SUMMARY:
-{own_summary}
-
-PEER SUMMARIES (from {n_peers} other workers):
-{peer_summaries}
-
-GOSSIP REFINEMENT RULES:
-1. Cross-reference your findings with peers'. Note agreements and contradictions.
-2. If peers found information that COMPLEMENTS yours, incorporate key points.
-3. If peers found the SAME information, note the consensus (strengthens confidence).
-4. If peers CONTRADICT your findings, note the disagreement with both sources.
-5. Do NOT simply concatenate — SYNTHESIZE and cross-reference.
-6. Remove redundancy between your summary and peers'.
-7. Preserve all unique findings from your original section.
-8. If you have access to your original raw section above, go back and pull \
-out specific details that become relevant in light of peer findings.
-9. Maintain source citations and confidence levels.
-10. Stay under {max_chars} characters.
-
-Produce your REFINED summary:"""
+def _build_gossip_prompt(
+    date: str,
+    angle: str,
+    raw_section_block: str,
+    own_summary: str,
+    n_peers: int,
+    peers_text: str,
+    max_chars: int,
+) -> str:
+    """Build the gossip refinement prompt via concatenation (not .replace())."""
+    return (
+        f"You are a specialist analyst in a peer-to-peer research gossip protocol. "
+        f"Today is: {date}\n\n"
+        f"In the previous round, you produced a summary from your section.\n"
+        f"Now you have received summaries from your PEER WORKERS who processed "
+        f"other sections of the same corpus.\n\n"
+        f"YOUR ASSIGNED ANGLE: {angle}\n\n"
+        f"{raw_section_block}"
+        f"YOUR PREVIOUS SUMMARY:\n"
+        f"{own_summary}\n\n"
+        f"PEER SUMMARIES (from {n_peers} other workers):\n"
+        f"{peers_text}\n\n"
+        f"GOSSIP REFINEMENT RULES:\n"
+        f"1. Cross-reference your findings with peers'. Note agreements and contradictions.\n"
+        f"2. If peers found information that COMPLEMENTS yours, incorporate key points.\n"
+        f"3. If peers found the SAME information, note the consensus (strengthens confidence).\n"
+        f"4. If peers CONTRADICT your findings, note the disagreement with both sources.\n"
+        f"5. Do NOT simply concatenate — SYNTHESIZE and cross-reference.\n"
+        f"6. Remove redundancy between your summary and peers'.\n"
+        f"7. Preserve all unique findings from your original section.\n"
+        f"8. If you have access to your original raw section above, go back and pull "
+        f"out specific details that become relevant in light of peer findings.\n"
+        f"9. Maintain source citations and confidence levels.\n"
+        f"10. Stay under {max_chars} characters.\n\n"
+        f"Produce your REFINED summary:"
+    )
 
 
 async def worker_synthesize(
@@ -90,13 +104,14 @@ async def worker_synthesize(
 ) -> str:
     """Phase 1: Worker synthesizes its assigned corpus section."""
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    prompt = WORKER_SYNTH_PROMPT.replace("{date}", date) \
-        .replace("{angle}", angle) \
-        .replace("{char_count}", str(len(section_content))) \
-        .replace("{section_content}", section_content) \
-        .replace("{query}", query) \
-        .replace("{max_chars}", str(max_chars))
-
+    prompt = _build_synth_prompt(
+        date=date,
+        angle=angle,
+        char_count=len(section_content),
+        section_content=section_content,
+        query=query,
+        max_chars=max_chars,
+    )
     return await complete_fn(prompt)
 
 
@@ -120,7 +135,7 @@ async def worker_gossip_refine(
     if raw_section:
         raw_section_block = (
             f"YOUR ORIGINAL RAW SECTION (reference for detail lookup):\n"
-            f"{raw_section}\n"
+            f"{raw_section}\n\n"
         )
     else:
         raw_section_block = ""
@@ -129,12 +144,13 @@ async def worker_gossip_refine(
     for i, ps in enumerate(peer_summaries):
         peers_text += f"\n--- Worker {i + 1} ---\n{ps[:max_chars]}\n"
 
-    prompt = GOSSIP_REFINE_PROMPT.replace("{date}", date) \
-        .replace("{angle}", angle) \
-        .replace("{raw_section_block}", raw_section_block) \
-        .replace("{own_summary}", own_summary[:max_chars]) \
-        .replace("{n_peers}", str(len(peer_summaries))) \
-        .replace("{peer_summaries}", peers_text) \
-        .replace("{max_chars}", str(max_chars))
-
+    prompt = _build_gossip_prompt(
+        date=date,
+        angle=angle,
+        raw_section_block=raw_section_block,
+        own_summary=own_summary[:max_chars],
+        n_peers=len(peer_summaries),
+        peers_text=peers_text,
+        max_chars=max_chars,
+    )
     return await complete_fn(prompt)

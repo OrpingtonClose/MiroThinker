@@ -16,39 +16,46 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 
-QUEEN_MERGE_PROMPT = """\
-You are the queen synthesizer in a research swarm. Today is: {date}
+def _build_queen_prompt(
+    date: str,
+    n_workers: int,
+    query: str,
+    summaries_text: str,
+    serendipity_block: str,
+) -> str:
+    """Build the queen merge prompt via concatenation (not .replace()).
 
-{n_workers} specialist workers have independently processed different \
-sections of a research corpus, then refined their summaries through a \
-gossip protocol where each worker cross-referenced peers' findings.
-
-Your job: merge all worker summaries into ONE comprehensive, well-structured \
-final answer to the user's question.
-
-USER QUERY: {query}
-
-WORKER SUMMARIES (post-gossip refinement):
-{worker_summaries}
-
-{serendipity_block}
-
-MERGE RULES:
-1. Cross-reference across ALL workers. Where multiple workers agree, note consensus.
-2. Where workers contradict, resolve using source quality and confidence.
-3. Structure with clear headings and logical flow.
-4. Cite sources with URLs where available.
-5. Every sentence must deliver information. No filler, no disclaimers.
-6. Keep speculative findings, clearly labeled as hypotheses.
-7. Do NOT add unsolicited warnings or ethical disclaimers.
-8. Mark areas where evidence is weak with [NEEDS VERIFICATION].
-9. SYNTHESIZE into a flowing narrative — do NOT produce bullet-point lists or \
-data dumps. Weave findings into causal explanations and connected arguments.
-10. If serendipity insights are provided below, integrate them naturally \
-into the appropriate sections — they represent cross-angle connections \
-that individual specialists missed.
-
-Produce the final comprehensive synthesis:"""
+    Concatenation prevents template injection: if worker summaries or the
+    user query contain literal ``{placeholder}`` strings, they won't be
+    re-scanned by a subsequent replacement pass.
+    """
+    return (
+        f"You are the queen synthesizer in a research swarm. Today is: {date}\n\n"
+        f"{n_workers} specialist workers have independently processed different "
+        f"sections of a research corpus, then refined their summaries through a "
+        f"gossip protocol where each worker cross-referenced peers' findings.\n\n"
+        f"Your job: merge all worker summaries into ONE comprehensive, well-structured "
+        f"final answer to the user's question.\n\n"
+        f"USER QUERY: {query}\n\n"
+        f"WORKER SUMMARIES (post-gossip refinement):\n"
+        f"{summaries_text}\n\n"
+        f"{serendipity_block}"
+        f"MERGE RULES:\n"
+        f"1. Cross-reference across ALL workers. Where multiple workers agree, note consensus.\n"
+        f"2. Where workers contradict, resolve using source quality and confidence.\n"
+        f"3. Structure with clear headings and logical flow.\n"
+        f"4. Cite sources with URLs where available.\n"
+        f"5. Every sentence must deliver information. No filler, no disclaimers.\n"
+        f"6. Keep speculative findings, clearly labeled as hypotheses.\n"
+        f"7. Do NOT add unsolicited warnings or ethical disclaimers.\n"
+        f"8. Mark areas where evidence is weak with [NEEDS VERIFICATION].\n"
+        f"9. SYNTHESIZE into a flowing narrative — do NOT produce bullet-point lists or "
+        f"data dumps. Weave findings into causal explanations and connected arguments.\n"
+        f"10. If serendipity insights are provided above, integrate them naturally "
+        f"into the appropriate sections — they represent cross-angle connections "
+        f"that individual specialists missed.\n\n"
+        f"Produce the final comprehensive synthesis:"
+    )
 
 
 async def queen_merge(
@@ -85,17 +92,18 @@ async def queen_merge(
             "CROSS-ANGLE SERENDIPITY INSIGHTS (unexpected connections "
             "between specialist domains — integrate these into the "
             "appropriate sections):\n"
-            f"{serendipity_insights}\n"
+            f"{serendipity_insights}\n\n"
         )
     else:
         serendipity_block = ""
 
-    prompt = QUEEN_MERGE_PROMPT \
-        .replace("{date}", date) \
-        .replace("{n_workers}", str(len(worker_summaries))) \
-        .replace("{query}", query) \
-        .replace("{worker_summaries}", summaries_text) \
-        .replace("{serendipity_block}", serendipity_block)
+    prompt = _build_queen_prompt(
+        date=date,
+        n_workers=len(worker_summaries),
+        query=query,
+        summaries_text=summaries_text,
+        serendipity_block=serendipity_block,
+    )
 
     try:
         result = await complete_fn(prompt)

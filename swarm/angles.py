@@ -212,8 +212,12 @@ def assign_workers(
     # Cap to max_workers after splitting
     final_sections = final_sections[:max_workers]
 
-    # Create worker assignments
+    # Create worker assignments — each must have a UNIQUE angle key
+    # to prevent dict-keyed data loss downstream (engine.py builds
+    # worker_summaries = {angle: summary}).
     assignments: list[WorkerAssignment] = []
+    used_angles: dict[str, int] = {}  # angle -> count of uses
+
     for i, section in enumerate(final_sections):
         # Match section to closest angle (simple substring matching)
         best_angle = section.title
@@ -227,9 +231,17 @@ def assign_workers(
                 if i < len(angles):
                     best_angle = angles[i]
 
+        # Disambiguate: if this angle was already used, append a part number
+        if best_angle in used_angles:
+            used_angles[best_angle] += 1
+            unique_angle = f"{best_angle} (part {used_angles[best_angle]})"
+        else:
+            used_angles[best_angle] = 1
+            unique_angle = best_angle
+
         assignments.append(WorkerAssignment(
             worker_id=i,
-            angle=best_angle,
+            angle=unique_angle,
             raw_content=section.content,
         ))
 
