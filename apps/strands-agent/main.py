@@ -20,6 +20,7 @@ import asyncio
 import html
 import json
 import logging
+import os
 import queue
 import re
 import threading
@@ -379,31 +380,22 @@ def query_single(req: QueryRequest):
     )
 
 
-@app.post("/query/multi", response_model=QueryResponse)
-def query_multi(req: QueryRequest):
-    """Send a query to the multi-agent (planner delegates to researcher)."""
-    if _multi_agent is None:
-        raise HTTPException(status_code=503, detail="Multi agent not initialised")
+def _run_research(query: str) -> tuple[str, dict | None]:
+    """Phase 1: run planner+researcher to gather raw data (sync, holds lock)."""
+    from agent import reset_budget
 
-    start = time.time()
-    req_id = f"query-{uuid.uuid4().hex[:12]}"
     with _agent_lock:
-        from agent import reset_budget
-
         _multi_agent.messages.clear()
         original_prompts: dict[str, str | None] = {}
-        # Inject skill into BOTH planner and researcher — the planner needs
-        # the methodology to decompose the query correctly, the researcher
-        # needs it to choose the right tools for each sub-task.
         original_prompts["planner"] = _multi_agent.system_prompt
-        _auto_activate_skills(req.query, _multi_agent)
+        _auto_activate_skills(query, _multi_agent)
         if _multi_researcher is not None:
             _multi_researcher.messages.clear()
             original_prompts["researcher"] = _multi_researcher.system_prompt
-            _auto_activate_skills(req.query, _multi_researcher)
+            _auto_activate_skills(query, _multi_researcher)
         reset_budget()
         try:
-            response = _multi_agent(req.query)
+            response = _multi_agent(query)
             metrics = None
             try:
                 metrics = response.metrics.get_summary()
@@ -417,13 +409,112 @@ def query_multi(req: QueryRequest):
                 _multi_agent.system_prompt = original_prompts["planner"]
             if _multi_researcher is not None and "researcher" in original_prompts:
                 _multi_researcher.system_prompt = original_prompts["researcher"]
+    return str(response), metrics
+
+
+_SWARM_ITERATIONS = int(os.environ.get("SWARM_ITERATIONS", "2"))
+
+
+def _store_gossip_report(report: str, iteration: int, req_id: str) -> None:
+    """Persist a gossip report so the researcher can read it on the next pass."""
+    from tools import store_finding
+
+    store_finding(
+        name=f"gossip-synthesis-iter-{iteration}",
+        url=f"internal://{req_id}/gossip/{iteration}",
+        category="gossip_report",
+        summary=report[:6000],
+        rating=0,
+    )
+
+
+@app.post("/query/multi", response_model=QueryResponse)
+async def query_multi(req: QueryRequest):
+    """Research ↔ gossip feedback loop.
+
+    Each iteration:
+      1. Researcher gathers data (tools: TranscriptAPI, web, etc.)
+      2. Gossip swarm produces reports from that data (stored)
+      3. Next iteration: researcher reads gossip reports, fills gaps
+      4. Gossip refines on expanded corpus
+    """
+    if _multi_agent is None:
+        raise HTTPException(status_code=503, detail="Multi agent not initialised")
+
+    start = time.time()
+    req_id = f"query-{uuid.uuid4().hex[:12]}"
+    iterations = _SWARM_ITERATIONS
+
+    accumulated_corpus = ""
+    final_response = ""
+    metrics = None
+
+    for iteration in range(1, iterations + 1):
+        iter_start = time.time()
+
+        # ── Research phase ────────────────────────────────────────────
+        # On iteration 2+, the query includes a pointer to prior gossip
+        # reports so the researcher knows what gaps to fill.
+        if iteration == 1:
+            research_query = req.query
+        else:
+            research_query = (
+                f"{req.query}\n\n"
+                f"--- PRIOR GOSSIP SYNTHESIS (iteration {iteration - 1}) ---\n"
+                f"The previous research round produced the analysis below. "
+                f"Read it carefully. Identify gaps, unverified claims, missing "
+                f"channels, and topics with shallow coverage. Then do targeted "
+                f"research to fill those gaps. Use read_findings(category='gossip_report') "
+                f"to see the full prior reports.\n\n"
+                f"{final_response[:4000]}"
+            )
+
+        raw_research, metrics = await asyncio.to_thread(
+            _run_research, research_query,
+        )
+        research_elapsed = round(time.time() - iter_start, 2)
+        logger.info(
+            "req_id=<%s>, iteration=<%d>, research_chars=<%d>, elapsed=<%.1f> | research phase complete",
+            req_id, iteration, len(raw_research), research_elapsed,
+        )
+
+        # Accumulate corpus across iterations
+        accumulated_corpus += f"\n\n--- RESEARCH ITERATION {iteration} ---\n{raw_research}"
+
+        # ── Gossip synthesis ──────────────────────────────────────────
+        try:
+            from swarm_bridge import gossip_synthesize
+
+            swarm_result = await gossip_synthesize(
+                corpus=accumulated_corpus, query=req.query,
+            )
+            final_response = swarm_result.user_report
+            logger.info(
+                "req_id=<%s>, iteration=<%d>, swarm_llm_calls=<%d>, swarm_elapsed=<%.1f>, "
+                "gossip_rounds=<%d>, workers=<%d> | gossip synthesis complete",
+                req_id, iteration,
+                swarm_result.metrics.total_llm_calls,
+                swarm_result.metrics.total_elapsed_s,
+                swarm_result.metrics.gossip_rounds_executed,
+                swarm_result.metrics.total_workers,
+            )
+
+            # Store report so researcher can read it next iteration
+            _store_gossip_report(final_response, iteration, req_id)
+
+        except Exception:
+            logger.exception(
+                "req_id=<%s>, iteration=<%d> | gossip synthesis failed, using raw research",
+                req_id, iteration,
+            )
+            final_response = raw_research
 
     elapsed = round(time.time() - start, 2)
     _write_metrics_jsonl(req_id, _MODEL_MULTI, req.query, elapsed, metrics, [])
 
     return QueryResponse(
         query=req.query,
-        response=str(response),
+        response=final_response,
         mode="multi",
         elapsed_seconds=elapsed,
     )
@@ -495,6 +586,8 @@ def _dispatch_agent(model: str, user_message: str) -> tuple[str, dict | None]:
                 _multi_agent.system_prompt = original_prompts["planner"]
             if _multi_researcher is not None and "researcher" in original_prompts:
                 _multi_researcher.system_prompt = original_prompts["researcher"]
+
+        # Note: gossip synthesis handled by caller for async paths
     elif _single_agent is not None:
         _single_agent.messages.clear()
         original_prompt = _single_agent.system_prompt
