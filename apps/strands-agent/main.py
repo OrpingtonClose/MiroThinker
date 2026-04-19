@@ -474,12 +474,14 @@ def _dispatch_agent(model: str, user_message: str) -> tuple[str, dict | None]:
         if _multi_agent is None:
             raise RuntimeError("Multi agent not initialised")
         _multi_agent.messages.clear()
+        original_prompts: dict[str, str | None] = {}
+        # Inject skill into BOTH planner and researcher (same as query_multi)
+        original_prompts["planner"] = _multi_agent.system_prompt
+        _auto_activate_skills(user_message, _multi_agent)
         if _multi_researcher is not None:
             _multi_researcher.messages.clear()
-            original_prompt = _multi_researcher.system_prompt
+            original_prompts["researcher"] = _multi_researcher.system_prompt
             _auto_activate_skills(user_message, _multi_researcher)
-        else:
-            original_prompt = None
         reset_budget()
         try:
             agent_result = _multi_agent(user_message)
@@ -489,8 +491,10 @@ def _dispatch_agent(model: str, user_message: str) -> tuple[str, dict | None]:
             except Exception:
                 pass
         finally:
-            if _multi_researcher is not None and original_prompt is not None:
-                _multi_researcher.system_prompt = original_prompt
+            if "planner" in original_prompts:
+                _multi_agent.system_prompt = original_prompts["planner"]
+            if _multi_researcher is not None and "researcher" in original_prompts:
+                _multi_researcher.system_prompt = original_prompts["researcher"]
     elif _single_agent is not None:
         _single_agent.messages.clear()
         original_prompt = _single_agent.system_prompt
