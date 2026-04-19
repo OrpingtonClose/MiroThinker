@@ -771,8 +771,9 @@ def _format_comments_md(comments: list[dict[str, Any]]) -> str:
     if not comments:
         return ""
 
-    lines = [f"\n### Comments ({len(comments)} extracted)\n"]
-    for i, c in enumerate(comments[:100], 1):
+    display_comments = comments[:100]
+    lines = [f"\n### Comments ({len(display_comments)} extracted)\n"]
+    for i, c in enumerate(display_comments, 1):
         author = c.get("author", "Anonymous")
         text = c.get("text", "").replace("\n", " ").strip()
         likes = c.get("likes", 0)
