@@ -201,7 +201,7 @@ def extract_topics(title: str, description: str, tags: list[str]) -> list[str]:
     Returns:
         List of matched topic strings.
     """
-    text = f"{title} {description} {' '.join(tags)}".lower()
+    text = f" {title} {description} {' '.join(tags)} ".lower()
     return [topic for topic, kws in TOPIC_KEYWORDS.items() if any(kw in text for kw in kws)]
 
 
