@@ -538,12 +538,12 @@ async def _bd_scrape(
                 )
                 return []
 
-            snapshot_id = resp.json().get("snapshot_id", "")
-            if not snapshot_id:
+            response_data = resp.json()
+            if isinstance(response_data, list):
                 # Synchronous response — data returned directly
-                data = resp.json()
-                if isinstance(data, list):
-                    return data
+                return response_data
+            snapshot_id = response_data.get("snapshot_id", "")
+            if not snapshot_id:
                 return []
 
             # Poll
@@ -1261,7 +1261,8 @@ def main() -> None:
         print("Export from cache not yet implemented — use harvest first, then export from result")
         sys.exit(1)
 
-    # Harvest each channel
+    # Harvest each channel, accumulating all videos for export
+    all_videos: list[VideoRecord] = []
     for channel in args.channels:
         print(f"\n{'=' * 60}")
         print(f"Harvesting: {channel}")
@@ -1269,19 +1270,20 @@ def main() -> None:
 
         result = asyncio.run(harvester.harvest_channel(channel, max_videos=args.max_videos))
         print(result.summary())
+        all_videos.extend(result.videos)
 
         if result.errors:
             print("Errors:")
             for err in result.errors:
                 print(f"  - {err}")
 
-        # Export corpus from this run
-        if args.out:
-            path = export_corpus(
-                result.videos, args.out, args.max_chars,
-                include_comments=config.fetch_comments,
-            )
-            print(f"Corpus exported to: {path}")
+    # Export combined corpus after all channels are harvested
+    if args.out and all_videos:
+        path = export_corpus(
+            all_videos, args.out, args.max_chars,
+            include_comments=config.fetch_comments,
+        )
+        print(f"Corpus exported to: {path}")
 
 
 if __name__ == "__main__":
