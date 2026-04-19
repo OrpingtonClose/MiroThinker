@@ -6,14 +6,18 @@
 Instead of running a fixed number of gossip rounds, detect when workers
 have converged (their summaries stop changing meaningfully) and stop early.
 
-Three strategies:
+Four strategies:
 1. **Trigram Jaccard** (fast, zero LLM calls): Compare word trigram overlap
    between consecutive rounds. When similarity exceeds threshold, stop.
 2. **Information gain** (complementary): Measure how much NEW content each
    round introduces via set-difference of trigrams.  Tracks diminishing
    returns — if a round adds < 5% new trigrams, further rounds are unlikely
    to help.
-3. **Length-based** (fallback): If summaries stop growing or shrinking
+3. **Corpus-delta** (structural, from ADK): Count new entity mentions and
+   cross-references between rounds.  Measures structural changes rather
+   than surface text similarity.  Inspired by ADK convergence module
+   (apps/adk-agent/models/convergence.py).
+4. **Length-based** (fallback): If summaries stop growing or shrinking
    significantly between rounds, convergence is assumed.
 
 From benchmark findings: the gossip round is the transformative feature —
@@ -36,6 +40,8 @@ References:
 """
 
 from __future__ import annotations
+
+import re
 
 
 def _trigrams(text: str) -> set[str]:
@@ -107,6 +113,131 @@ def information_gain(
     return len(new_trigrams) / len(curr_pool) if curr_pool else 0.0
 
 
+# ── Corpus-delta convergence (structural metric) ────────────────────
+
+# Patterns for extracting cross-references between workers
+_CROSS_REF_PATTERNS = [
+    re.compile(r"\bconsensus\b", re.IGNORECASE),
+    re.compile(r"\bcross-referenc", re.IGNORECASE),
+    re.compile(r"\bcontradicts?\b", re.IGNORECASE),
+    re.compile(r"\bagree[sd]?\b", re.IGNORECASE),
+    re.compile(r"\bdisagree[sd]?\b", re.IGNORECASE),
+    re.compile(r"\bcorroborat", re.IGNORECASE),
+    re.compile(r"\bconfirm[sed]*\b", re.IGNORECASE),
+    re.compile(r"\bconflict", re.IGNORECASE),
+    re.compile(r"\bsupport[sed]*\s+(?:by|this|the)", re.IGNORECASE),
+    re.compile(r"\bverif", re.IGNORECASE),
+]
+
+# Patterns for entity-like mentions (capitalized multi-word, technical terms)
+_ENTITY_PATTERN = re.compile(
+    r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b"  # capitalized multi-word
+    r"|\b[A-Z]{2,}[a-z]*(?:-\d+)?\b"  # acronyms like RNA, MAPK, NF-2
+    r"|\b\d+(?:\.\d+)?(?:\s*(?:mg|mcg|IU|ng|µg|mmol|kg))\b"  # quantities with word units
+    r"|\b\d+(?:\.\d+)?%",  # percentage quantities
+)
+
+
+def count_cross_references(text: str) -> int:
+    """Count cross-reference indicators in a text.
+
+    Looks for language that indicates a worker is referencing or comparing
+    findings from other workers (consensus, contradicts, agrees, etc.).
+
+    Args:
+        text: Worker summary text to analyze.
+
+    Returns:
+        Number of cross-reference indicators found.
+    """
+    count = 0
+    for pattern in _CROSS_REF_PATTERNS:
+        count += len(pattern.findall(text))
+    return count
+
+
+def count_entities(text: str) -> set[str]:
+    """Extract entity-like mentions from text.
+
+    Finds capitalized multi-word phrases, acronyms, and quantity mentions
+    that represent specific factual claims.
+
+    Args:
+        text: Worker summary text to analyze.
+
+    Returns:
+        Set of unique entity mentions.
+    """
+    return set(_ENTITY_PATTERN.findall(text))
+
+
+def corpus_delta(
+    current_summaries: list[str],
+    previous_summaries: list[str],
+) -> dict[str, float]:
+    """Compute corpus-delta metrics between gossip rounds.
+
+    Inspired by the ADK's convergence module (apps/adk-agent/models/convergence.py),
+    this measures STRUCTURAL changes rather than surface text similarity:
+    - New entities introduced
+    - New cross-references added
+    - Entity retention rate
+
+    Args:
+        current_summaries: Worker summaries from the current round.
+        previous_summaries: Worker summaries from the previous round.
+
+    Returns:
+        Dict with keys:
+        - new_entity_fraction: Fraction of entities in current that are new
+        - cross_ref_delta: Change in cross-reference count
+        - entity_retention: Fraction of previous entities retained
+    """
+    if not current_summaries or not previous_summaries:
+        return {
+            "new_entity_fraction": 0.0,
+            "cross_ref_delta": 0.0,
+            "entity_retention": 1.0,
+        }
+
+    # Pool entities and cross-refs from each round
+    prev_entities: set[str] = set()
+    curr_entities: set[str] = set()
+    prev_xrefs = 0
+    curr_xrefs = 0
+
+    for s in previous_summaries:
+        prev_entities |= count_entities(s)
+        prev_xrefs += count_cross_references(s)
+    for s in current_summaries:
+        curr_entities |= count_entities(s)
+        curr_xrefs += count_cross_references(s)
+
+    # New entity fraction
+    new_entities = curr_entities - prev_entities
+    new_entity_fraction = (
+        len(new_entities) / len(curr_entities)
+        if curr_entities else 0.0
+    )
+
+    # Cross-reference delta (normalized)
+    max_xrefs = max(prev_xrefs, curr_xrefs, 1)
+    cross_ref_delta = (curr_xrefs - prev_xrefs) / max_xrefs
+
+    # Entity retention (how many previous entities are still mentioned)
+    retained = prev_entities & curr_entities
+    entity_retention = (
+        len(retained) / len(prev_entities)
+        if prev_entities else 1.0
+    )
+
+    return {
+        "new_entity_fraction": new_entity_fraction,
+        "cross_ref_delta": cross_ref_delta,
+        "entity_retention": entity_retention,
+    }
+
+
 def check_convergence(
     current_summaries: list[str],
     previous_summaries: list[str],
@@ -114,9 +245,14 @@ def check_convergence(
 ) -> bool:
     """Check if worker summaries have converged between gossip rounds.
 
-    Convergence is declared when the AVERAGE Jaccard similarity across
-    all workers exceeds the threshold. This means most workers are no
-    longer producing meaningfully different content.
+    Uses a combined metric: Jaccard similarity (surface text) AND
+    corpus-delta (structural changes).  Convergence requires BOTH:
+    - High Jaccard similarity (text is stable)
+    - Low new entity fraction (no new facts being introduced)
+    - Stable cross-reference count (not still growing significantly)
+
+    This prevents false convergence when text is similar but workers
+    are still introducing important structural changes.
 
     Args:
         current_summaries: Worker summaries from the current round.
@@ -132,10 +268,28 @@ def check_convergence(
     if not current_summaries:
         return True
 
+    # Check Jaccard similarity
     similarities = []
     for curr, prev in zip(current_summaries, previous_summaries):
         sim = jaccard_similarity(curr, prev)
         similarities.append(sim)
 
     avg_similarity = sum(similarities) / len(similarities)
-    return avg_similarity >= threshold
+
+    # If Jaccard is below threshold, definitely not converged
+    if avg_similarity < threshold:
+        return False
+
+    # Additional structural check: are new entities still being added?
+    delta = corpus_delta(current_summaries, previous_summaries)
+
+    # If more than 5% new entities are being introduced, not converged
+    # even if text similarity is high
+    if delta["new_entity_fraction"] > 0.05:
+        return False
+
+    # If cross-references are still growing significantly, not converged
+    if delta["cross_ref_delta"] > 0.1:
+        return False
+
+    return True

@@ -47,6 +47,14 @@ Per-phase model selection:
   Serendipity uses ``serendipity_complete`` (best cross-domain reasoner).
   All default to the single ``complete`` function if per-phase callables
   are not provided.
+
+Lineage tracking:
+  If ``config.lineage_store`` is set, every phase emits a ``LineageEntry``
+  with parent pointers forming a DAG from final reports back to raw sections.
+
+Quality manifest:
+  If ``config.enable_quality_manifest`` is True (default), a computed
+  provenance footer is appended to both reports.
 """
 
 from __future__ import annotations
@@ -54,6 +62,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 
 from swarm.angles import (
@@ -64,11 +73,18 @@ from swarm.angles import (
 )
 from swarm.config import CompleteFn, SwarmConfig
 from swarm.convergence import check_convergence, information_gain
+from swarm.lineage import LineageEntry
+from swarm.quality_manifest import SwarmQualityManifest
 from swarm.queen import build_knowledge_report, queen_merge
 from swarm.serendipity import find_serendipitous_connections
 from swarm.worker import worker_gossip_refine, worker_synthesize
 
 logger = logging.getLogger(__name__)
+
+
+def _lid() -> str:
+    """Generate a short unique lineage entry ID."""
+    return uuid.uuid4().hex[:12]
 
 
 @dataclass
@@ -78,6 +94,7 @@ class SwarmMetrics:
     total_llm_calls: int = 0
     total_workers: int = 0
     gossip_rounds_executed: int = 0
+    gossip_rounds_configured: int = 0
     gossip_converged_early: bool = False
     serendipity_produced: bool = False
     phase_times: dict[str, float] = field(default_factory=dict)
@@ -85,6 +102,7 @@ class SwarmMetrics:
     worker_output_chars: list[int] = field(default_factory=list)
     total_elapsed_s: float = 0.0
     gossip_info_gain: list[float] = field(default_factory=list)
+    degradations: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -104,6 +122,7 @@ class SwarmResult:
     worker_summaries: dict[str, str] = field(default_factory=dict)
     serendipity_insights: str = ""
     angles_detected: list[str] = field(default_factory=list)
+    quality_manifest: SwarmQualityManifest | None = None
 
     @property
     def user_report(self) -> str:
@@ -122,6 +141,9 @@ class GossipSwarm:
     uncensored), queen merge (best writer), and serendipity bridge (best
     cross-domain reasoner).  An uncensored model with equivalent capability
     is strictly better than its censored counterpart.
+
+    Lineage tracking: pass ``config=SwarmConfig(lineage_store=store)`` to
+    record every phase output with parent pointers forming a DAG.
 
     Usage:
         async def fast_local(prompt: str) -> str:
@@ -156,6 +178,12 @@ class GossipSwarm:
         self.serendipity_complete = serendipity_complete or complete
         self.config = config or SwarmConfig()
 
+    def _emit(self, entry: LineageEntry) -> None:
+        """Emit a lineage entry if a store is configured."""
+        store = self.config.lineage_store
+        if store is not None:
+            store.emit(entry)
+
     async def synthesize(
         self,
         corpus: str,
@@ -172,6 +200,7 @@ class GossipSwarm:
         """
         t0 = time.monotonic()
         metrics = SwarmMetrics()
+        metrics.gossip_rounds_configured = self.config.gossip_rounds
         config = self.config
 
         # ── Phase 0: Corpus Analysis ─────────────────────────────────
@@ -214,9 +243,24 @@ class GossipSwarm:
             len(assignments), [a.angle for a in assignments],
         )
 
+        # Lineage: emit corpus analysis entries
+        corpus_entry_id = _lid()
+        self._emit(LineageEntry(
+            entry_id=corpus_entry_id,
+            phase="corpus_analysis",
+            content=f"Detected {len(sections)} sections, {len(angles)} angles",
+            metadata={
+                "corpus_chars": len(corpus),
+                "section_count": len(sections),
+                "angle_count": len(angles),
+                "query": query[:200],
+            },
+        ))
+
         # ── Phase 1: Map (parallel worker synthesis) ─────────────────
         phase_start = time.monotonic()
         sem = asyncio.Semaphore(config.max_concurrency)
+        worker_entry_ids: dict[int, str] = {}
 
         async def _bounded_synthesize(assignment: WorkerAssignment) -> None:
             async with sem:
@@ -234,10 +278,30 @@ class GossipSwarm:
                         assignment.worker_id, assignment.angle,
                     )
                     assignment.summary = assignment.raw_content[:config.max_summary_chars]
+                    metrics.degradations.append(
+                        f"Worker {assignment.angle} synthesis failed, used raw truncation"
+                    )
 
         await asyncio.gather(*[_bounded_synthesize(a) for a in assignments])
         metrics.total_llm_calls += len(assignments)
         metrics.phase_times["map"] = time.monotonic() - phase_start
+
+        # Lineage: emit worker synthesis entries
+        for a in assignments:
+            eid = _lid()
+            worker_entry_ids[a.worker_id] = eid
+            self._emit(LineageEntry(
+                entry_id=eid,
+                phase="worker_synthesis",
+                angle=a.angle,
+                content=a.summary,
+                parent_ids=(corpus_entry_id,),
+                metadata={
+                    "worker_id": a.worker_id,
+                    "input_chars": a.char_count,
+                    "output_chars": len(a.summary),
+                },
+            ))
 
         logger.info(
             "map_phase_s=<%.1f>, workers=<%d> | map phase complete",
@@ -288,6 +352,9 @@ class GossipSwarm:
                             "worker_id=<%d>, angle=<%s>, round=<%d> | gossip refinement failed, keeping previous summary",
                             assignment.worker_id, assignment.angle, gossip_round,
                         )
+                        metrics.degradations.append(
+                            f"Worker {assignment.angle} gossip round {gossip_round} failed"
+                        )
 
             await asyncio.gather(*[_bounded_gossip(a) for a in assignments])
             metrics.total_llm_calls += len(assignments)
@@ -298,6 +365,26 @@ class GossipSwarm:
             previous = [a.prev_summary for a in assignments]
             gain = information_gain(current, previous)
             metrics.gossip_info_gain.append(gain)
+
+            # Lineage: emit gossip round entries
+            for a in assignments:
+                prev_eid = worker_entry_ids[a.worker_id]
+                new_eid = _lid()
+                self._emit(LineageEntry(
+                    entry_id=new_eid,
+                    phase=f"gossip_round_{gossip_round}",
+                    angle=a.angle,
+                    content=a.summary,
+                    parent_ids=(prev_eid,),
+                    metadata={
+                        "round": gossip_round,
+                        "info_gain": round(gain, 4),
+                        "worker_id": a.worker_id,
+                        "output_chars": len(a.summary),
+                        "failures_this_round": gossip_failures,
+                    },
+                ))
+                worker_entry_ids[a.worker_id] = new_eid
 
             logger.info(
                 "gossip_round=<%d>, failures=<%d>, info_gain=<%.3f> | gossip round complete",
@@ -338,6 +425,7 @@ class GossipSwarm:
         # Wrapped in try/except: serendipity is optional bonus insight and
         # must not crash the pipeline, discarding expensive phases 0-2.
         serendipity_insights = ""
+        serendipity_entry_id = ""
         if config.enable_serendipity and len(assignments) >= 2:
             phase_start = time.monotonic()
             try:
@@ -349,9 +437,21 @@ class GossipSwarm:
             except Exception:
                 logger.warning("serendipity bridge failed, continuing without it")
                 serendipity_insights = ""
+                metrics.degradations.append("Serendipity bridge failed")
             metrics.total_llm_calls += 1
             metrics.serendipity_produced = bool(serendipity_insights)
             metrics.phase_times["serendipity"] = time.monotonic() - phase_start
+
+            # Lineage: emit serendipity entry
+            if serendipity_insights:
+                serendipity_entry_id = _lid()
+                self._emit(LineageEntry(
+                    entry_id=serendipity_entry_id,
+                    phase="serendipity",
+                    content=serendipity_insights,
+                    parent_ids=tuple(worker_entry_ids.values()),
+                    metadata={"output_chars": len(serendipity_insights)},
+                ))
 
             logger.info(
                 "serendipity_chars=<%d> | serendipity bridge complete",
@@ -387,16 +487,68 @@ class GossipSwarm:
         metrics.phase_times["queen_merge"] = time.monotonic() - phase_start
         metrics.total_elapsed_s = time.monotonic() - t0
 
+        # Build quality manifest
+        manifest = SwarmQualityManifest(
+            corpus_chars=len(corpus),
+            section_count=len(sections),
+            worker_count=len(assignments),
+            angles=[a.angle for a in assignments],
+            gossip_rounds_executed=rounds_executed,
+            gossip_rounds_configured=config.gossip_rounds,
+            gossip_converged_early=metrics.gossip_converged_early,
+            gossip_info_gain=list(metrics.gossip_info_gain),
+            serendipity_produced=metrics.serendipity_produced,
+            phase_times_s=dict(metrics.phase_times),
+            total_llm_calls=metrics.total_llm_calls,
+            total_elapsed_s=metrics.total_elapsed_s,
+            worker_input_chars=list(metrics.worker_input_chars),
+            worker_output_chars=list(metrics.worker_output_chars),
+            degradations=list(metrics.degradations),
+        )
+
+        # Append quality manifest to reports
+        if config.enable_quality_manifest:
+            manifest_md = manifest.to_markdown()
+            knowledge_report = knowledge_report + "\n\n" + manifest_md
+            user_report = user_report + "\n\n" + manifest_md
+
+        # Lineage: emit final report entries
+        queen_parent_ids = list(worker_entry_ids.values())
+        if serendipity_entry_id:
+            queen_parent_ids.append(serendipity_entry_id)
+
+        self._emit(LineageEntry(
+            entry_id=_lid(),
+            phase="queen_merge",
+            content=user_report,
+            parent_ids=tuple(queen_parent_ids),
+            metadata={
+                "output_chars": len(user_report),
+                "report_type": "user",
+            },
+        ))
+        self._emit(LineageEntry(
+            entry_id=_lid(),
+            phase="knowledge_report",
+            content=knowledge_report,
+            parent_ids=tuple(queen_parent_ids),
+            metadata={
+                "output_chars": len(knowledge_report),
+                "report_type": "knowledge",
+            },
+        ))
+
         logger.info(
             "llm_calls=<%d>, elapsed_s=<%.1f>, workers=<%d>, gossip_rounds=<%d>, "
             "converged_early=<%s>, serendipity=<%s>, "
             "knowledge_chars=<%d>, user_chars=<%d>, "
-            "info_gain_per_round=<%s> | swarm synthesis complete",
+            "info_gain_per_round=<%s>, degradations=<%d> | swarm synthesis complete",
             metrics.total_llm_calls, metrics.total_elapsed_s,
             metrics.total_workers, metrics.gossip_rounds_executed,
             metrics.gossip_converged_early, metrics.serendipity_produced,
             len(knowledge_report), len(user_report),
             [f"{g:.3f}" for g in metrics.gossip_info_gain],
+            len(metrics.degradations),
         )
 
         return SwarmResult(
@@ -406,4 +558,5 @@ class GossipSwarm:
             worker_summaries=worker_summaries,
             serendipity_insights=serendipity_insights,
             angles_detected=[a.angle for a in assignments],
+            quality_manifest=manifest,
         )
