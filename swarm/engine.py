@@ -178,13 +178,20 @@ class GossipSwarm:
 
         async def _bounded_synthesize(assignment: WorkerAssignment) -> None:
             async with sem:
-                assignment.summary = await worker_synthesize(
-                    angle=assignment.angle,
-                    section_content=assignment.raw_content,
-                    query=query,
-                    max_chars=config.max_summary_chars,
-                    complete_fn=self.complete,
-                )
+                try:
+                    assignment.summary = await worker_synthesize(
+                        angle=assignment.angle,
+                        section_content=assignment.raw_content,
+                        query=query,
+                        max_chars=config.max_summary_chars,
+                        complete_fn=self.complete,
+                    )
+                except Exception:
+                    logger.warning(
+                        "worker_id=<%d>, angle=<%s> | worker synthesis failed, using raw truncation",
+                        assignment.worker_id, assignment.angle,
+                    )
+                    assignment.summary = assignment.raw_content[:config.max_summary_chars]
 
         await asyncio.gather(*[_bounded_synthesize(a) for a in assignments])
         metrics.total_llm_calls += len(assignments)
@@ -204,7 +211,10 @@ class GossipSwarm:
             for a in assignments:
                 a.prev_summary = a.summary
 
+            gossip_failures = 0
+
             async def _bounded_gossip(assignment: WorkerAssignment) -> None:
+                nonlocal gossip_failures
                 async with sem:
                     peer_sums = [
                         other.summary for other in assignments
@@ -213,36 +223,51 @@ class GossipSwarm:
                     # Full-corpus gossip: pass raw section content
                     raw = assignment.raw_content if config.enable_full_corpus_gossip else None
 
-                    assignment.summary = await worker_gossip_refine(
-                        angle=assignment.angle,
-                        own_summary=assignment.summary,
-                        peer_summaries=peer_sums,
-                        raw_section=raw,
-                        query=query,
-                        max_chars=config.max_summary_chars,
-                        complete_fn=self.complete,
-                    )
+                    try:
+                        assignment.summary = await worker_gossip_refine(
+                            angle=assignment.angle,
+                            own_summary=assignment.summary,
+                            peer_summaries=peer_sums,
+                            raw_section=raw,
+                            query=query,
+                            max_chars=config.max_summary_chars,
+                            complete_fn=self.complete,
+                        )
+                    except Exception:
+                        gossip_failures += 1
+                        logger.warning(
+                            "worker_id=<%d>, angle=<%s>, round=<%d> | gossip refinement failed, keeping previous summary",
+                            assignment.worker_id, assignment.angle, gossip_round,
+                        )
 
             await asyncio.gather(*[_bounded_gossip(a) for a in assignments])
             metrics.total_llm_calls += len(assignments)
             rounds_executed = gossip_round
 
             logger.info(
-                "gossip_round=<%d> | gossip round complete",
-                gossip_round,
+                "gossip_round=<%d>, failures=<%d> | gossip round complete",
+                gossip_round, gossip_failures,
             )
 
-            # Adaptive stopping: check convergence
+            # Adaptive stopping: check convergence (skip if ANY failures —
+            # failed workers have unchanged summaries which inflate Jaccard
+            # similarity and cause false convergence detection)
             if config.enable_adaptive_rounds and gossip_round < config.gossip_rounds:
-                current = [a.summary for a in assignments]
-                previous = [a.prev_summary for a in assignments]
-                if check_convergence(current, previous, config.convergence_threshold):
-                    logger.info(
-                        "gossip_round=<%d> | convergence detected, stopping early",
-                        gossip_round,
+                if gossip_failures > 0:
+                    logger.warning(
+                        "gossip_round=<%d>, failures=<%d> | skipping convergence check due to worker failures",
+                        gossip_round, gossip_failures,
                     )
-                    metrics.gossip_converged_early = True
-                    break
+                else:
+                    current = [a.summary for a in assignments]
+                    previous = [a.prev_summary for a in assignments]
+                    if check_convergence(current, previous, config.convergence_threshold):
+                        logger.info(
+                            "gossip_round=<%d> | convergence detected, stopping early",
+                            gossip_round,
+                        )
+                        metrics.gossip_converged_early = True
+                        break
 
         metrics.gossip_rounds_executed = rounds_executed
         metrics.phase_times["gossip"] = time.monotonic() - phase_start
