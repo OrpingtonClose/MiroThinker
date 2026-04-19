@@ -1111,6 +1111,7 @@ class Harvester:
                 summary=rec.transcript[:500] if rec.transcript else "",
                 tags=["youtube", "transcript", "harvest", rec.channel_name]
                 + rec.topics,
+                ttl=365 * 24 * 3600,  # 1 year — harvested content is permanent corpus
                 metadata={
                     "video_id": rec.video_id,
                     "channel_id": rec.channel_id,
