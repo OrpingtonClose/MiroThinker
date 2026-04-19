@@ -76,7 +76,7 @@ _SKILL_TRIGGERS: list[tuple[re.Pattern[str], str]] = [
             r"youtube|video.?channel|youtube.?transcript|harvest.?channel",
             re.IGNORECASE,
         ),
-        "youtube-research",
+        "osint-censored-discovery",
     ),
 ]
 
