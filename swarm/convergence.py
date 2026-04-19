@@ -248,7 +248,7 @@ def check_convergence(
     corpus-delta (structural changes).  Convergence requires BOTH:
     - High Jaccard similarity (text is stable)
     - Low new entity fraction (no new facts being introduced)
-    - Non-negative cross-reference delta (not losing cross-refs)
+    - Stable cross-reference count (not still growing significantly)
 
     This prevents false convergence when text is similar but workers
     are still introducing important structural changes.
