@@ -14,6 +14,11 @@ summary). When Worker 1 reads Worker 5's forum findings, it can go back
 to its own raw data and pull out details that become relevant in light
 of the peer's insight. This produced 9/10 cross-referencing vs 8/10
 for summary-only gossip.
+
+Multi-round gossip with round-specific prompts:
+  Round 1: Incorporate — absorb peer findings into own analysis
+  Round 2: Resolve — identify and resolve contradictions with peers
+  Round 3: Synthesize — produce definitive refined analysis
 """
 
 from __future__ import annotations
@@ -65,8 +70,16 @@ def _build_gossip_prompt(
     n_peers: int,
     peers_text: str,
     max_chars: int,
+    round_prompt: str = "",
 ) -> str:
-    """Build the gossip refinement prompt via concatenation (not .replace())."""
+    """Build the gossip refinement prompt via concatenation (not .replace()).
+
+    Args:
+        round_prompt: Optional round-specific focus instructions injected
+            before the refinement rules (e.g. "ROUND 2 FOCUS — CONTRADICTION
+            RESOLUTION: ...").
+    """
+    round_block = f"{round_prompt}\n\n" if round_prompt else ""
     return (
         f"You are a specialist analyst in a peer-to-peer research gossip protocol. "
         f"Today is: {date}\n\n"
@@ -79,6 +92,7 @@ def _build_gossip_prompt(
         f"{own_summary}\n\n"
         f"PEER SUMMARIES (from {n_peers} other workers):\n"
         f"{peers_text}\n\n"
+        f"{round_block}"
         f"GOSSIP REFINEMENT RULES:\n"
         f"1. Cross-reference your findings with peers'. Note agreements and contradictions.\n"
         f"2. If peers found information that COMPLEMENTS yours, incorporate key points.\n"
@@ -123,34 +137,54 @@ async def worker_gossip_refine(
     query: str,
     max_chars: int,
     complete_fn,
+    round_prompt: str = "",
 ) -> str:
     """Phase 2: Worker refines its summary using peer gossip.
 
     If raw_section is provided (full-corpus gossip mode), the worker
-    can reference its original raw data while incorporating peer insights.
+    retains access to its original corpus section during refinement.
+    This allows it to pull out specific details that become relevant
+    only after reading peer findings.
+
+    Args:
+        angle: The worker's assigned research angle.
+        own_summary: The worker's current summary (from previous round).
+        peer_summaries: Summaries from all other workers.
+        raw_section: Original corpus section (if full-corpus gossip enabled).
+        query: The user's research query.
+        max_chars: Maximum summary length in characters.
+        complete_fn: Async LLM completion callable.
+        round_prompt: Optional round-specific focus instructions.
+
+    Returns:
+        Refined summary string.
     """
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    # Build raw section block — only included in full-corpus gossip mode
+    # Build raw section block
     if raw_section:
         raw_section_block = (
-            f"YOUR ORIGINAL RAW SECTION (reference for detail lookup):\n"
+            f"YOUR ORIGINAL RAW SECTION (full text — refer back to pull out "
+            f"details relevant to peer findings):\n"
             f"{raw_section}\n\n"
         )
     else:
         raw_section_block = ""
 
+    # Build peer summaries text
     peers_text = ""
     for i, ps in enumerate(peer_summaries):
-        peers_text += f"\n--- Worker {i + 1} ---\n{ps[:max_chars]}\n"
+        peers_text += f"\n--- Peer Specialist {i + 1} ---\n{ps[:max_chars]}\n"
 
     prompt = _build_gossip_prompt(
         date=date,
         angle=angle,
         raw_section_block=raw_section_block,
-        own_summary=own_summary[:max_chars],
+        own_summary=own_summary,
         n_peers=len(peer_summaries),
         peers_text=peers_text,
         max_chars=max_chars,
+        round_prompt=round_prompt,
     )
+
     return await complete_fn(prompt)

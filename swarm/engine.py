@@ -34,11 +34,19 @@ Phases:
   0. Corpus Analysis — detect sections, extract angles, assign workers
   1. Map — each worker synthesizes its section (parallel)
   2. Gossip — workers read peers + own raw data, refine (parallel, adaptive)
+     Multiple rounds with round-specific prompts:
+       Round 1: Incorporate peer findings
+       Round 2: Resolve contradictions
+       Round 3: Final definitive synthesis
   3. Serendipity — polymath finds cross-angle surprises (sequential)
   4. Queen Merge — combines everything into final synthesis (sequential)
 
-With parallel execution: phases 1+2 are embarrassingly parallel.
-Only phases 3+4 must be sequential.
+Per-phase model selection:
+  Workers and gossip use ``worker_complete`` (fast, uncensored, parallel).
+  Queen and knowledge report use ``queen_complete`` (best writer available).
+  Serendipity uses ``serendipity_complete`` (best cross-domain reasoner).
+  All default to the single ``complete`` function if per-phase callables
+  are not provided.
 """
 
 from __future__ import annotations
@@ -55,8 +63,8 @@ from swarm.angles import (
     detect_sections,
 )
 from swarm.config import CompleteFn, SwarmConfig
-from swarm.convergence import check_convergence
-from swarm.queen import queen_merge
+from swarm.convergence import check_convergence, information_gain
+from swarm.queen import build_knowledge_report, queen_merge
 from swarm.serendipity import find_serendipitous_connections
 from swarm.worker import worker_gossip_refine, worker_synthesize
 
@@ -76,17 +84,31 @@ class SwarmMetrics:
     worker_input_chars: list[int] = field(default_factory=list)
     worker_output_chars: list[int] = field(default_factory=list)
     total_elapsed_s: float = 0.0
+    gossip_info_gain: list[float] = field(default_factory=list)
 
 
 @dataclass
 class SwarmResult:
-    """Result of a gossip swarm synthesis."""
+    """Result of a gossip swarm synthesis.
+
+    Contains two reports:
+    - user_report: Concise narrative synthesis (queen merge, 3000-6000 words)
+    - knowledge_report: Full-length structured report preserving all findings
+
+    The legacy ``synthesis`` attribute is an alias for ``user_report``.
+    """
 
     synthesis: str
-    metrics: SwarmMetrics
+    knowledge_report: str = ""
+    metrics: SwarmMetrics = field(default_factory=SwarmMetrics)
     worker_summaries: dict[str, str] = field(default_factory=dict)
     serendipity_insights: str = ""
     angles_detected: list[str] = field(default_factory=list)
+
+    @property
+    def user_report(self) -> str:
+        """Alias for synthesis — the concise end-user narrative."""
+        return self.synthesis
 
 
 class GossipSwarm:
@@ -96,22 +118,42 @@ class GossipSwarm:
     and returns a completion string. Works with Venice API, local Ollama,
     the proxy layer, or any other LLM backend.
 
-    Usage:
-        async def my_llm(prompt: str) -> str:
-            # call your LLM here
-            return response
+    Per-phase model selection allows different models for workers (fast,
+    uncensored), queen merge (best writer), and serendipity bridge (best
+    cross-domain reasoner).  An uncensored model with equivalent capability
+    is strictly better than its censored counterpart.
 
-        swarm = GossipSwarm(complete=my_llm)
+    Usage:
+        async def fast_local(prompt: str) -> str:
+            # Ollama Gemma-4-uncensored on H200
+            ...
+
+        async def best_writer(prompt: str) -> str:
+            # Qwen-Claude-Opus or remote Claude
+            ...
+
+        swarm = GossipSwarm(
+            complete=fast_local,
+            queen_complete=best_writer,
+            config=SwarmConfig(gossip_rounds=3),
+        )
         result = await swarm.synthesize(corpus="...", query="...")
-        print(result.synthesis)
+        print(result.user_report)
+        print(result.knowledge_report)
     """
 
     def __init__(
         self,
         complete: CompleteFn,
+        worker_complete: CompleteFn | None = None,
+        queen_complete: CompleteFn | None = None,
+        serendipity_complete: CompleteFn | None = None,
         config: SwarmConfig | None = None,
     ) -> None:
         self.complete = complete
+        self.worker_complete = worker_complete or complete
+        self.queen_complete = queen_complete or complete
+        self.serendipity_complete = serendipity_complete or complete
         self.config = config or SwarmConfig()
 
     async def synthesize(
@@ -174,7 +216,7 @@ class GossipSwarm:
 
         # ── Phase 1: Map (parallel worker synthesis) ─────────────────
         phase_start = time.monotonic()
-        sem = asyncio.Semaphore(config.max_workers)
+        sem = asyncio.Semaphore(config.max_concurrency)
 
         async def _bounded_synthesize(assignment: WorkerAssignment) -> None:
             async with sem:
@@ -184,7 +226,7 @@ class GossipSwarm:
                         section_content=assignment.raw_content,
                         query=query,
                         max_chars=config.max_summary_chars,
-                        complete_fn=self.complete,
+                        complete_fn=self.worker_complete,
                     )
                 except Exception:
                     logger.warning(
@@ -213,7 +255,13 @@ class GossipSwarm:
 
             gossip_failures = 0
 
-            async def _bounded_gossip(assignment: WorkerAssignment) -> None:
+            # Get round-specific prompt modifier (if any)
+            round_prompt = config.round_prompts.get(gossip_round, "")
+
+            async def _bounded_gossip(
+                assignment: WorkerAssignment,
+                _round_prompt: str = round_prompt,
+            ) -> None:
                 nonlocal gossip_failures
                 async with sem:
                     peer_sums = [
@@ -231,7 +279,8 @@ class GossipSwarm:
                             raw_section=raw,
                             query=query,
                             max_chars=config.max_summary_chars,
-                            complete_fn=self.complete,
+                            complete_fn=self.worker_complete,
+                            round_prompt=_round_prompt,
                         )
                     except Exception:
                         gossip_failures += 1
@@ -244,23 +293,32 @@ class GossipSwarm:
             metrics.total_llm_calls += len(assignments)
             rounds_executed = gossip_round
 
+            # Measure information gain this round
+            current = [a.summary for a in assignments]
+            previous = [a.prev_summary for a in assignments]
+            gain = information_gain(current, previous)
+            metrics.gossip_info_gain.append(gain)
+
             logger.info(
-                "gossip_round=<%d>, failures=<%d> | gossip round complete",
-                gossip_round, gossip_failures,
+                "gossip_round=<%d>, failures=<%d>, info_gain=<%.3f> | gossip round complete",
+                gossip_round, gossip_failures, gain,
             )
 
-            # Adaptive stopping: check convergence (skip if ANY failures —
-            # failed workers have unchanged summaries which inflate Jaccard
-            # similarity and cause false convergence detection)
-            if config.enable_adaptive_rounds and gossip_round < config.gossip_rounds:
+            # Adaptive stopping: check convergence
+            # Only after min_gossip_rounds (ensure workers get enough cross-referencing)
+            # Skip if ANY failures — failed workers have unchanged summaries which
+            # inflate Jaccard similarity and cause false convergence detection
+            if (
+                config.enable_adaptive_rounds
+                and gossip_round >= config.min_gossip_rounds
+                and gossip_round < config.gossip_rounds
+            ):
                 if gossip_failures > 0:
                     logger.warning(
                         "gossip_round=<%d>, failures=<%d> | skipping convergence check due to worker failures",
                         gossip_round, gossip_failures,
                     )
                 else:
-                    current = [a.summary for a in assignments]
-                    previous = [a.prev_summary for a in assignments]
                     if check_convergence(current, previous, config.convergence_threshold):
                         logger.info(
                             "gossip_round=<%d> | convergence detected, stopping early",
@@ -286,7 +344,7 @@ class GossipSwarm:
                 serendipity_insights = await find_serendipitous_connections(
                     worker_summaries=worker_summaries,
                     query=query,
-                    complete_fn=self.complete,
+                    complete_fn=self.serendipity_complete,
                 )
             except Exception:
                 logger.warning("serendipity bridge failed, continuing without it")
@@ -300,29 +358,50 @@ class GossipSwarm:
                 len(serendipity_insights),
             )
 
-        # ── Phase 4: Queen Merge ─────────────────────────────────────
+        # ── Phase 4: Dual Output (parallel) ──────────────────────────
+        # Build both reports simultaneously — they share the same inputs
+        # but produce different outputs (knowledge = full, user = concise).
         phase_start = time.monotonic()
-        final_synthesis = await queen_merge(
+
+        knowledge_task = build_knowledge_report(
             worker_summaries=worker_summaries,
             query=query,
-            complete_fn=self.complete,
+            complete_fn=self.queen_complete,
+            serendipity_insights=serendipity_insights,
+            corpus_chars=len(corpus),
+            gossip_rounds=rounds_executed,
+            converged_early=metrics.gossip_converged_early,
+        )
+        user_task = queen_merge(
+            worker_summaries=worker_summaries,
+            query=query,
+            complete_fn=self.queen_complete,
             serendipity_insights=serendipity_insights,
             max_summary_chars=config.max_summary_chars,
         )
-        metrics.total_llm_calls += 1
+
+        knowledge_report, user_report = await asyncio.gather(
+            knowledge_task, user_task,
+        )
+        metrics.total_llm_calls += 2  # one for knowledge exec summary, one for queen
         metrics.phase_times["queen_merge"] = time.monotonic() - phase_start
         metrics.total_elapsed_s = time.monotonic() - t0
 
         logger.info(
             "llm_calls=<%d>, elapsed_s=<%.1f>, workers=<%d>, gossip_rounds=<%d>, "
-            "converged_early=<%s>, serendipity=<%s> | swarm synthesis complete",
+            "converged_early=<%s>, serendipity=<%s>, "
+            "knowledge_chars=<%d>, user_chars=<%d>, "
+            "info_gain_per_round=<%s> | swarm synthesis complete",
             metrics.total_llm_calls, metrics.total_elapsed_s,
             metrics.total_workers, metrics.gossip_rounds_executed,
             metrics.gossip_converged_early, metrics.serendipity_produced,
+            len(knowledge_report), len(user_report),
+            [f"{g:.3f}" for g in metrics.gossip_info_gain],
         )
 
         return SwarmResult(
-            synthesis=final_synthesis,
+            synthesis=user_report,
+            knowledge_report=knowledge_report,
             metrics=metrics,
             worker_summaries=worker_summaries,
             serendipity_insights=serendipity_insights,
