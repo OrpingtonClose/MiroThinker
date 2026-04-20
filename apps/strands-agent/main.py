@@ -550,9 +550,14 @@ async def _run_job(job: "jobs.JobState") -> None:
 
             def _sync_research():
                 set_cancel_flag(cancel_threading_event)
+                # Activate stream_capture so tool events are recorded
+                # during the research phase (StreamCapture.__call__
+                # returns early when no queue is active).
+                capture_queue = stream_capture.activate()
                 try:
                     return _run_research(research_query)
                 finally:
+                    stream_capture.deactivate()
                     set_cancel_flag(None)
 
             # Start a drain task that forwards StreamCapture events to job
