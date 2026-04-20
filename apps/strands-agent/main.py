@@ -425,6 +425,10 @@ def _run_research_inner(query: str) -> tuple[str, dict | None]:
         except Exception:
             pass
     except Exception as exc:
+        from jobs import JobCancelledError
+
+        if isinstance(exc, JobCancelledError):
+            raise
         logger.exception("Agent error")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
