@@ -255,9 +255,6 @@ async def lifespan(app: FastAPI):
         from agent import _build_callback_handler
         from prompts import SYSTEM_PROMPT
 
-        # Researcher gets RESEARCHER_PROMPT from orchestrator.py
-        from orchestrator import RESEARCHER_PROMPT as _UNUSED_PROMPT  # noqa: F401
-
         _researcher_agent = Agent(
             model=__import__("config", fromlist=["build_model"]).build_model(),
             system_prompt=(
@@ -585,8 +582,8 @@ async def _run_job(job: "jobs.JobState") -> None:
                 if chunk and hasattr(chunk, "content") and chunk.content:
                     final_content += chunk.content
 
-            # Budget update every 10 tool calls
-            if job.tool_calls > 0 and job.tool_calls % 10 == 0:
+            # Budget update every 10 tool calls (only on tool_start events)
+            if event_type == "on_tool_start" and job.tool_calls > 0 and job.tool_calls % 10 == 0:
                 job.emit({
                     "type": "budget_update",
                     "tool_calls": job.tool_calls,
