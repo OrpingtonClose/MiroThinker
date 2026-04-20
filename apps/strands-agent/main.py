@@ -560,7 +560,7 @@ async def _gossip_loop(
         should_trigger = (
             new_count >= MIN_NEW_FINDINGS
             or (elapsed_since_gossip >= MAX_QUIET_S and new_count > 0)
-            or is_final
+            or (is_final and new_count > 0)
         )
 
         if not should_trigger:
