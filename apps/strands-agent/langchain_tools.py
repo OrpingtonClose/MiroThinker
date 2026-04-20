@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing as mp
 import os
-import signal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from langchain_core.tools import tool
@@ -54,49 +54,56 @@ _FORUM_SEARCH_TIMEOUT = 45
 _PER_FORUM_HARD_TIMEOUT = 60  # Hard timeout per forum search (covers DDGS init hang)
 
 
+def _ddg_search_in_process(args: tuple) -> tuple:
+    """Run a single DuckDuckGo search in an isolated process.
+
+    The ddgs library uses curl_cffi which deadlocks when multiple threads
+    try to initialize it simultaneously. Running each search in its own
+    process avoids the GIL + native dlopen contention entirely.
+
+    This function is the multiprocessing.Pool worker target.
+    """
+    domain, query, max_results = args
+    try:
+        from ddgs import DDGS
+
+        site_query = f"site:{domain} {query}" if domain else query
+        with DDGS(timeout=30) as ddgs:
+            raw = list(ddgs.text(site_query, max_results=max_results))
+        results = [
+            {
+                "title": r.get("title", ""),
+                "href": r.get("href", ""),
+                "body": r.get("body", ""),
+            }
+            for r in raw
+        ]
+        return (domain, results, None)
+    except Exception as exc:
+        return (domain, [], str(exc))
+
+
 def _ddg_site_search(query: str, domain: str, max_results: int = 10) -> list[dict]:
     """Run a DuckDuckGo search scoped to a specific domain.
 
-    Uses httpx fallback if the ddgs library hangs during initialization
-    (known issue with curl_cffi lazy loading in threaded environments).
+    Delegates to a child process to avoid curl_cffi thread deadlock.
     """
-    site_query = f"site:{domain} {query}"
-
-    # Try ddgs library first with a tight timeout
     try:
-        from ddgs import DDGS
-        ddgs = DDGS(timeout=_DDG_TIMEOUT)
-        results = list(ddgs.text(site_query, max_results=max_results))
-        return results
+        with mp.Pool(1) as pool:
+            async_result = pool.map_async(
+                _ddg_search_in_process,
+                [(domain, query, max_results)],
+            )
+            results = async_result.get(timeout=_DDG_TIMEOUT + 10)
+            _, hits, err = results[0]
+            if err:
+                logger.debug("ddg search error for %s: %s", domain or "web", err)
+            return hits
+    except mp.TimeoutError:
+        logger.warning("ddg search timed out for %s", domain or "web")
+        return []
     except Exception as exc:
-        logger.debug("ddgs library failed for %s: %s, trying httpx fallback", domain, exc)
-
-    # Fallback: use httpx to hit DuckDuckGo HTML directly
-    try:
-        import httpx
-        resp = httpx.get(
-            "https://html.duckduckgo.com/html/",
-            params={"q": site_query},
-            headers={"User-Agent": "Mozilla/5.0 (compatible; research-bot/1.0)"},
-            timeout=_DDG_TIMEOUT,
-            follow_redirects=True,
-        )
-        resp.raise_for_status()
-        # Parse basic results from HTML
-        import re
-        results = []
-        for match in re.finditer(
-            r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
-            resp.text,
-        ):
-            url = match.group(1)
-            title = re.sub(r"<[^>]+>", "", match.group(2))
-            results.append({"href": url, "title": title, "body": ""})
-            if len(results) >= max_results:
-                break
-        return results
-    except Exception as exc2:
-        logger.warning("httpx fallback also failed for %s: %s", domain, exc2)
+        logger.warning("ddg search failed for %s: %s", domain or "web", exc)
         return []
 
 
@@ -145,62 +152,49 @@ def _forum_search_impl(
                 "available": [f[0] for f in _ALL_FORUMS],
             })
 
-    def _search_forum(forum_entry: tuple) -> dict:
-        domain, lang, desc = forum_entry
-        try:
-            results = _ddg_site_search(query, domain, max_results_per_forum)
-            return {
+    # Build args for multiprocessing pool: (domain, query, max_results)
+    mp_args = [(f[0], query, max_results_per_forum) for f in forum_list]
+    forum_meta = {f[0]: (f[1], f[2]) for f in forum_list}  # domain -> (lang, desc)
+
+    # Use multiprocessing.Pool instead of ThreadPoolExecutor.
+    # The ddgs library uses curl_cffi which deadlocks when multiple threads
+    # try to initialize it simultaneously. Each process gets its own
+    # curl_cffi instance with no contention.
+    all_results = []
+    try:
+        with mp.Pool(min(len(forum_list), 8)) as pool:
+            async_result = pool.map_async(_ddg_search_in_process, mp_args)
+            try:
+                raw_results = async_result.get(timeout=_FORUM_SEARCH_TIMEOUT * 2)
+            except mp.TimeoutError:
+                logger.warning(
+                    "forum search overall timeout — terminating pool"
+                )
+                pool.terminate()
+                raw_results = []
+
+        for domain, hits, err in raw_results:
+            lang, desc = forum_meta.get(domain, ("?", "?"))
+            entry = {
                 "forum": domain,
                 "language": lang,
                 "description": desc,
-                "count": len(results),
+                "count": len(hits),
                 "results": [
                     {
                         "title": r.get("title", ""),
                         "url": r.get("href", ""),
                         "snippet": r.get("body", ""),
                     }
-                    for r in results
+                    for r in hits
                 ],
             }
-        except Exception as exc:
-            return {
-                "forum": domain,
-                "language": lang,
-                "description": desc,
-                "count": 0,
-                "results": [],
-                "error": str(exc),
-            }
+            if err:
+                entry["error"] = err
+            all_results.append(entry)
 
-    # Use executor WITHOUT context manager to avoid shutdown(wait=True)
-    # blocking forever when ddgs threads hang in _load_real.
-    pool = ThreadPoolExecutor(max_workers=min(len(forum_list), 8))
-    futures = {pool.submit(_search_forum, f): f for f in forum_list}
-    all_results = []
-    try:
-        for future in as_completed(futures, timeout=_FORUM_SEARCH_TIMEOUT * 2):
-            try:
-                all_results.append(future.result(timeout=_FORUM_SEARCH_TIMEOUT))
-            except Exception as exc:
-                domain = futures[future][0] if future in futures else "unknown"
-                logger.warning("forum search timed out for %s: %s", domain, exc)
-                all_results.append({
-                    "forum": domain,
-                    "count": 0,
-                    "results": [],
-                    "error": f"timeout: {exc}",
-                })
-    except TimeoutError:
-        logger.warning(
-            "forum search overall timeout — returning %d partial results",
-            len(all_results),
-        )
-    finally:
-        # Cancel pending futures and don't wait for hung threads
-        for f in futures:
-            f.cancel()
-        pool.shutdown(wait=False, cancel_futures=True)
+    except Exception as exc:
+        logger.warning("forum search pool failed: %s", exc)
 
     all_results.sort(key=lambda r: r["count"], reverse=True)
 
@@ -235,35 +229,7 @@ def duckduckgo_search(query: str, max_results: int = 10) -> str:
     Returns:
         Formatted search results with titles, URLs, and snippets.
     """
-    try:
-        from ddgs import DDGS
-        ddgs = DDGS(timeout=_DDG_TIMEOUT)
-        results = list(ddgs.text(query, max_results=max_results))
-    except Exception as exc:
-        # Fallback to httpx if ddgs library hangs/fails
-        try:
-            import httpx
-            import re
-            resp = httpx.get(
-                "https://html.duckduckgo.com/html/",
-                params={"q": query},
-                headers={"User-Agent": "Mozilla/5.0 (compatible; research-bot/1.0)"},
-                timeout=_DDG_TIMEOUT,
-                follow_redirects=True,
-            )
-            resp.raise_for_status()
-            results = []
-            for match in re.finditer(
-                r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
-                resp.text,
-            ):
-                url = match.group(1)
-                title = re.sub(r"<[^>]+>", "", match.group(2))
-                results.append({"title": title, "href": url, "body": ""})
-                if len(results) >= max_results:
-                    break
-        except Exception as exc2:
-            return f"[TOOL_ERROR] DuckDuckGo search failed: {exc}; fallback: {exc2}"
+    results = _ddg_site_search(query, "", max_results)
 
     if not results:
         return f"No DuckDuckGo results for: {query}"
