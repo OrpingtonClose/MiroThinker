@@ -27,4 +27,4 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["main", "agent", "config", "tools", "prompts", "cache", "youtube_tools", "document_tools", "book_pipeline", "datalake", "extraction", "mcp_configs"]
+py-modules = ["main", "agent", "config", "tools", "prompts", "cache", "youtube_tools", "document_tools", "book_pipeline", "datalake", "extraction", "mcp_configs", "jobs", "swarm_bridge"]

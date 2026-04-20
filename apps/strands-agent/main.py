@@ -6,7 +6,12 @@ FastAPI server for the Venice uncensored research agent (Strands SDK).
 
 Exposes the Strands agent as an HTTP API with:
 - POST /query — single-turn query (single-agent mode)
-- POST /query/multi — single-turn query (planner + researcher mode)
+- POST /query/multi — async research job (returns job_id immediately)
+- GET  /query/multi/{job_id}/stream — SSE event stream (real-time progress)
+- GET  /query/multi/{job_id}/status — polling status snapshot
+- GET  /query/multi/{job_id}/result — final report (202 if still running)
+- POST /query/multi/{job_id}/cancel — cancel a running job
+- GET  /query/multi/jobs — list all jobs
 - POST /v1/chat/completions — OpenAI-compatible (LibreChat integration)
 - GET  /v1/models — OpenAI-compatible model list
 - GET  /health — health check
@@ -247,9 +252,20 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("Failed to create multi agent")
 
+    # Start periodic job cleanup task
+    async def _job_cleanup_loop():
+        from jobs import job_store as _js
+        while True:
+            await asyncio.sleep(300)  # every 5 minutes
+            _js.cleanup_expired()
+
+    cleanup_task = asyncio.create_task(_job_cleanup_loop())
+
     yield
 
-    # Shutdown: close MCP connections (once)
+    # Shutdown: cancel cleanup task and close MCP connections
+    cleanup_task.cancel()
+
     from agent import _cleanup_mcp
 
     _cleanup_mcp(_mcp_clients)
@@ -276,6 +292,14 @@ class QueryResponse(BaseModel):
     response: str
     mode: str
     elapsed_seconds: float
+
+
+class JobCreateResponse(BaseModel):
+    job_id: str
+    stream_url: str
+    status_url: str
+    result_url: str
+    cancel_url: str
 
 
 class ChatMessage(BaseModel):
@@ -380,36 +404,48 @@ def query_single(req: QueryRequest):
     )
 
 
-def _run_research(query: str) -> tuple[str, dict | None]:
-    """Phase 1: run planner+researcher to gather raw data (sync, holds lock)."""
+def _run_research_inner(query: str) -> tuple[str, dict | None]:
+    """Run planner+researcher to gather raw data. Caller must hold _agent_lock."""
     from agent import reset_budget
 
-    with _agent_lock:
-        _multi_agent.messages.clear()
-        original_prompts: dict[str, str | None] = {}
-        original_prompts["planner"] = _multi_agent.system_prompt
-        _auto_activate_skills(query, _multi_agent)
-        if _multi_researcher is not None:
-            _multi_researcher.messages.clear()
-            original_prompts["researcher"] = _multi_researcher.system_prompt
-            _auto_activate_skills(query, _multi_researcher)
-        reset_budget()
+    _multi_agent.messages.clear()
+    original_prompts: dict[str, str | None] = {}
+    original_prompts["planner"] = _multi_agent.system_prompt
+    _auto_activate_skills(query, _multi_agent)
+    if _multi_researcher is not None:
+        _multi_researcher.messages.clear()
+        original_prompts["researcher"] = _multi_researcher.system_prompt
+        _auto_activate_skills(query, _multi_researcher)
+    reset_budget()
+    try:
+        response = _multi_agent(query)
+        metrics = None
         try:
-            response = _multi_agent(query)
-            metrics = None
-            try:
-                metrics = response.metrics.get_summary()
-            except Exception:
-                pass
-        except Exception as exc:
-            logger.exception("Agent error")
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        finally:
-            if "planner" in original_prompts:
-                _multi_agent.system_prompt = original_prompts["planner"]
-            if _multi_researcher is not None and "researcher" in original_prompts:
-                _multi_researcher.system_prompt = original_prompts["researcher"]
+            metrics = response.metrics.get_summary()
+        except Exception:
+            pass
+    except Exception as exc:
+        from jobs import JobCancelledError
+
+        if isinstance(exc, JobCancelledError):
+            raise
+        logger.exception("Agent error")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        if "planner" in original_prompts:
+            _multi_agent.system_prompt = original_prompts["planner"]
+        if _multi_researcher is not None and "researcher" in original_prompts:
+            _multi_researcher.system_prompt = original_prompts["researcher"]
     return str(response), metrics
+
+
+def _run_research(query: str) -> tuple[str, dict | None]:
+    """Phase 1: run planner+researcher to gather raw data (sync, holds lock).
+
+    Legacy wrapper that acquires _agent_lock. Used by non-job code paths.
+    """
+    with _agent_lock:
+        return _run_research_inner(query)
 
 
 _SWARM_ITERATIONS = int(os.environ.get("SWARM_ITERATIONS", "2"))
@@ -428,96 +464,423 @@ def _store_gossip_report(report: str, iteration: int, req_id: str) -> None:
     )
 
 
-@app.post("/query/multi", response_model=QueryResponse)
+@app.post("/query/multi", response_model=JobCreateResponse)
 async def query_multi(req: QueryRequest):
-    """Research ↔ gossip feedback loop.
+    """Create an async research job with research ↔ gossip feedback loop.
+
+    Returns a job ID immediately.  Stream real-time progress via the
+    ``/query/multi/{job_id}/stream`` SSE endpoint, or poll status via
+    ``/query/multi/{job_id}/status``.
 
     Each iteration:
       1. Researcher gathers data (tools: TranscriptAPI, web, etc.)
-      2. Gossip swarm produces reports from that data (stored)
+      2. Gossip swarm produces reports from that data (stored + streamed)
       3. Next iteration: researcher reads gossip reports, fills gaps
       4. Gossip refines on expanded corpus
     """
+    from jobs import job_store
+
     if _multi_agent is None:
         raise HTTPException(status_code=503, detail="Multi agent not initialised")
 
-    start = time.time()
-    req_id = f"query-{uuid.uuid4().hex[:12]}"
-    iterations = _SWARM_ITERATIONS
+    job = job_store.create(query=req.query, iterations=_SWARM_ITERATIONS)
+    asyncio.create_task(_run_job(job))
+
+    return JobCreateResponse(
+        job_id=job.job_id,
+        stream_url=f"/query/multi/{job.job_id}/stream",
+        status_url=f"/query/multi/{job.job_id}/status",
+        result_url=f"/query/multi/{job.job_id}/result",
+        cancel_url=f"/query/multi/{job.job_id}/cancel",
+    )
+
+
+async def _run_job(job: "jobs.JobState") -> None:
+    """Background task: research ↔ gossip loop with event emission.
+
+    Emits structured events to job.event_queue at every phase boundary.
+    Checks job.cancel_event between phases for early termination.
+    Stores intermediate gossip reports both as findings and as events.
+    """
+    import jobs as jobs_mod
+
+    job.status = "running"
+    job.emit({
+        "type": "job_started",
+        "job_id": job.job_id,
+        "query": job.query,
+        "iterations": job.total_iterations,
+    })
 
     accumulated_corpus = ""
     final_response = ""
     metrics = None
 
-    for iteration in range(1, iterations + 1):
-        iter_start = time.time()
+    try:
+        for iteration in range(1, job.total_iterations + 1):
+            # ── Check cancellation ────────────────────────────────────
+            if job.cancel_event.is_set():
+                job.status = "cancelled"
+                job.finished_at = time.time()
+                job.emit({"type": "job_cancelled", "reason": "user_requested"})
+                return
 
-        # ── Research phase ────────────────────────────────────────────
-        # On iteration 2+, the query includes a pointer to prior gossip
-        # reports so the researcher knows what gaps to fill.
-        if iteration == 1:
-            research_query = req.query
-        else:
-            research_query = (
-                f"{req.query}\n\n"
-                f"--- PRIOR GOSSIP SYNTHESIS (iteration {iteration - 1}) ---\n"
-                f"The previous research round produced the analysis below. "
-                f"Read it carefully. Identify gaps, unverified claims, missing "
-                f"channels, and topics with shallow coverage. Then do targeted "
-                f"research to fill those gaps. Use read_findings(category='gossip_report') "
-                f"to see the full prior reports.\n\n"
-                f"{final_response[:4000]}"
-            )
+            job.current_iteration = iteration
+            iter_start = time.time()
 
-        raw_research, metrics = await asyncio.to_thread(
-            _run_research, research_query,
-        )
-        research_elapsed = round(time.time() - iter_start, 2)
-        logger.info(
-            "req_id=<%s>, iteration=<%d>, research_chars=<%d>, elapsed=<%.1f> | research phase complete",
-            req_id, iteration, len(raw_research), research_elapsed,
-        )
+            job.emit({
+                "type": "iteration_start",
+                "iteration": iteration,
+                "total": job.total_iterations,
+            })
 
-        # Accumulate corpus across iterations
-        accumulated_corpus += f"\n\n--- RESEARCH ITERATION {iteration} ---\n{raw_research}"
+            # ── Research phase ────────────────────────────────────────
+            if iteration == 1:
+                research_query = job.query
+            else:
+                research_query = (
+                    f"{job.query}\n\n"
+                    f"--- PRIOR GOSSIP SYNTHESIS (iteration {iteration - 1}) ---\n"
+                    f"The previous research round produced the analysis below. "
+                    f"Read it carefully. Identify gaps, unverified claims, missing "
+                    f"channels, and topics with shallow coverage. Then do targeted "
+                    f"research to fill those gaps. Use read_findings(category='gossip_report') "
+                    f"to see the full prior reports.\n\n"
+                    f"{final_response[:4000]}"
+                )
 
-        # ── Gossip synthesis ──────────────────────────────────────────
-        try:
-            from swarm_bridge import gossip_synthesize
+            job.current_phase = "research"
+            job.emit({"type": "research_start", "iteration": iteration})
 
-            swarm_result = await gossip_synthesize(
-                corpus=accumulated_corpus, query=req.query,
-            )
-            final_response = swarm_result.user_report
+            # Bridge StreamCapture events to job event queue during research
+            from agent import stream_capture, set_cancel_flag
+
+            # Set cancel flag so budget_callback can check it
+            cancel_threading_event = threading.Event()
+            if job.cancel_event.is_set():
+                cancel_threading_event.set()
+
+            # Signal so drain task knows activate() has cleared stale events
+            capture_ready = threading.Event()
+
+            def _sync_research():
+                # Acquire _agent_lock FIRST, then mutate shared globals.
+                # This prevents concurrent jobs from overwriting each
+                # other's cancel flag / stream capture state.
+                with _agent_lock:
+                    set_cancel_flag(cancel_threading_event)
+                    stream_capture.activate()
+                    capture_ready.set()  # safe to start draining
+                    try:
+                        return _run_research_inner(research_query)
+                    finally:
+                        stream_capture.deactivate()
+                        set_cancel_flag(None)
+
+            # Start a drain task that forwards StreamCapture events to job.
+            # drain_offset tracks position within the current iteration's
+            # tool_events list (which is cleared by activate() each time).
+            drain_active = True
+            drain_offset = 0
+
+            async def _drain_capture():
+                """Forward tool events from StreamCapture to job event queue."""
+                nonlocal drain_offset
+                # Wait until activate() has cleared stale events
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, capture_ready.wait)
+                while drain_active:
+                    try:
+                        if (
+                            hasattr(stream_capture, 'tool_events')
+                            and len(stream_capture.tool_events) > drain_offset
+                        ):
+                            new_events = stream_capture.tool_events[drain_offset:]
+                            for ev in new_events:
+                                drain_offset += 1
+                                job.tool_calls += 1
+                                job.emit({
+                                    "type": "tool_call",
+                                    "tool": ev.get("tool", "unknown"),
+                                    "input_summary": ev.get("input", "")[:200],
+                                    "tool_call_number": job.tool_calls,
+                                })
+                                if job.tool_calls % 10 == 0:
+                                    job.emit({
+                                        "type": "budget_update",
+                                        "tool_calls": job.tool_calls,
+                                        "elapsed_s": round(time.time() - job.created_at, 1),
+                                    })
+                    except Exception:
+                        pass
+                    await asyncio.sleep(2.0)
+
+            drain_task = asyncio.create_task(_drain_capture())
+
+            try:
+                # Propagate cancel from asyncio Event to threading Event
+                async def _cancel_bridge():
+                    await job.cancel_event.wait()
+                    cancel_threading_event.set()
+
+                cancel_bridge_task = asyncio.create_task(_cancel_bridge())
+
+                try:
+                    raw_research, metrics = await asyncio.to_thread(_sync_research)
+                except jobs_mod.JobCancelledError:
+                    job.status = "cancelled"
+                    job.finished_at = time.time()
+                    job.emit({"type": "job_cancelled", "reason": "user_requested"})
+                    return
+                finally:
+                    cancel_bridge_task.cancel()
+            finally:
+                drain_active = False
+                drain_task.cancel()
+                try:
+                    await drain_task
+                except asyncio.CancelledError:
+                    pass
+
+            research_elapsed = round(time.time() - iter_start, 2)
             logger.info(
-                "req_id=<%s>, iteration=<%d>, swarm_llm_calls=<%d>, swarm_elapsed=<%.1f>, "
-                "gossip_rounds=<%d>, workers=<%d> | gossip synthesis complete",
-                req_id, iteration,
-                swarm_result.metrics.total_llm_calls,
-                swarm_result.metrics.total_elapsed_s,
-                swarm_result.metrics.gossip_rounds_executed,
-                swarm_result.metrics.total_workers,
+                "job_id=<%s>, iteration=<%d>, research_chars=<%d>, elapsed=<%.1f> | research phase complete",
+                job.job_id, iteration, len(raw_research), research_elapsed,
             )
 
-            # Store report so researcher can read it next iteration
-            _store_gossip_report(final_response, iteration, req_id)
+            job.emit({
+                "type": "research_end",
+                "iteration": iteration,
+                "chars": len(raw_research),
+                "tool_calls": job.tool_calls,
+                "elapsed_s": research_elapsed,
+            })
 
-        except Exception:
-            logger.exception(
-                "req_id=<%s>, iteration=<%d> | gossip synthesis failed, using raw research",
-                req_id, iteration,
-            )
-            final_response = raw_research
+            accumulated_corpus += f"\n\n--- RESEARCH ITERATION {iteration} ---\n{raw_research}"
 
-    elapsed = round(time.time() - start, 2)
-    _write_metrics_jsonl(req_id, _MODEL_MULTI, req.query, elapsed, metrics, [])
+            # ── Check cancellation before gossip ──────────────────────
+            if job.cancel_event.is_set():
+                job.status = "cancelled"
+                job.finished_at = time.time()
+                job.emit({"type": "job_cancelled", "reason": "user_requested"})
+                return
 
-    return QueryResponse(
-        query=req.query,
-        response=final_response,
-        mode="multi",
-        elapsed_seconds=elapsed,
+            # ── Gossip synthesis ──────────────────────────────────────
+            job.current_phase = "gossip"
+
+            try:
+                from swarm_bridge import gossip_synthesize
+
+                async def _on_swarm_event(event: dict) -> None:
+                    """Forward swarm engine events to job event queue."""
+                    event["iteration"] = iteration
+                    job.emit(event)
+
+                job.emit({
+                    "type": "gossip_start",
+                    "iteration": iteration,
+                    "workers": int(os.environ.get("SWARM_MAX_WORKERS", "6")),
+                    "rounds": int(os.environ.get("SWARM_GOSSIP_ROUNDS", "3")),
+                })
+
+                swarm_result = await gossip_synthesize(
+                    corpus=accumulated_corpus,
+                    query=job.query,
+                    on_event=_on_swarm_event,
+                    cancel_event=job.cancel_event,
+                )
+                final_response = swarm_result.user_report
+                logger.info(
+                    "job_id=<%s>, iteration=<%d>, swarm_llm_calls=<%d>, swarm_elapsed=<%.1f>, "
+                    "gossip_rounds=<%d>, workers=<%d> | gossip synthesis complete",
+                    job.job_id, iteration,
+                    swarm_result.metrics.total_llm_calls,
+                    swarm_result.metrics.total_elapsed_s,
+                    swarm_result.metrics.gossip_rounds_executed,
+                    swarm_result.metrics.total_workers,
+                )
+
+                # Emit the full intermediate report — this is the key output
+                job.emit({
+                    "type": "intermediate_report",
+                    "iteration": iteration,
+                    "report": swarm_result.user_report,
+                    "knowledge_report": swarm_result.knowledge_report,
+                    "info_gain": list(swarm_result.metrics.gossip_info_gain),
+                    "llm_calls": swarm_result.metrics.total_llm_calls,
+                    "elapsed_s": round(swarm_result.metrics.total_elapsed_s, 1),
+                })
+
+                # Store report so researcher can read it next iteration
+                _store_gossip_report(final_response, iteration, job.job_id)
+
+                job.emit({
+                    "type": "gossip_end",
+                    "iteration": iteration,
+                    "llm_calls": swarm_result.metrics.total_llm_calls,
+                    "elapsed_s": round(swarm_result.metrics.total_elapsed_s, 1),
+                    "info_gain": list(swarm_result.metrics.gossip_info_gain),
+                })
+
+            except Exception:
+                logger.exception(
+                    "job_id=<%s>, iteration=<%d> | gossip synthesis failed, using raw research",
+                    job.job_id, iteration,
+                )
+                final_response = raw_research
+                job.emit({
+                    "type": "gossip_error",
+                    "iteration": iteration,
+                    "error": "gossip synthesis failed, using raw research",
+                })
+
+            job.emit({
+                "type": "iteration_end",
+                "iteration": iteration,
+                "elapsed_s": round(time.time() - iter_start, 1),
+            })
+
+        # ── Job complete ──────────────────────────────────────────────
+        elapsed = round(time.time() - job.created_at, 2)
+        _write_metrics_jsonl(job.job_id, _MODEL_MULTI, job.query, elapsed, metrics, [])
+
+        job.result = {
+            "query": job.query,
+            "response": final_response,
+            "mode": "multi",
+            "elapsed_seconds": elapsed,
+        }
+        job.status = "complete"
+        job.finished_at = time.time()
+        job.current_phase = "idle"
+        job.emit({
+            "type": "job_complete",
+            "elapsed_s": elapsed,
+            "report_chars": len(final_response),
+        })
+
+    except Exception as exc:
+        logger.exception("job_id=<%s> | job failed with exception", job.job_id)
+        job.status = "failed"
+        job.finished_at = time.time()
+        job.error = str(exc)
+        job.emit({
+            "type": "job_failed",
+            "error": str(exc),
+        })
+
+
+# ── Job lifecycle endpoints ──────────────────────────────────────────
+
+
+@app.get("/query/multi/jobs")
+async def list_jobs():
+    """List all research jobs."""
+    from jobs import job_store
+    return JSONResponse({"jobs": job_store.list_jobs()})
+
+
+@app.get("/query/multi/{job_id}/stream")
+async def query_multi_stream(job_id: str):
+    """SSE stream of job progress events.
+
+    Events are JSON objects with a ``type`` field.  The stream ends
+    with a ``job_complete``, ``job_failed``, or ``job_cancelled`` event.
+    Heartbeats sent every 5s during idle periods.
+    """
+    from jobs import job_store
+
+    job = job_store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    terminal_types = {"job_complete", "job_failed", "job_cancelled"}
+
+    async def _generate():
+        while True:
+            try:
+                event = await asyncio.wait_for(job.event_queue.get(), timeout=5.0)
+            except asyncio.TimeoutError:
+                yield ": heartbeat\n\n"
+                continue
+            yield f"data: {json.dumps(event)}\n\n"
+            if event.get("type") in terminal_types:
+                break
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
+
+
+@app.get("/query/multi/{job_id}/status")
+async def query_multi_status(job_id: str):
+    """Polling fallback: current job state snapshot."""
+    from jobs import job_store
+
+    job = job_store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return JSONResponse(job.snapshot())
+
+
+@app.get("/query/multi/{job_id}/result")
+async def query_multi_result(job_id: str):
+    """Get final result.  Returns 202 Accepted if job is still running."""
+    from jobs import job_store
+
+    job = job_store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.status in ("pending", "running"):
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": job.status,
+                "message": "Job still running",
+                **job.snapshot(),
+            },
+        )
+
+    if job.status == "cancelled":
+        return JSONResponse(
+            status_code=200,
+            content={"status": "cancelled", "message": "Job was cancelled"},
+        )
+
+    if job.status == "failed":
+        return JSONResponse(
+            status_code=500,
+            content={"status": "failed", "error": job.error or "Unknown error"},
+        )
+
+    # Complete — return QueryResponse-compatible result
+    return JSONResponse(job.result or {"error": "No result available"})
+
+
+@app.post("/query/multi/{job_id}/cancel")
+async def query_multi_cancel(job_id: str):
+    """Cancel a running job.
+
+    Research phase stops at the next tool call boundary.
+    Gossip phase stops between gossip rounds.
+    """
+    from jobs import job_store
+
+    if not job_store.cancel(job_id):
+        job = job_store.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(
+            status_code=409,
+            detail=f"Job cannot be cancelled (status: {job.status})",
+        )
+    return JSONResponse({"status": "cancellation_requested", "job_id": job_id})
 
 
 # ── OpenAI-compatible endpoints (for LibreChat integration) ──────────

@@ -110,12 +110,20 @@ async def serendipity_complete(prompt: str) -> str:
 async def gossip_synthesize(
     corpus: str,
     query: str,
+    on_event: "Callable[[dict], Awaitable[None]] | None" = None,
+    cancel_event: "asyncio.Event | None" = None,
 ) -> SwarmResult:
     """Run full gossip swarm pipeline on a research corpus.
 
     Args:
         corpus: Raw research output from the strands-agent researcher.
         query: The user's original research query.
+        on_event: Optional async callback for streaming progress events.
+            Called with structured dicts at each phase boundary and
+            gossip round completion.
+        cancel_event: Optional asyncio.Event checked between gossip
+            rounds.  If set, the swarm stops early and returns a
+            partial result.
 
     Returns:
         SwarmResult with user_report, knowledge_report, metrics, etc.
@@ -135,7 +143,12 @@ async def gossip_synthesize(
         len(corpus), config.max_workers, config.gossip_rounds,
     )
 
-    result = await swarm.synthesize(corpus=corpus, query=query)
+    result = await swarm.synthesize(
+        corpus=corpus,
+        query=query,
+        on_event=on_event,
+        cancel_event=cancel_event,
+    )
 
     logger.info(
         "llm_calls=<%d>, elapsed_s=<%.1f>, user_report_chars=<%d>, "
