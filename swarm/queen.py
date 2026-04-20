@@ -57,6 +57,7 @@ def _build_queen_prompt(
     query: str,
     summaries_text: str,
     serendipity_block: str,
+    readability_frame: str = "",
 ) -> str:
     """Build the queen merge prompt via concatenation (not .replace()).
 
@@ -130,6 +131,7 @@ def _build_queen_prompt(
         f"append them as a separate section.\n"
         f"  10. Identify at least one EMERGENT INSIGHT that exists in the "
         f"combined evidence but was not explicitly stated by any individual worker.\n\n"
+        f"{readability_frame + chr(10) * 2 if readability_frame else ''}"
         f"AIM FOR 3000-6000 WORDS. Be comprehensive but not redundant. "
         f"Merge overlapping findings — do not repeat the same point from different "
         f"workers. Your synthesis must be worth more than the sum of its parts.\n\n"
@@ -143,6 +145,7 @@ async def queen_merge(
     complete_fn,
     serendipity_insights: str = "",
     max_summary_chars: int = 6000,
+    readability_frame: str = "",
 ) -> str:
     """Merge all worker summaries + serendipity insights into final answer.
 
@@ -152,6 +155,7 @@ async def queen_merge(
         complete_fn: Async LLM completion callable.
         serendipity_insights: Cross-angle insights from the serendipity bridge.
         max_summary_chars: Maximum chars per worker summary in the prompt.
+        readability_frame: Optional readability instructions for the queen.
 
     Returns:
         Final synthesized answer string. Falls back to concatenation if
@@ -182,6 +186,7 @@ async def queen_merge(
         query=query,
         summaries_text=summaries_text,
         serendipity_block=serendipity_block,
+        readability_frame=readability_frame,
     )
 
     try:

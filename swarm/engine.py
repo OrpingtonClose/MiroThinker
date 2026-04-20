@@ -613,6 +613,7 @@ class GossipSwarm:
             complete_fn=self.queen_complete,
             serendipity_insights=serendipity_insights,
             max_summary_chars=config.max_summary_chars,
+            readability_frame=config.readability_frame,
         )
 
         knowledge_report, user_report = await asyncio.gather(

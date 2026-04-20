@@ -144,6 +144,7 @@ class SwarmConfig:
     enable_semantic_assignment: bool = os.getenv("SWARM_SEMANTIC_ASSIGNMENT", "1") == "1"
     enable_diversity_aware_gossip: bool = os.getenv("SWARM_DAR_GOSSIP", "1") == "1"
     dar_top_k: int = int(os.getenv("SWARM_DAR_TOP_K", "3"))
+    readability_frame: str = os.getenv("SWARM_READABILITY_FRAME", "")
     lineage_store: LineageStore | None = None
     enable_quality_manifest: bool = True
 
