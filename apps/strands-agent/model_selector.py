@@ -56,30 +56,30 @@ MODEL_CASCADE: list[tuple[str, str, bool, bool]] = [
     ("olafangensan-glm-4.7-flash-heretic", "GLM 4.7 Heretic", True, True),
 ]
 
-# Phrases that indicate censorship or refusal
+# Phrases that indicate censorship or refusal.
+# IMPORTANT: Only include phrases that UNAMBIGUOUSLY signal a refusal.
+# Do NOT include clinical phrases like "seek medical", "consult a doctor",
+# "this is dangerous", "responsible use" — these appear in legitimate
+# uncensored pharmacology responses and cause false positive detection.
 REFUSAL_PHRASES = [
-    "i cannot",
-    "i can't",
-    "i'm unable",
-    "i am unable",
-    "as an ai",
-    "i apologize",
-    "i must emphasize",
-    "not appropriate",
-    "seek medical",
-    "consult a doctor",
-    "consult a healthcare",
-    "i'm not able to",
+    "i cannot provide information",
+    "i can't provide information",
+    "i'm unable to provide",
+    "i am unable to provide",
+    "as an ai language model",
+    "as an ai assistant",
     "against my guidelines",
-    "cannot provide",
-    "won't provide",
-    "i strongly advise against",
-    "this is dangerous",
-    "i cannot assist",
-    "ethical guidelines",
-    "responsible use",
+    "against my programming",
+    "i'm not able to help with",
+    "i cannot assist with",
     "i have to decline",
     "outside my capabilities",
+    "i must respectfully decline",
+    "i won't be able to help",
+    "i'm programmed to",
+    "violates my",
+    "i cannot fulfill",
+    "i can't fulfill",
 ]
 
 # Phrases that indicate hedging / over-disclaiming (softer signal)
