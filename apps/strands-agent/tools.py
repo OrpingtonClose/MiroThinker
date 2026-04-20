@@ -934,10 +934,14 @@ def store_finding(
     summary: str,
     rating: int = 0,
 ) -> str:
-    """Store an evaluated finding to persistent JSONL storage.
+    """Store an evaluated finding to the ConditionStore (DuckDB).
 
     Findings persist outside the LLM context window so older findings
     can be trimmed without losing accumulated research data.
+
+    When a ConditionStore is active (during /query/multi jobs), findings
+    are stored as typed rows with provenance and gradient-flag scoring.
+    Falls back to JSONL when no store is active (single-agent mode).
 
     Args:
         name: Short name / title of the finding.
@@ -949,6 +953,25 @@ def store_finding(
     Returns:
         Confirmation message.
     """
+    # Try ConditionStore first (active during orchestrator jobs)
+    try:
+        from corpus_tools import _current_store
+        store = _current_store.get()
+        if store is not None:
+            condition_id = store.admit(
+                fact=f"{name}: {summary}",
+                source_url=url,
+                source_type=category,
+                confidence=rating / 10.0 if rating > 0 else 0.5,
+                row_type="finding",
+                angle=category,
+            )
+            logger.info("stored finding in ConditionStore: %s (%s) id=%s", name, category, condition_id)
+            return f"Stored in corpus: {name} [{category}] (rating={rating}, id={condition_id})"
+    except Exception:
+        pass
+
+    # Fallback to JSONL (single-agent mode, no active store)
     finding = {
         "name": name,
         "url": url,
@@ -960,7 +983,7 @@ def store_finding(
     with open(_findings_file, "a") as f:
         f.write(json.dumps(finding, ensure_ascii=False) + "\n")
 
-    logger.info("Stored finding: %s (%s)", name, category)
+    logger.info("stored finding in JSONL: %s (%s)", name, category)
     return f"Stored: {name} [{category}] (rating={rating})"
 
 
@@ -968,12 +991,40 @@ def store_finding(
 def read_findings(category: str = "") -> str:
     """Read back all stored findings, optionally filtered by category.
 
+    When a ConditionStore is active, reads from DuckDB with full metadata.
+    Falls back to JSONL when no store is active.
+
     Args:
         category: If non-empty, only return findings matching this category.
 
     Returns:
         JSON array of finding objects.
     """
+    # Try ConditionStore first
+    try:
+        from corpus_tools import _current_store
+        store = _current_store.get()
+        if store is not None:
+            findings = store.get_findings(
+                angle=category,
+                limit=200,
+            )
+            result = [
+                {
+                    "name": f.get("fact", "")[:100],
+                    "url": f.get("source_url", ""),
+                    "category": f.get("source_type", ""),
+                    "summary": f.get("fact", ""),
+                    "rating": int(f.get("confidence", 0.5) * 10),
+                    "verification": f.get("verification_status", ""),
+                }
+                for f in findings
+            ]
+            return json.dumps(result, ensure_ascii=False)
+    except Exception:
+        pass
+
+    # Fallback to JSONL
     if not _findings_file.exists():
         return json.dumps([])
 

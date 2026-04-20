@@ -20,7 +20,6 @@ from __future__ import annotations
 import logging
 import os
 import queue
-import sys
 import threading
 import time
 
@@ -36,7 +35,7 @@ from strands.agent.conversation_manager import SlidingWindowConversationManager
 from strands.vended_plugins.skills import AgentSkills
 
 from config import build_model
-from prompts import PLANNER_PROMPT, RESEARCHER_PROMPT, SYSTEM_PROMPT
+from prompts import RESEARCHER_PROMPT, SYSTEM_PROMPT
 from tools import get_all_mcp_clients, get_native_tools
 
 logger = logging.getLogger(__name__)
@@ -437,22 +436,18 @@ def create_single_agent(tool_list=None, mcp_clients=None):
     return agent, mcp_clients or []
 
 
-def create_multi_agent(tool_list=None, mcp_clients=None):
-    """Create a planner + researcher multi-agent setup.
+def create_researcher_agent(tool_list=None, mcp_clients=None):
+    """Create a standalone researcher agent for orchestrator delegation.
 
-    The researcher agent has direct access to all tools (ordered
-    uncensored-first) and handles web search/scraping.  The planner
-    agent delegates to the researcher via the agent-as-tool pattern
-    and handles strategic decomposition and synthesis.
+    The researcher has all tools (MCP + native, uncensored-first) and is
+    invoked by the deepagents orchestrator via the run_research tool.
 
     Args:
-        tool_list: Pre-built list of tools.  When *None* the function
-            enters its own MCP clients and builds the list (REPL use-case).
-        mcp_clients: MCP clients that were entered to produce
-            *tool_list*.  Returned as-is for the caller to manage.
+        tool_list: Pre-built list of tools.
+        mcp_clients: MCP clients that produced *tool_list*.
 
     Returns:
-        Tuple of (planner_agent, researcher_agent, mcp_clients).
+        Tuple of (researcher_agent, mcp_clients).
     """
     model = build_model()
     owns_clients = tool_list is None
@@ -461,17 +456,6 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
         mcp_tools = _enter_mcp_clients(mcp_clients)
         tool_list = _build_tool_list(mcp_tools)
 
-    conversation_manager = SlidingWindowConversationManager(
-        window_size=20,
-        should_truncate_results=True,
-    )
-
-    plugins = []
-    skills_plugin = _build_skills_plugin()
-    if skills_plugin is not None:
-        plugins.append(skills_plugin)
-
-    # Researcher: tool-capable agent that does the actual searching
     researcher = Agent(
         model=model,
         system_prompt=RESEARCHER_PROMPT,
@@ -481,39 +465,8 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
             should_truncate_results=True,
         ),
         callback_handler=_build_callback_handler(),
-        plugins=plugins or None,
     )
-
-    # Planner: strategic agent that delegates to the researcher
-    planner = Agent(
-        model=model,
-        system_prompt=PLANNER_PROMPT,
-        tools=[
-            researcher.as_tool(
-                name="researcher",
-                description=(
-                    "Deep research agent with uncensored-first tool "
-                    "priority. For YouTube research: search_youtube and "
-                    "search_channel_videos (TranscriptAPI — searches inside "
-                    "actual video transcripts), get_channel_latest_videos, "
-                    "youtube_download_transcript, youtube_harvest_channel. "
-                    "For web: DuckDuckGo, Brave, Exa, Mojeek for search; "
-                    "Jina Reader, Firecrawl, Kagi for extraction; "
-                    "Semantic Scholar, arXiv for academic papers; "
-                    "Wikipedia, DuckDB for reference data; "
-                    "Perplexity, Grok, Tavily for deep research; "
-                    "Reddit for community intelligence; "
-                    "store_finding/read_findings + knowledge graph for "
-                    "persisting research; Google/Serper as censored fallback. "
-                    "Delegate any search, scrape, or data retrieval task "
-                    "to this tool."
-                ),
-            ),
-        ],
-        conversation_manager=conversation_manager,
-        callback_handler=_build_callback_handler(),
-    )
-    return planner, researcher, mcp_clients or []
+    return researcher, mcp_clients or []
 
 
 def _cleanup_mcp(mcp_clients):
@@ -535,15 +488,9 @@ def main():
 
     _setup_otel()
 
-    # Choose mode based on --multi flag
-    multi_agent = "--multi" in sys.argv
-
-    if multi_agent:
-        print("Venice GLM-4.7 Uncensored Research Agent (Strands — Multi-Agent)")
-        agent, _researcher, mcp_clients = create_multi_agent()
-    else:
-        print("Venice GLM-4.7 Uncensored Research Agent (Strands)")
-        agent, mcp_clients = create_single_agent()
+    print("Miro Research Agent (Strands — single-agent mode)")
+    print("For multi-agent research, use POST /query/multi via the API.")
+    agent, mcp_clients = create_single_agent()
 
     tool_count = len(agent.tool_registry.get_all_tools_config())
     print(f"Tools loaded: {tool_count}")
