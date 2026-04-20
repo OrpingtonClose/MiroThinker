@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import json
 import logging
 from typing import Any
 
@@ -80,7 +81,7 @@ def query_corpus(
     lines = [f"=== CORPUS: {len(findings)} findings ==="]
     for f in findings:
         src = f" ({f['source_url']})" if f.get("source_url") else ""
-        conf = f" [conf={f['confidence']:.2f}]" if f.get("confidence", 0.5) != 0.5 else ""
+        conf = f" [conf={f['confidence']:.2f}]"
         vstatus = f" [{f['verification_status']}]" if f.get("verification_status") else ""
         lines.append(f"[#{f['id']}]{conf}{vstatus} {f['fact']}{src}")
 
@@ -249,10 +250,26 @@ def trigger_gossip(iteration: int = 0) -> str:
         metrics=metrics_dict,
     )
 
+    # Also store knowledge report if available (was previously discarded)
+    # Uses row_type='knowledge_report' to avoid polluting synthesis queries
+    # (get_synthesis and get_all_syntheses filter on row_type='synthesis')
+    knowledge_report = getattr(result, "knowledge_report", "")
+    if knowledge_report and knowledge_report.strip():
+        strategy = json.dumps(metrics_dict) if metrics_dict else ""
+        store.admit(
+            fact=knowledge_report,
+            source_type="knowledge_report",
+            row_type="knowledge_report",
+            strategy=strategy,
+            iteration=iteration,
+            confidence=0.8,
+        )
+
     lines = [
         f"=== GOSSIP SYNTHESIS (iteration {iteration}) ===",
         f"Corpus size: {store.count()} conditions",
-        f"Report length: {len(result.user_report)} chars",
+        f"User report: {len(result.user_report)} chars",
+        f"Knowledge report: {len(knowledge_report)} chars",
     ]
     if metrics_dict.get("info_gain"):
         lines.append(f"Info gain per round: {metrics_dict['info_gain']}")
