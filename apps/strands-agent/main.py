@@ -543,7 +543,12 @@ async def _run_job(job: "jobs.JobState") -> None:
     finally:
         cancel_bridge_task.cancel()
         try:
-            pool.shutdown()
+            # ``pool.shutdown`` performs a blocking drain of up to
+            # ``drain_timeout`` seconds followed by
+            # ``executor.shutdown(wait=True)``. Run it off the event
+            # loop so concurrent SSE streams, health checks and cancel
+            # requests are not starved while we wait for workers.
+            await asyncio.to_thread(pool.shutdown)
         except Exception:
             logger.exception("pool shutdown failed")
         set_current_task_pool(None)

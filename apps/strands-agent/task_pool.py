@@ -253,9 +253,13 @@ class AsyncTaskPool:
         task = self._tasks.get(task_id)
         if task is None:
             return
-        if task.status == "running":
-            # Worker didn't set a terminal status — treat as cancelled
-            # (can happen if the executor was shutdown with cancel_futures).
+        if task.status in ("running", "pending"):
+            # Worker didn't set a terminal status — treat as cancelled.
+            # ``running`` covers the case where the executor was shut
+            # down mid-flight; ``pending`` covers the case where
+            # ``executor.shutdown(cancel_futures=True)`` dropped the
+            # future before ``_runner`` ever started, so the status
+            # field was never advanced past the dataclass default.
             task.status = "cancelled"
             task.finished_at = time.time()
         if task.status == "complete":
