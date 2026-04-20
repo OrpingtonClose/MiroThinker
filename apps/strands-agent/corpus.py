@@ -93,6 +93,8 @@ class ConditionStore:
         self._lock = threading.RLock()  # Reentrant: methods call each other
         self._next_id = 1
         self.user_query: str = ""  # Set by _run_job for trigger_gossip context
+        self.version: int = 0  # Monotonic counter, incremented on every write
+        self.research_complete: bool = False  # Signal from research to gossip loop
         self._setup_tables()
 
     def _setup_tables(self) -> None:
@@ -224,6 +226,7 @@ class ConditionStore:
                     expansion_depth, now, iteration,
                 ],
             )
+        self.version += 1
         logger.debug("admitted condition #%d: %.80s", cid, fact)
         return cid
 
@@ -385,6 +388,7 @@ class ConditionStore:
                 [str(len(chunk_ids)), raw_id],
             )
 
+        self.version += 1  # Single bump per ingest_raw (covers raw + chunks)
         logger.info(
             "ingested raw: %d paragraphs from %d chars (source=%s, iteration=%d)",
             len(chunk_ids), len(raw_text), source_type, iteration,
@@ -681,6 +685,36 @@ class ConditionStore:
                 "SELECT row_type, COUNT(*) FROM conditions GROUP BY row_type"
             ).fetchall()
         return {r[0]: r[1] for r in rows}
+
+    def count_since(self, since_id: int) -> int:
+        """Count findings added after a given condition ID.
+
+        Used by the gossip loop to determine if enough new material
+        has accumulated to justify another gossip round.
+
+        Args:
+            since_id: Count findings with id > this value.
+
+        Returns:
+            Number of new findings since the given ID.
+        """
+        with self._lock:
+            result = self.conn.execute(
+                """SELECT COUNT(*) FROM conditions
+                   WHERE id > ?
+                     AND row_type = 'finding'
+                     AND consider_for_use = TRUE""",
+                [since_id],
+            ).fetchone()
+        return result[0] if result else 0
+
+    def max_id(self) -> int:
+        """Return the current maximum condition ID (0 if empty)."""
+        with self._lock:
+            result = self.conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM conditions"
+            ).fetchone()
+        return result[0] if result else 0
 
     def count_findings(self, iteration: int | None = None) -> int:
         """Count active findings, optionally filtered by iteration."""
