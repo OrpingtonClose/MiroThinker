@@ -113,6 +113,9 @@ class SwarmConfig:
             echo-chamber effects (arXiv 2603.20640v1).
         dar_top_k: Number of most-diverse peers to retain per worker
             during DAR gossip filtering.
+        readability_frame: Optional readability instructions injected into
+            the queen merge prompt. Controls the writing style and
+            accessibility level of the final synthesis.
     """
 
     max_workers: int = int(os.getenv("SWARM_MAX_WORKERS", "6"))
@@ -130,10 +133,11 @@ class SwarmConfig:
     worker_temperature: float = 0.3
     queen_temperature: float = 0.3
     worker_max_tokens: int = 4096
-    queen_max_tokens: int = 8192
+    queen_max_tokens: int = int(os.getenv("SWARM_QUEEN_MAX_TOKENS", "16384"))
     enable_semantic_assignment: bool = os.getenv("SWARM_SEMANTIC_ASSIGNMENT", "1") == "1"
     enable_diversity_aware_gossip: bool = os.getenv("SWARM_DAR_GOSSIP", "1") == "1"
     dar_top_k: int = int(os.getenv("SWARM_DAR_TOP_K", "3"))
+    readability_frame: str = os.getenv("SWARM_READABILITY_FRAME", "")
     lineage_store: LineageStore | None = None
     enable_quality_manifest: bool = True
 

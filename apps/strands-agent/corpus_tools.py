@@ -249,10 +249,21 @@ def trigger_gossip(iteration: int = 0) -> str:
         metrics=metrics_dict,
     )
 
+    # Also store knowledge report if available (was previously discarded)
+    knowledge_report = getattr(result, "knowledge_report", "")
+    if knowledge_report and knowledge_report.strip():
+        store.admit_synthesis(
+            report=knowledge_report,
+            iteration=iteration,
+            source_type="knowledge_report",
+            metrics=metrics_dict,
+        )
+
     lines = [
         f"=== GOSSIP SYNTHESIS (iteration {iteration}) ===",
         f"Corpus size: {store.count()} conditions",
-        f"Report length: {len(result.user_report)} chars",
+        f"User report: {len(result.user_report)} chars",
+        f"Knowledge report: {len(knowledge_report)} chars",
     ]
     if metrics_dict.get("info_gain"):
         lines.append(f"Info gain per round: {metrics_dict['info_gain']}")

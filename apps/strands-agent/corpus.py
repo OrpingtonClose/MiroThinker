@@ -18,6 +18,7 @@ import json
 import logging
 import re
 import threading
+from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -310,6 +311,117 @@ class ConditionStore:
         return cid
 
     # ------------------------------------------------------------------
+    # Confidence scoring
+    # ------------------------------------------------------------------
+
+    _ACADEMIC_DOMAINS = {
+        "pubmed.ncbi.nlm.nih.gov", "pmc.ncbi.nlm.nih.gov",
+        "frontiersin.org", "doi.org", "scholar.google.com",
+        "sciencedirect.com", "nature.com", "cell.com",
+        "wiley.com", "springer.com", "arxiv.org",
+        "biorxiv.org", "medrxiv.org", "jamanetwork.com",
+        "bmj.com", "thelancet.com",
+    }
+
+    _FORUM_DOMAINS = {
+        "meso-rx.org", "elitefitness.com", "professionalmuscle.com",
+        "anabolicminds.com", "forums.t-nation.com", "thinksteroids.com",
+        "uk-muscle.co.uk", "evolutionary.org", "steroid.com",
+        "extrem-bodybuilding.de", "sfd.pl", "hipertrofia.org",
+        "musculacion.net", "superphysique.org", "ironpharm.org",
+    }
+
+    _URL_PATTERN = re.compile(r"https?://[^\s\)\]\"<>]+")
+    _SEPARATOR_PATTERN = re.compile(r"^[-=*]{3,}$")
+    _HEADER_PATTERN = re.compile(r"^#{1,6}\s")
+
+    @classmethod
+    def _score_finding_confidence(
+        cls,
+        fact: str,
+        source_type: str = "researcher",
+    ) -> float:
+        """Score a finding's confidence based on content characteristics.
+
+        Uses heuristics based on URL domains, content specificity,
+        and text length to assign a confidence score.
+
+        Args:
+            fact: The finding text.
+            source_type: Origin of the finding (researcher, seed, etc.).
+
+        Returns:
+            Confidence score between 0.0 and 1.0.
+        """
+        if len(fact) < 20:
+            return 0.1
+
+        urls = cls._URL_PATTERN.findall(fact)
+        score = 0.5  # default baseline
+
+        # URL-based scoring
+        for url in urls:
+            try:
+                domain = urlparse(url).netloc.lower()
+            except Exception:
+                continue
+            if any(ad in domain for ad in cls._ACADEMIC_DOMAINS):
+                score = max(score, 0.75)
+                break
+            if any(fd in domain for fd in cls._FORUM_DOMAINS):
+                score = max(score, 0.55)
+
+        # Content specificity: numbers, dosages, units
+        import re as _re
+        specificity_hits = len(_re.findall(
+            r"\b\d+(?:\.\d+)?\s*(?:mg|mcg|iu|IU|g/kg|mg/dl|nmol|pmol|%|ml|cc)",
+            fact,
+        ))
+        if specificity_hits >= 3:
+            score += 0.1
+        elif specificity_hits >= 1:
+            score += 0.05
+
+        # Length bonus: longer substantive text is more likely informative
+        if len(fact) > 500:
+            score += 0.05
+
+        return min(1.0, max(0.0, score))
+
+    @classmethod
+    def _extract_first_url(cls, text: str) -> str:
+        """Extract the first URL from text, if any.
+
+        Args:
+            text: Text that may contain URLs.
+
+        Returns:
+            First URL found, or empty string.
+        """
+        urls = cls._URL_PATTERN.findall(text)
+        return urls[0] if urls else ""
+
+    @classmethod
+    def _is_noise_paragraph(cls, text: str) -> bool:
+        """Check if a paragraph is noise (separator, bare header, too short).
+
+        Args:
+            text: Paragraph text to check.
+
+        Returns:
+            True if the paragraph should be skipped.
+        """
+        stripped = text.strip()
+        if len(stripped) < 20:
+            return True
+        if cls._SEPARATOR_PATTERN.match(stripped):
+            return True
+        # Bare header with no content
+        if cls._HEADER_PATTERN.match(stripped) and len(stripped) < 80:
+            return True
+        return False
+
+    # ------------------------------------------------------------------
     # Ingestion (raw text -> atomised conditions)
     # ------------------------------------------------------------------
 
@@ -360,18 +472,28 @@ class ConditionStore:
             for seq, para in enumerate(paragraphs):
                 if not para:
                     continue
+                # Bug 3 fix: skip noise paragraphs
+                if self._is_noise_paragraph(para):
+                    continue
+                # Bug 2 fix: extract first URL for structured source_url
+                para_url = self._extract_first_url(para)
+                # Bug 1 fix: score confidence based on content
+                para_confidence = self._score_finding_confidence(
+                    para, source_type,
+                )
                 chunk_id = self._next_id
                 self._next_id += 1
                 self.conn.execute(
                     "INSERT INTO conditions "
-                    "(id, fact, source_type, source_ref, row_type, "
+                    "(id, fact, source_url, source_type, source_ref, row_type, "
                     "parent_id, consider_for_use, created_at, iteration, "
-                    "expansion_depth, angle) "
-                    "VALUES (?, ?, ?, ?, 'finding', ?, TRUE, ?, ?, ?, ?)",
+                    "expansion_depth, angle, confidence) "
+                    "VALUES (?, ?, ?, ?, ?, 'finding', ?, TRUE, ?, ?, ?, ?, ?)",
                     [
-                        chunk_id, para, source_type, source_ref,
+                        chunk_id, para, para_url, source_type, source_ref,
                         raw_id, now, iteration, seq,
                         angle or f"iteration_{iteration}",
+                        para_confidence,
                     ],
                 )
                 chunk_ids.append(chunk_id)
@@ -444,7 +566,7 @@ class ConditionStore:
             cid, fact, src_url, src_type, conf, angle, itr, vstatus = row
             source_tag = f"[{src_type}]" if src_type else ""
             url_tag = f" ({src_url})" if src_url else ""
-            conf_tag = f" [conf={conf:.2f}]" if conf != 0.5 else ""
+            conf_tag = f" [conf={conf:.2f}]"
             vstatus_tag = f" [{vstatus}]" if vstatus else ""
             lines.append(
                 f"[#{cid}] {source_tag}{conf_tag}{vstatus_tag} "
