@@ -23,9 +23,10 @@ Architecture:
   - Plans research strategy via TodoListMiddleware
   - Loads OSINT methodology on-demand via SkillsMiddleware (no regex)
   - Compacts context via SummarizationMiddleware (no truncation)
-  - Delegates research to the Strands researcher agent via run_research tool
+  - Launches parallel research / harvest / gossip tasks on an
+    AsyncTaskPool (task_tools.launch_*) — each task spawns a fresh
+    Strands researcher with its own budget tracking
   - Ingests research into ConditionStore (DuckDB) — no string concatenation
-  - Triggers gossip synthesis via trigger_gossip tool
   - Builds final report from corpus state via build_report tool
 - /query uses the Strands single agent (simple queries, all tools direct)
 """
@@ -71,10 +72,16 @@ logger = logging.getLogger(__name__)
 # ── Globals (initialised in lifespan) ────────────────────────────────
 
 _single_agent = None          # Strands Agent for /query (simple single-turn)
-_researcher_agent = None      # Strands Agent researcher (tools: MCP + native)
-_orchestrator = None          # deepagents CompiledStateGraph (planning + coordination)
+_orchestrator = None          # ResearchOrchestrator (deepagents + task pool)
 _mcp_clients: list = []
-_search_tools: list = []      # Full tool list for researcher (uncensored-first)
+_censored_mcp_clients: list = []
+_search_tools: list = []      # Full tool list (uncensored-first)
+
+# Single-agent lock — protects the shared ``_single_agent`` instance
+# across concurrent /query and /v1/chat/completions requests. The
+# research path no longer uses this lock: each task in the AsyncTaskPool
+# spawns its own researcher via create_researcher_instance.
+_single_agent_lock = threading.Lock()
 
 
 # ── Observability wrappers ────────────────────────────────────────────
@@ -128,107 +135,12 @@ def _extract_usage(metrics_summary: dict | None) -> dict[str, int]:
     return usage
 
 
-# ── Research delegation tool ──────────────────────────────────────────
-# The orchestrator calls this to delegate research to the Strands agent.
-# The Strands researcher keeps all its MCP + native tools.
-
-_research_lock = threading.Lock()
-
-# Per-job cancel event (threading.Event) bridged from asyncio cancel_event.
-# Set via _set_job_cancel_event() in _run_job, read by run_research.
-import contextvars
-_job_cancel_event: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
-    "_job_cancel_event", default=None,
-)
-
-
-def _invoke_researcher(
-    task: str,
-    cancel_event: threading.Event | None = None,
-) -> str:
-    """Run the Strands researcher agent on a task (sync, holds lock).
-
-    Args:
-        task: Research task description.
-        cancel_event: Threading event bridged from the job's asyncio
-            cancel_event. When set, budget_callback raises
-            JobCancelledError on the next tool call.
-
-    Returns:
-        Raw research text.
-
-    Raises:
-        jobs.JobCancelledError: If the cancel_event is set during research.
-    """
-    if _researcher_agent is None:
-        return "(researcher agent not initialised)"
-
-    from agent import reset_budget, set_cancel_flag, stream_capture
-    from jobs import JobCancelledError
-
-    with _research_lock:
-        _researcher_agent.messages.clear()
-        reset_budget()
-        set_cancel_flag(cancel_event)
-        stream_capture.activate()
-        try:
-            response = _researcher_agent(task)
-            return str(response)
-        except JobCancelledError:
-            raise  # Propagate cancellation to caller
-        except Exception as exc:
-            logger.exception("researcher agent error")
-            return f"(research failed: {exc})"
-        finally:
-            stream_capture.deactivate()
-            set_cancel_flag(None)
-
-
-def run_research(task: str) -> str:
-    """Delegate a deep research task to the researcher agent.
-
-    The researcher has all search, scrape, and transcript tools
-    (TranscriptAPI, DuckDuckGo, Brave, Exa, Jina, Firecrawl,
-    Semantic Scholar, arXiv, Perplexity, Grok, Reddit, etc.)
-    ordered uncensored-first.
-
-    Be SPECIFIC about what to search, what sources to prioritise,
-    and what data to extract.
-
-    After research completes, the raw findings are automatically
-    ingested into the ConditionStore. Use query_corpus to see
-    what was gathered.
-
-    Args:
-        task: Detailed description of what to research.
-
-    Returns:
-        Summary of research completed and findings ingested.
-    """
-    from corpus_tools import _get_store
-
-    raw_text = _invoke_researcher(task, cancel_event=_job_cancel_event.get())
-
-    # Ingest into ConditionStore (no truncation, no string concat)
-    store = _get_store()
-    ids = store.ingest_raw(
-        raw_text,
-        source_type="researcher",
-        source_ref=task[:200],
-    )
-
-    return (
-        f"Research complete. {len(ids)} findings ingested into corpus. "
-        f"Use query_corpus to inspect what was gathered."
-    )
-
-
 # ── Lifespan ──────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: create agents + orchestrator. Shutdown: close connections."""
-    global _single_agent, _researcher_agent, _orchestrator, _mcp_clients, _search_tools
+    """Startup: create single agent + orchestrator. Shutdown: close MCP."""
+    global _single_agent, _orchestrator, _mcp_clients, _censored_mcp_clients, _search_tools
 
     from agent import (
         _build_tool_list,
@@ -250,7 +162,9 @@ async def lifespan(app: FastAPI):
 
     _setup_otel()
 
-    # Enter MCP clients and build combined tool list (uncensored-first)
+    # Enter MCP clients and build combined tool list (uncensored-first).
+    # MCP clients are SHARED across all research tasks (thread-safe
+    # connection pools); only agent instances are per-task.
     try:
         _mcp_clients, _censored_mcp_clients = get_all_mcp_clients()
         mcp_tools = _enter_mcp_clients(_mcp_clients)
@@ -274,63 +188,28 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("failed to create single agent")
 
-    # Researcher agent (for orchestrator delegation via run_research)
-    try:
-        from strands import Agent
-        from strands.agent.conversation_manager import SlidingWindowConversationManager
-        from agent import _build_callback_handler
-        from prompts import SYSTEM_PROMPT
-
-        _researcher_agent = Agent(
-            model=__import__("config", fromlist=["build_model"]).build_model(),
-            system_prompt=(
-                "You are a research specialist. Execute the research task "
-                "thoroughly and exhaustively. Use every available tool. "
-                "Search in multiple languages if relevant.\n\n"
-                "Tool priority (uncensored-first):\n"
-                "1. Forums: forum_search, forum_deep_dive — practitioner "
-                "knowledge from MesoRx, EliteFitness, international forums\n"
-                "2. TranscriptAPI: search_youtube, get_youtube_transcript, "
-                "search_channel_videos\n"
-                "3. Uncensored web: duckduckgo_search, brave_search\n"
-                "4. Academic: semantic_scholar_search, arxiv_search\n"
-                "5. Deep research: perplexity_search, grok_search\n"
-                "6. Community: reddit_search\n"
-                "7. Censorship-sensitive (last resort): google_search, "
-                "exa_search — these reject health/PED queries\n\n"
-                "Return a comprehensive raw research report with ALL "
-                "data gathered. Include specific numbers, protocols, "
-                "dosages, bloodwork values, and source URLs."
-            ),
-            tools=_search_tools,
-            conversation_manager=SlidingWindowConversationManager(
-                window_size=15,
-                should_truncate_results=True,
-            ),
-            callback_handler=_build_callback_handler(),
-        )
-        logger.info("researcher agent ready — %d tools", len(_search_tools))
-    except Exception:
-        logger.exception("failed to create researcher agent")
-
-    # Deepagents orchestrator (for /query/multi — planning + coordination)
+    # Deepagents orchestrator (for /query/multi — planning + coordination).
+    # Each job constructs its own AsyncTaskPool inside _run_job; the
+    # orchestrator resolves the active pool via a contextvar set there.
     try:
         from orchestrator import create_orchestrator
         from corpus_tools import (
-            query_corpus,
             assess_coverage,
-            get_gap_analysis,
-            trigger_gossip,
             build_report,
+            get_gap_analysis,
+            query_corpus,
         )
 
         _skills_dir = Path(__file__).parent / "skills"
         skills_paths = [str(_skills_dir)] if _skills_dir.is_dir() else None
 
         _orchestrator = create_orchestrator(
-            research_fn=run_research,
-            corpus_tools=[query_corpus, assess_coverage, get_gap_analysis],
-            gossip_tools=[trigger_gossip, build_report],
+            corpus_tools=[
+                query_corpus,
+                assess_coverage,
+                get_gap_analysis,
+                build_report,
+            ],
             skills_paths=skills_paths,
         )
         logger.info("deepagents orchestrator ready")
@@ -425,7 +304,6 @@ async def health():
         "status": "ok",
         "single_agent": _single_agent is not None,
         "orchestrator": _orchestrator is not None,
-        "researcher": _researcher_agent is not None,
     }
 
 
@@ -457,7 +335,7 @@ def query_single(req: QueryRequest):
     start = time.time()
     from agent import reset_budget
 
-    with _research_lock:
+    with _single_agent_lock:
         _single_agent.messages.clear()
         reset_budget()
         try:
@@ -488,9 +366,9 @@ async def query_multi(req: QueryRequest):
 
     The orchestrator:
     1. Plans research strategy (TodoListMiddleware)
-    2. Delegates to researcher via run_research tool
-    3. Ingests findings into ConditionStore (DuckDB)
-    4. Triggers gossip synthesis when corpus is sufficient
+    2. Launches parallel research/harvest tasks (AsyncTaskPool)
+    3. Auto-ingests findings into ConditionStore (DuckDB)
+    4. Launches gossip synthesis when corpus is sufficient
     5. Reads gap analysis and iterates until coverage is adequate
     6. Builds final report from corpus state
     """
@@ -512,18 +390,18 @@ async def query_multi(req: QueryRequest):
 
 
 async def _run_job(job: "jobs.JobState") -> None:
-    """Background task: invoke deepagents orchestrator with ConditionStore.
+    """Background task: drive the orchestrator with a per-job AsyncTaskPool.
 
-    The orchestrator handles the full research ↔ gossip feedback loop
-    internally via its tools (run_research, query_corpus, trigger_gossip,
-    build_report, etc.) and middleware (TodoList, Summarization, Skills).
-
-    Events are emitted to job.event_queue for SSE streaming.
+    The orchestrator consumes ``OrchestratorEvent`` values (protocol
+    defined in ``orchestrator_protocol``). Task lifecycle events emitted
+    by the ``AsyncTaskPool`` are forwarded directly into
+    ``job.event_queue`` via ``event_emit``.
     """
     from corpus import ConditionStore
     from corpus_tools import set_current_store
     from jobs import JobCancelledError
-    from langchain_core.messages import HumanMessage
+    from task_pool import AsyncTaskPool
+    from task_tools import set_current_task_pool
 
     job.status = "running"
     job.emit({
@@ -532,112 +410,108 @@ async def _run_job(job: "jobs.JobState") -> None:
         "query": job.query,
     })
 
-    # Per-job ConditionStore (DuckDB, in-memory)
+    # Per-job ConditionStore (DuckDB, in-memory).
     store = ConditionStore()
-    store.user_query = job.query  # For trigger_gossip context
+    store.user_query = job.query
     set_current_store(store)
 
-    # Cancel bridge: asyncio Event → threading Event for Strands budget_callback
+    # Cancel bridge: asyncio Event → threading Event for worker threads.
     cancel_threading = threading.Event()
-    _job_cancel_event.set(cancel_threading)
 
     async def _cancel_bridge() -> None:
-        """Bridge job's asyncio cancel_event to threading.Event."""
         await job.cancel_event.wait()
         cancel_threading.set()
 
     cancel_bridge_task = asyncio.create_task(_cancel_bridge())
 
+    # Per-job AsyncTaskPool. Workers spawn fresh researcher agents and
+    # auto-ingest results into ``store``. Task lifecycle events are
+    # forwarded straight to the job event queue via ``event_emit``.
+    pool = AsyncTaskPool(
+        store=store,
+        tools=_search_tools,
+        job_cancel_event=cancel_threading,
+        event_emit=job.emit,
+        max_concurrent=int(os.environ.get("TASK_POOL_MAX_CONCURRENT", "4")),
+    )
+    set_current_task_pool(pool)
+
     try:
-        # Stream events from the orchestrator
-        event_count = 0
         final_content = ""
 
-        async for event in _orchestrator.astream_events(
-            {"messages": [HumanMessage(content=job.query)]},
-            version="v2",
-        ):
-            event_count += 1
+        if _orchestrator is None:
+            raise RuntimeError("Orchestrator not initialised")
 
-            # Check cancellation
+        async for event in _orchestrator.run(job.query):
             if job.cancel_event.is_set():
                 job.status = "cancelled"
                 job.finished_at = time.time()
                 job.emit({"type": "job_cancelled", "reason": "user_requested"})
                 return
 
-            # Map LangGraph events to job events
-            event_type = event.get("event", "")
-            event_name = event.get("name", "")
+            etype = event.type
+            name = event.name
+            data = event.data
 
-            if event_type == "on_tool_start":
+            if etype == "tool_start":
                 job.tool_calls += 1
-                tool_input = event.get("data", {}).get("input", "")
-                if isinstance(tool_input, dict):
-                    tool_input = json.dumps(tool_input)[:200]
-                elif isinstance(tool_input, str):
-                    tool_input = tool_input[:200]
-                else:
-                    tool_input = str(tool_input)[:200]
-
                 job.emit({
                     "type": "tool_call",
-                    "tool": event_name,
-                    "input_summary": tool_input,
+                    "tool": name,
+                    "input_summary": data.get("input_summary", ""),
                     "tool_call_number": job.tool_calls,
                 })
-
-                # Detect gossip synthesis trigger
-                if event_name == "trigger_gossip":
+                if name == "launch_gossip":
                     job.current_phase = "gossip"
                     job.emit({"type": "gossip_start"})
-                elif event_name == "run_research":
+                elif name == "launch_research":
                     job.current_phase = "research"
                     job.emit({"type": "research_start"})
+                elif name == "launch_harvest":
+                    job.current_phase = "harvest"
+                    job.emit({"type": "harvest_start"})
 
-            elif event_type == "on_tool_end":
-                tool_output = event.get("data", {}).get("output", "")
-                if isinstance(tool_output, str) and len(tool_output) > 200:
-                    tool_output_summary = tool_output[:200] + "..."
-                else:
-                    tool_output_summary = str(tool_output)[:200]
-
-                # Emit intermediate report if gossip completed
-                if event_name == "trigger_gossip":
-                    job.current_phase = "idle"
-                    report_text = str(event.get("data", {}).get("output", ""))
+                if job.tool_calls > 0 and job.tool_calls % 10 == 0:
                     job.emit({
-                        "type": "intermediate_report",
-                        "report": report_text,
+                        "type": "budget_update",
+                        "tool_calls": job.tool_calls,
+                        "elapsed_s": round(time.time() - job.created_at, 1),
                     })
-                    job.emit({"type": "gossip_end"})
 
-                elif event_name == "run_research":
+            elif etype == "tool_end":
+                if name == "launch_gossip":
+                    report_text = str(data.get("output", ""))
+                    if report_text:
+                        job.emit({
+                            "type": "intermediate_report",
+                            "report": report_text,
+                        })
+                    job.current_phase = "idle"
+                    job.emit({"type": "gossip_end"})
+                elif name == "launch_research":
                     job.current_phase = "idle"
                     job.emit({
                         "type": "research_end",
                         "tool_calls": job.tool_calls,
                     })
+                elif name == "launch_harvest":
+                    job.current_phase = "idle"
+                    job.emit({"type": "harvest_end"})
 
-            elif event_type == "on_chat_model_stream":
-                # Capture streaming content from the orchestrator
-                chunk = event.get("data", {}).get("chunk")
-                if chunk and hasattr(chunk, "content") and chunk.content:
-                    final_content += chunk.content
+            elif etype == "stream":
+                chunk = data.get("chunk", "")
+                if chunk:
+                    final_content += chunk
 
-            # Budget update every 10 tool calls (only on tool_start events)
-            if event_type == "on_tool_start" and job.tool_calls > 0 and job.tool_calls % 10 == 0:
+            elif etype == "error":
                 job.emit({
-                    "type": "budget_update",
-                    "tool_calls": job.tool_calls,
-                    "elapsed_s": round(time.time() - job.created_at, 1),
+                    "type": "orchestrator_error",
+                    "error": data.get("error", ""),
                 })
 
         # ── Job complete ──────────────────────────────────────────
-        # Build final report from ConditionStore (not from string concat)
         report = store.build_report(user_query=job.query)
         if not report.strip() or "(No gossip synthesis" in report:
-            # Fallback to orchestrator's final content if no synthesis ran
             report = final_content or "(no report generated)"
 
         elapsed = round(time.time() - job.created_at, 2)
@@ -676,7 +550,11 @@ async def _run_job(job: "jobs.JobState") -> None:
         })
     finally:
         cancel_bridge_task.cancel()
-        _job_cancel_event.set(None)
+        try:
+            pool.shutdown()
+        except Exception:
+            logger.exception("pool shutdown failed")
+        set_current_task_pool(None)
         store.close()
 
 
@@ -873,7 +751,7 @@ async def openai_chat_completions(body: ChatCompletionRequest):
 
         def _agent_thread():
             from agent import reset_budget
-            with _research_lock:
+            with _single_agent_lock:
                 token_q = stream_capture.activate()
                 queue_holder["q"] = token_q
                 queue_ready.set()
@@ -958,7 +836,7 @@ async def openai_chat_completions(body: ChatCompletionRequest):
     # Non-streaming single
     def _sync_single():
         from agent import reset_budget
-        with _research_lock:
+        with _single_agent_lock:
             stream_capture.activate()
             try:
                 if _single_agent is None:
