@@ -560,6 +560,9 @@ async def _run_job(job: "jobs.JobState") -> None:
             if job.cancel_event.is_set():
                 cancel_threading_event.set()
 
+            # Signal so drain task knows activate() has cleared stale events
+            capture_ready = threading.Event()
+
             def _sync_research():
                 # Acquire _agent_lock FIRST, then mutate shared globals.
                 # This prevents concurrent jobs from overwriting each
@@ -567,6 +570,7 @@ async def _run_job(job: "jobs.JobState") -> None:
                 with _agent_lock:
                     set_cancel_flag(cancel_threading_event)
                     stream_capture.activate()
+                    capture_ready.set()  # safe to start draining
                     try:
                         return _run_research_inner(research_query)
                     finally:
@@ -582,6 +586,9 @@ async def _run_job(job: "jobs.JobState") -> None:
             async def _drain_capture():
                 """Forward tool events from StreamCapture to job event queue."""
                 nonlocal drain_offset
+                # Wait until activate() has cleared stale events
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, capture_ready.wait)
                 while drain_active:
                     try:
                         if (
