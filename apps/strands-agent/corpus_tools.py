@@ -81,7 +81,7 @@ def query_corpus(
     lines = [f"=== CORPUS: {len(findings)} findings ==="]
     for f in findings:
         src = f" ({f['source_url']})" if f.get("source_url") else ""
-        conf = f" [conf={f['confidence']:.2f}]" if f.get("confidence", 0.5) != 0.5 else ""
+        conf = f" [conf={f['confidence']:.2f}]"
         vstatus = f" [{f['verification_status']}]" if f.get("verification_status") else ""
         lines.append(f"[#{f['id']}]{conf}{vstatus} {f['fact']}{src}")
 
