@@ -1,10 +1,15 @@
 # Copyright (c) 2025 MiroMind
 # This source code is licensed under the Apache 2.0 License.
 
-"""Queen merge — combines all worker summaries into the final synthesis.
+"""Queen merge — combines all worker analyses into the final synthesis.
 
-The queen is a senior synthesis editor, not a summarizer.  Its role is
-informed by SOTA multi-agent merge techniques:
+The queen is a senior synthesis editor whose primary obligation is
+factual integrity.  It receives worker ANALYSES (not summaries) that
+contain reasoned evaluations, source quotes, and contradiction verdicts.
+The queen's job is to produce a narrative that preserves the workers'
+verified facts while being engaging and deeply informative.
+
+Key principles:
 
 - **Mixture-of-Agents** (ICLR 2025, arXiv 2406.04692): The queen acts
   as the final aggregation layer reading all previous-layer outputs.
@@ -14,10 +19,20 @@ informed by SOTA multi-agent merge techniques:
   cross-worker agreement, and specificity.  Consensus across 3+ workers
   is near-certain; single-worker claims are flagged for confidence.
 
-- **Contradiction resolution protocol**: When workers disagree, the queen
-  does not average -- it evaluates evidence strength, identifies the
-  methodological reason for disagreement, and either resolves or
-  explicitly preserves both positions with reasoning.
+- **Numerical integrity**: Workers have preserved exact numbers from
+  the corpus.  The queen MUST carry these numbers through to the final
+  output without rounding, converting, or paraphrasing.  Daily totals
+  must not become per-meal values.  Per-dose values must not become
+  daily totals.
+
+- **Contradiction resolution protocol**: Workers have already reasoned
+  through contradictions and provided verdicts.  The queen respects
+  these verdicts unless it can identify a clear error in the worker's
+  reasoning.  It does not re-introduce contradictions that workers
+  resolved.
+
+- **Internal consistency**: Before finalizing, the queen checks that
+  no two paragraphs in its output contradict each other.
 
 - **Narrative integration**: Serendipity insights are not appended but
   woven into the causal flow at the points where they illuminate
@@ -42,6 +57,7 @@ def _build_queen_prompt(
     query: str,
     summaries_text: str,
     serendipity_block: str,
+    readability_frame: str = "",
 ) -> str:
     """Build the queen merge prompt via concatenation (not .replace()).
 
@@ -51,32 +67,56 @@ def _build_queen_prompt(
     """
     return (
         f"You are the QUEEN SYNTHESIZER — a senior research editor whose output "
-        f"must be strictly superior to any individual worker's summary. "
-        f"Today is: {date}\n\n"
+        f"must be strictly superior to any individual worker's analysis, both in "
+        f"narrative quality AND factual integrity. Today is: {date}\n\n"
         f"{n_workers} specialist workers have independently processed different "
-        f"sections of a research corpus, then refined their summaries through "
-        f"multiple rounds of peer gossip where each worker cross-referenced "
-        f"findings from all other specialists.\n\n"
+        f"sections of a research corpus, then refined their analyses through "
+        f"multiple rounds of peer gossip where each worker cross-examined "
+        f"findings, resolved contradictions with evidence-based verdicts, and "
+        f"verified numerical claims against source text.\n\n"
         f"USER QUERY: {query}\n\n"
-        f"WORKER SUMMARIES (post-gossip refinement):\n"
+        f"WORKER ANALYSES (post-gossip, with reasoning and verdicts):\n"
         f"{summaries_text}\n\n"
         f"{serendipity_block}"
         f"═══ SYNTHESIS PROTOCOL ═══\n\n"
+        f"PHASE 0 — NUMERICAL INTEGRITY (do this BEFORE writing):\n"
+        f"Scan all worker analyses for specific numbers (dosages, timings, "
+        f"ratios, macro values, frequencies). For each number:\n"
+        f"  • Note the exact value as the worker stated it\n"
+        f"  • Check if any other worker states a DIFFERENT value for the same "
+        f"thing\n"
+        f"  • If workers resolved the conflict with a verdict, use the verdict\n"
+        f"  • If still conflicting, present BOTH values with their evidence\n"
+        f"  • NEVER invent, round, or convert numbers. If a worker says "
+        f"'400g protein daily across 7-8 meals', you write exactly that — "
+        f"do NOT write '400g protein per meal'\n"
+        f"  • ALWAYS distinguish daily totals from per-dose/per-meal values\n\n"
         f"PHASE 1 — EVIDENCE HIERARCHY:\n"
-        f"Before writing, mentally classify every claim by confidence:\n"
+        f"Classify every claim by confidence:\n"
         f"  • CONSENSUS (3+ workers agree): Near-certain. State directly.\n"
         f"  • CORROBORATED (2 workers agree): High confidence. Note the agreement.\n"
         f"  • SINGLE-SOURCE (1 worker only): Flag confidence level explicitly.\n"
-        f"  • CONTRADICTED (workers disagree): Apply contradiction protocol below.\n\n"
+        f"  • CONTRADICTED (workers disagree): Use worker verdicts or apply "
+        f"contradiction protocol below.\n\n"
         f"PHASE 2 — CONTRADICTION RESOLUTION:\n"
-        f"When workers disagree, do NOT average or hand-wave. For each conflict:\n"
+        f"Workers have already reasoned through most contradictions. Respect "
+        f"their verdicts unless you can identify a clear error in their reasoning. "
+        f"For any remaining conflicts:\n"
         f"  a) Identify WHAT exactly they disagree about\n"
         f"  b) Evaluate the evidence QUALITY behind each position\n"
         f"  c) Determine if the disagreement is real (different conclusions from "
         f"same data) or apparent (different aspects of the same phenomenon)\n"
         f"  d) Either RESOLVE with reasoning, or PRESERVE both positions with "
         f"explicit evidence assessment for each\n\n"
-        f"PHASE 3 — NARRATIVE SYNTHESIS:\n"
+        f"PHASE 3 — INTERNAL CONSISTENCY CHECK:\n"
+        f"Before finalizing your output, scan it for self-contradictions. If "
+        f"paragraph A says 'administer GH and insulin simultaneously' and "
+        f"paragraph B says 'wait 60-90 minutes between GH and insulin', you "
+        f"have an internal contradiction. Fix it. If a case study section says "
+        f"'activating all three arms' and then says 'missing two arms', that is "
+        f"an internal contradiction. Fix it. Your output must be internally "
+        f"consistent at every point.\n\n"
+        f"PHASE 4 — NARRATIVE SYNTHESIS:\n"
         f"  1. Structure with clear headings building a causal argument.\n"
         f"  2. WEAVE findings into connected explanations — show how mechanism A "
         f"leads to consequence B which interacts with pathway C.\n"
@@ -91,6 +131,7 @@ def _build_queen_prompt(
         f"append them as a separate section.\n"
         f"  10. Identify at least one EMERGENT INSIGHT that exists in the "
         f"combined evidence but was not explicitly stated by any individual worker.\n\n"
+        f"{readability_frame + chr(10) * 2 if readability_frame else ''}"
         f"AIM FOR 3000-6000 WORDS. Be comprehensive but not redundant. "
         f"Merge overlapping findings — do not repeat the same point from different "
         f"workers. Your synthesis must be worth more than the sum of its parts.\n\n"
@@ -104,6 +145,7 @@ async def queen_merge(
     complete_fn,
     serendipity_insights: str = "",
     max_summary_chars: int = 6000,
+    readability_frame: str = "",
 ) -> str:
     """Merge all worker summaries + serendipity insights into final answer.
 
@@ -113,6 +155,7 @@ async def queen_merge(
         complete_fn: Async LLM completion callable.
         serendipity_insights: Cross-angle insights from the serendipity bridge.
         max_summary_chars: Maximum chars per worker summary in the prompt.
+        readability_frame: Optional readability instructions for the queen.
 
     Returns:
         Final synthesized answer string. Falls back to concatenation if
@@ -143,6 +186,7 @@ async def queen_merge(
         query=query,
         summaries_text=summaries_text,
         serendipity_block=serendipity_block,
+        readability_frame=readability_frame,
     )
 
     try:
