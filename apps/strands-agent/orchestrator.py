@@ -65,7 +65,7 @@ def build_venice_model(
         ),
         max_tokens=max_tokens,
         temperature=temperature,
-        extra_body={
+        model_kwargs={
             "venice_parameters": {"include_venice_system_prompt": False},
         },
     )
