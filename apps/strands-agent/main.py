@@ -479,24 +479,16 @@ async def _run_job(job: "jobs.JobState") -> None:
                     })
 
             elif etype == "tool_end":
-                if name == "launch_gossip":
-                    report_text = str(data.get("output", ""))
-                    if report_text:
-                        job.emit({
-                            "type": "intermediate_report",
-                            "report": report_text,
-                        })
-                    job.current_phase = "idle"
-                    job.emit({"type": "gossip_end"})
-                elif name == "launch_research":
-                    job.current_phase = "idle"
-                    job.emit({
-                        "type": "research_end",
-                        "tool_calls": job.tool_calls,
-                    })
-                elif name == "launch_harvest":
-                    job.current_phase = "idle"
-                    job.emit({"type": "harvest_end"})
+                # ``launch_*`` tools return immediately with a task_id JSON
+                # blob; actual task completion is surfaced as
+                # ``task_completed`` / ``task_failed`` events emitted by
+                # the ``AsyncTaskPool`` (forwarded straight to
+                # ``job.event_queue``). We therefore do NOT treat
+                # tool_end of a launch_* tool as an end-of-phase signal
+                # — doing so would emit misleading ``*_end`` /
+                # ``intermediate_report`` events with launch metadata
+                # rather than real results.
+                pass
 
             elif etype == "stream":
                 chunk = data.get("chunk", "")

@@ -288,15 +288,27 @@ class StreamCapture:
 stream_capture = StreamCapture()
 
 
-def _build_callback_handler(budget: ResearcherBudget | None = None):
+def _build_callback_handler(
+    budget: ResearcherBudget | None = None,
+    include_stream_capture: bool = True,
+):
     """Build a composite callback handler: printing + streaming capture + budget guardrail.
 
     When ``budget`` is None the module-level ``_default_budget`` is used
     (single-agent path). Research-task instances pass their own budget
     so parallel researchers don't share counters.
+
+    When ``include_stream_capture`` is False the module-level
+    ``stream_capture`` singleton is omitted. Pool research tasks must
+    set this to ``False`` so their streaming tokens do not leak into a
+    concurrent ``/query`` SSE response.
     """
     budget_cb = budget.callback if budget is not None else budget_callback
-    return CompositeCallbackHandler(PrintingCallbackHandler(), stream_capture, budget_cb)
+    handlers = [PrintingCallbackHandler()]
+    if include_stream_capture:
+        handlers.append(stream_capture)
+    handlers.append(budget_cb)
+    return CompositeCallbackHandler(*handlers)
 
 
 # ── OpenTelemetry setup ──────────────────────────────────────────────
@@ -530,7 +542,9 @@ def create_researcher_instance(
             window_size=15,
             should_truncate_results=True,
         ),
-        callback_handler=_build_callback_handler(budget),
+        callback_handler=_build_callback_handler(
+            budget, include_stream_capture=False,
+        ),
     )
     return agent
 
