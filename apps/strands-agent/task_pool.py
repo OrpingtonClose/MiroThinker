@@ -378,20 +378,50 @@ class AsyncTaskPool:
             future.cancel()     # no-op once running, helps for pending
         return True
 
-    def shutdown(self) -> None:
-        """Signal cancellation to all tasks and tear down the executor."""
+    def shutdown(self, drain_timeout: float = 30.0) -> None:
+        """Signal cancellation to tasks and tear down the executor.
+
+        Waits up to ``drain_timeout`` seconds for already-running workers
+        to reach a terminal state before tearing down the pool. This
+        lets workers that have finished their agent run but are still in
+        the ``ingest_raw`` phase complete their writes to the shared
+        ``ConditionStore`` before the caller (typically ``_run_job``)
+        closes the store. Without this drain, ``store.close()`` races
+        with in-flight ingest calls and silently drops results.
+        """
         if self._shutdown:
             return
         self._shutdown = True
+        # Signal cancellation so workers that are still running tool
+        # calls / agent loops bail out quickly; workers that have moved
+        # past the cancellation-sensitive phase (e.g. into ingest) will
+        # ignore the flag and continue to completion.
         for ev in list(self._cancel_events.values()):
             ev.set()
         if self._job_cancel_event is not None:
             self._job_cancel_event.set()
+
+        # Snapshot futures under the lock to avoid racing with
+        # concurrent launch_* calls.
+        with self._lock:
+            pending = list(self._futures.values())
+
+        if pending and drain_timeout > 0:
+            try:
+                concurrent.futures.wait(pending, timeout=drain_timeout)
+            except Exception:
+                logger.exception(
+                    "task pool shutdown: drain wait failed",
+                )
+
         try:
-            self._executor.shutdown(wait=False, cancel_futures=True)
+            # wait=True so any stragglers still in their finally / ingest
+            # block get to finish rather than being hard-killed mid-write.
+            # cancel_futures drops pending-but-not-started work.
+            self._executor.shutdown(wait=True, cancel_futures=True)
         except TypeError:
             # cancel_futures only exists on Python >=3.9; we target 3.10+
-            self._executor.shutdown(wait=False)
+            self._executor.shutdown(wait=True)
         except Exception:
             logger.exception("task pool shutdown: executor.shutdown failed")
 
