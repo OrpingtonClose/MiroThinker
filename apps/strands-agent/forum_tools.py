@@ -191,18 +191,21 @@ def forum_search(query: str, forums: str = "all", max_results_per_forum: int = 5
     with ThreadPoolExecutor(max_workers=min(len(forum_list), 8)) as pool:
         futures = {pool.submit(_search_forum, f): f for f in forum_list}
         all_results = []
-        for future in as_completed(futures, timeout=_FORUM_SEARCH_TIMEOUT * 2):
-            try:
-                all_results.append(future.result(timeout=_FORUM_SEARCH_TIMEOUT))
-            except Exception as exc:
-                domain = futures[future][0] if future in futures else "unknown"
-                logger.warning("forum search timed out for %s: %s", domain, exc)
-                all_results.append({
-                    "forum": domain,
-                    "count": 0,
-                    "results": [],
-                    "error": f"timeout: {exc}",
-                })
+        try:
+            for future in as_completed(futures, timeout=_FORUM_SEARCH_TIMEOUT * 2):
+                try:
+                    all_results.append(future.result(timeout=_FORUM_SEARCH_TIMEOUT))
+                except Exception as exc:
+                    domain = futures[future][0] if future in futures else "unknown"
+                    logger.warning("forum search timed out for %s: %s", domain, exc)
+                    all_results.append({
+                        "forum": domain,
+                        "count": 0,
+                        "results": [],
+                        "error": f"timeout: {exc}",
+                    })
+        except TimeoutError:
+            logger.warning("forum search overall timeout — returning %d partial results", len(all_results))
 
     # Sort by result count (most results first)
     all_results.sort(key=lambda r: r["count"], reverse=True)
@@ -300,11 +303,14 @@ def forum_deep_dive(
     if threads_to_extract:
         with ThreadPoolExecutor(max_workers=min(len(threads_to_extract), 3)) as pool:
             futures = {pool.submit(_extract_one, e): e for e in threads_to_extract}
-            for future in as_completed(futures, timeout=120):
-                try:
-                    extracted.append(future.result(timeout=60))
-                except Exception as exc:
-                    logger.warning("thread extraction timed out: %s", exc)
+            try:
+                for future in as_completed(futures, timeout=120):
+                    try:
+                        extracted.append(future.result(timeout=60))
+                    except Exception as exc:
+                        logger.warning("thread extraction timed out: %s", exc)
+            except TimeoutError:
+                logger.warning("thread extraction overall timeout — returning %d partial results", len(extracted))
 
     output = {
         "query": query,
