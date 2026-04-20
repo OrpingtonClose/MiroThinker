@@ -52,6 +52,8 @@ def build_model():
         client_args={
             "api_key": api_key,
             "base_url": VENICE_API_BASE,
+            "timeout": 120.0,
+            "max_retries": 2,
         },
         model_id=VENICE_MODEL,
         params={
@@ -90,7 +92,7 @@ def build_model_with_selection(user_query: str):
         if not api_key:
             raise RuntimeError("VENICE_API_KEY is not set.")
         return OpenAIModel(
-            client_args={"api_key": api_key, "base_url": VENICE_API_BASE},
+            client_args={"api_key": api_key, "base_url": VENICE_API_BASE, "timeout": 120.0, "max_retries": 2},
             model_id=explicit_model,
             params={"extra_body": {"venice_parameters": {"include_venice_system_prompt": False}}},
         ), None

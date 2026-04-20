@@ -879,8 +879,12 @@ def exa_multi_search(queries: str, num_results_per_query: int = 5) -> str:
     with ThreadPoolExecutor(max_workers=min(len(query_list), 5)) as pool:
         futures = {pool.submit(_search_one, q): q for q in query_list}
         raw_results = []
-        for future in as_completed(futures):
-            raw_results.append(future.result())
+        for future in as_completed(futures, timeout=120):
+            try:
+                raw_results.append(future.result(timeout=60))
+            except Exception as exc:
+                query_name = futures.get(future, "unknown")
+                logger.warning("exa batch search timed out for %s: %s", query_name, exc)
 
     # Sort to match original query order
     order = {q: i for i, q in enumerate(query_list)}
