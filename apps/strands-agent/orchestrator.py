@@ -81,8 +81,12 @@ comprehensive, exhaustive coverage of the user's query.
 
 You have corpus tools to inspect what's been gathered, identify gaps, and \
 assess coverage quality. You delegate actual research to the researcher \
-via the `run_research` tool. You trigger gossip synthesis when the corpus \
-has enough raw material.
+via the `run_research` tool.
+
+Gossip synthesis runs AUTOMATICALLY in the background — a continuous loop \
+polls the corpus and triggers synthesis when enough new findings accumulate. \
+You do NOT need to trigger gossip manually. Use `get_gap_analysis` to see \
+what the latest gossip synthesis found.
 
 Your workflow:
 1. Understand the query — what the user needs, at what depth
@@ -90,12 +94,11 @@ Your workflow:
 topics to search, what sources to prioritise, what data to extract
 3. After research returns, inspect the corpus with `query_corpus` and \
 `assess_coverage` to see what was gathered
-4. Trigger gossip synthesis with `trigger_gossip` when you have sufficient \
-raw material (at least 20-30 findings)
-5. Read the gap analysis with `get_gap_analysis` to see what's missing
-6. Delegate more targeted research to fill gaps
-7. Repeat until coverage is sufficient
-8. Build the final report with `build_report`
+4. Read the gap analysis with `get_gap_analysis` to see what gossip \
+synthesis identified as missing or contradictory
+5. Delegate more targeted research to fill gaps
+6. Repeat until coverage is sufficient
+7. Build the final report with `build_report`
 
 You decide the strategy. You decide when to stop. No fixed iteration count — \
 stop when the corpus quality metrics show sufficient coverage and depth.
@@ -145,8 +148,8 @@ def create_orchestrator(
             The orchestrator sees this as a ``run_research`` tool.
         corpus_tools: Tools for corpus inspection (query_corpus,
             assess_coverage, get_gap_analysis).
-        gossip_tools: Tools for gossip synthesis (trigger_gossip,
-            build_report).
+        gossip_tools: Tools for report building (build_report).
+            Gossip synthesis runs automatically via _gossip_loop.
         skills_paths: Paths to skill directories for SkillsMiddleware.
         model: Venice model for the orchestrator.
 

@@ -319,17 +319,17 @@ async def lifespan(app: FastAPI):
             query_corpus,
             assess_coverage,
             get_gap_analysis,
-            trigger_gossip,
             build_report,
         )
 
         _skills_dir = Path(__file__).parent / "skills"
         skills_paths = [str(_skills_dir)] if _skills_dir.is_dir() else None
 
+        # trigger_gossip removed — gossip runs continuously via _gossip_loop
         _orchestrator = create_orchestrator(
             research_fn=run_research,
             corpus_tools=[query_corpus, assess_coverage, get_gap_analysis],
-            gossip_tools=[trigger_gossip, build_report],
+            gossip_tools=[build_report],
             skills_paths=skills_paths,
         )
         logger.info("deepagents orchestrator ready")
