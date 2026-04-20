@@ -92,11 +92,24 @@ class AsyncTaskPool:
         job_cancel_event: threading.Event | None = None,
         event_emit: Callable[[dict[str, Any]], None] | None = None,
         max_concurrent: int = 4,
+        loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
         self._store = store
         self._tools = list(tools or [])
         self._job_cancel_event = job_cancel_event
         self._event_emit = event_emit
+        # Capture the asyncio loop at construction time so worker threads
+        # can bridge events back into the loop via ``call_soon_threadsafe``
+        # (asyncio.Queue is not thread-safe). ``_run_job`` constructs the
+        # pool from the event loop; unit tests that call the pool
+        # synchronously can pass ``loop=None``.
+        if loop is not None:
+            self._loop = loop
+        else:
+            try:
+                self._loop = asyncio.get_running_loop()
+            except RuntimeError:
+                self._loop = None
         self._executor = ThreadPoolExecutor(
             max_workers=max(1, int(max_concurrent)),
             thread_name_prefix="task-pool",
@@ -106,16 +119,84 @@ class AsyncTaskPool:
         self._cancel_events: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
         self._shutdown = False
+        # Bridge thread that fans job_cancel_event -> every per-task
+        # cancel event, including tasks registered after cancellation.
+        self._cancel_bridge_started = False
+        self._cancel_bridge_thread: threading.Thread | None = None
+        if self._job_cancel_event is not None:
+            self._start_cancel_bridge()
 
     # ── Event emission ──────────────────────────────────────────────
 
     def _emit(self, payload: dict[str, Any]) -> None:
         if self._event_emit is None:
             return
+        emit = self._event_emit
+        loop = self._loop
+
+        def _invoke() -> None:
+            try:
+                emit(payload)
+            except Exception:
+                logger.exception("task pool event_emit failed")
+
+        # ``job.emit`` ultimately writes to an ``asyncio.Queue`` which is
+        # NOT thread-safe. Worker threads must hop back onto the event
+        # loop via ``call_soon_threadsafe`` before invoking the emit
+        # callback; otherwise the awaiting ``Queue.get()`` may never be
+        # woken and task lifecycle events would be silently lost.
+        if loop is None or loop.is_closed():
+            _invoke()
+            return
         try:
-            self._event_emit(payload)
-        except Exception:
-            logger.exception("task pool event_emit failed")
+            on_loop_thread = asyncio.get_running_loop() is loop
+        except RuntimeError:
+            on_loop_thread = False
+        if on_loop_thread:
+            _invoke()
+            return
+        try:
+            loop.call_soon_threadsafe(_invoke)
+        except RuntimeError:
+            # Loop already shut down; fall back to direct call.
+            _invoke()
+
+    # ── Cancel bridge ───────────────────────────────────────────────
+
+    def _start_cancel_bridge(self) -> None:
+        """Spawn a daemon thread that fans job cancellation out to tasks.
+
+        Waits on ``job_cancel_event``. Once fired, every known per-task
+        cancel event is set, and the bridge continues mirroring onto
+        newly-registered task events for a short grace window so late
+        launches also observe cancellation.
+        """
+        if self._cancel_bridge_started or self._job_cancel_event is None:
+            return
+        self._cancel_bridge_started = True
+
+        def _bridge() -> None:
+            job_ev = self._job_cancel_event
+            if job_ev is None:
+                return
+            job_ev.wait()
+            deadline = time.time() + 5.0
+            while True:
+                with self._lock:
+                    events = list(self._cancel_events.values())
+                for ev in events:
+                    ev.set()
+                if self._shutdown or time.time() >= deadline:
+                    break
+                time.sleep(0.05)
+
+        thread = threading.Thread(
+            target=_bridge,
+            name="task-pool-cancel-bridge",
+            daemon=True,
+        )
+        self._cancel_bridge_thread = thread
+        thread.start()
 
     # ── Launch helpers ──────────────────────────────────────────────
 
@@ -264,10 +345,11 @@ class AsyncTaskPool:
         if futures:
             remaining = max(0.0, deadline - time.time())
             try:
-                concurrent.futures.wait(
-                    futures,
-                    timeout=remaining if remaining > 0 else None,
-                )
+                # Pass ``remaining`` directly. When the deadline has
+                # already elapsed we want ``timeout=0.0`` (return
+                # immediately), not ``timeout=None`` which would block
+                # forever and deadlock the orchestrator tool thread.
+                concurrent.futures.wait(futures, timeout=remaining)
             except Exception:
                 logger.exception("await_tasks: concurrent.futures.wait failed")
 
@@ -321,16 +403,14 @@ class AsyncTaskPool:
         """Union of per-task and job-level cancel events.
 
         Returns ``task_cancel`` itself but ensures it becomes set whenever
-        the job-level event is set. We set up a short bridge thread only
-        if ``job_cancel_event`` is present and not already mirrored.
+        the job-level event is set. Continuous job→task fan-out is
+        handled by the cancel-bridge daemon thread started in
+        ``__init__``; here we additionally mirror the current state
+        synchronously for callers that race ahead of the bridge.
         """
         job_ev = self._job_cancel_event
         if job_ev is None:
             return task_cancel
-        # Simple non-blocking bridge: piggy-back on the polling done
-        # inside budget_callback; here we proactively mirror once at
-        # launch time so tasks see cancellation even before their first
-        # callback fires.
         if job_ev.is_set():
             task_cancel.set()
         return task_cancel
