@@ -365,10 +365,10 @@ class ConditionStore:
                 domain = urlparse(url).netloc.lower()
             except Exception:
                 continue
-            if any(ad in domain for ad in cls._ACADEMIC_DOMAINS):
+            if any(domain == ad or domain.endswith("." + ad) for ad in cls._ACADEMIC_DOMAINS):
                 score = max(score, 0.75)
                 break
-            if any(fd in domain for fd in cls._FORUM_DOMAINS):
+            if any(domain == fd or domain.endswith("." + fd) for fd in cls._FORUM_DOMAINS):
                 score = max(score, 0.55)
 
         # Content specificity: numbers, dosages, units
@@ -416,8 +416,8 @@ class ConditionStore:
             return True
         if cls._SEPARATOR_PATTERN.match(stripped):
             return True
-        # Bare header with no content
-        if cls._HEADER_PATTERN.match(stripped) and len(stripped) < 80:
+        # Bare header with no content (only the header line, no body text)
+        if cls._HEADER_PATTERN.match(stripped) and "\n" not in stripped and len(stripped) < 80:
             return True
         return False
 
