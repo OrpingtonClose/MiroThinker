@@ -710,7 +710,7 @@ class ConditionStore:
                 swarm_lines: list[str] = []
                 for cid, phase, g_angle, strategy, fact in gossip_rows:
                     # Detect unresolved contradictions in round-2 summaries.
-                    if "_2" in phase or phase.endswith("_2"):
+                    if phase == "gossip_round_2":
                         for marker in ("unresolvable", "unresolved", "contradiction"):
                             if marker in (fact or "").lower():
                                 snippet = " ".join((fact or "").split())[:200]
