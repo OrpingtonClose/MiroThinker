@@ -1659,7 +1659,9 @@ def get_native_tools():
     except ImportError:
         logger.debug("OSINT tools module not available — OSINT tools skipped")
 
-    # Bodybuilding & PED forum tools — MesoRx, EliteFitness, international forums
+    # Bodybuilding & PED forum tools — MesoRx, EliteFitness, international forums.
+    # Methodology for when/how to use these is progressively disclosed via
+    # skills/forum-mining/SKILL.md and skills/osint-censored-discovery/SKILL.md.
     try:
         from forum_tools import FORUM_TOOLS
         tools.extend(FORUM_TOOLS)
