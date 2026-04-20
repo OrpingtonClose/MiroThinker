@@ -226,7 +226,7 @@ class ConditionStore:
                     expansion_depth, now, iteration,
                 ],
             )
-        self.version += 1
+            self.version += 1
         logger.debug("admitted condition #%d: %.80s", cid, fact)
         return cid
 
@@ -388,7 +388,8 @@ class ConditionStore:
                 [str(len(chunk_ids)), raw_id],
             )
 
-        self.version += 1  # Single bump per ingest_raw (covers raw + chunks)
+        with self._lock:
+            self.version += 1  # Single bump per ingest_raw (covers raw + chunks)
         logger.info(
             "ingested raw: %d paragraphs from %d chars (source=%s, iteration=%d)",
             len(chunk_ids), len(raw_text), source_type, iteration,

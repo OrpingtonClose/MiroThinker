@@ -592,11 +592,14 @@ async def _gossip_loop(
             "is_final_round": is_final,
         })
 
+        async def _on_gossip_event(e: dict) -> None:
+            job.event_queue.put_nowait(e)
+
         try:
             result = await gossip_synthesize(
                 corpus=corpus_text,
                 query=store.user_query,
-                on_event=lambda e: job.event_queue.put_nowait(e),
+                on_event=_on_gossip_event,
                 cancel_event=cancel_event,
             )
 
