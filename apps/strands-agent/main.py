@@ -528,6 +528,7 @@ async def _run_job(job: "jobs.JobState") -> None:
 
     # Per-job ConditionStore (DuckDB, in-memory)
     store = ConditionStore()
+    store.user_query = job.query  # For trigger_gossip context
     set_current_store(store)
 
     # Cancel bridge: asyncio Event → threading Event for Strands budget_callback

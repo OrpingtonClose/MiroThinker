@@ -226,11 +226,11 @@ def trigger_gossip(iteration: int = 0) -> str:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             result = pool.submit(
                 asyncio.run,
-                gossip_synthesize(corpus=corpus_text, query=""),
+                gossip_synthesize(corpus=corpus_text, query=store.user_query),
             ).result()
     else:
         result = asyncio.run(
-            gossip_synthesize(corpus=corpus_text, query=""),
+            gossip_synthesize(corpus=corpus_text, query=store.user_query),
         )
 
     # Store full synthesis in ConditionStore (NO truncation)

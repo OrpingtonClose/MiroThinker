@@ -76,8 +76,8 @@ class ConditionStore:
     Every factual claim is an AtomicCondition row with provenance,
     gradient-flag scoring, and lineage (parent_id DAG).
 
-    Thread-safe via _write_lock for concurrent access from async
-    event loop and sync research thread.
+    Thread-safe via _lock for ALL connection access (reads + writes)
+    from async event loop and sync research thread.
     """
 
     def __init__(self, db_path: str = "") -> None:
@@ -90,8 +90,9 @@ class ConditionStore:
             self.conn = duckdb.connect(db_path)
         else:
             self.conn = duckdb.connect()
-        self._write_lock = threading.Lock()
+        self._lock = threading.RLock()  # Reentrant: methods call each other
         self._next_id = 1
+        self.user_query: str = ""  # Set by _run_job for trigger_gossip context
         self._setup_tables()
 
     def _setup_tables(self) -> None:
@@ -204,7 +205,7 @@ class ConditionStore:
             return None
 
         now = datetime.now(timezone.utc).isoformat()
-        with self._write_lock:
+        with self._lock:
             cid = self._next_id
             self._next_id += 1
             self.conn.execute(
@@ -338,7 +339,7 @@ class ConditionStore:
         now = datetime.now(timezone.utc).isoformat()
 
         # Layer 0: store FULL raw text (no truncation)
-        with self._write_lock:
+        with self._lock:
             raw_id = self._next_id
             self._next_id += 1
             self.conn.execute(
@@ -355,7 +356,7 @@ class ConditionStore:
             paragraphs = [raw_text.strip()]
 
         chunk_ids: list[int] = []
-        with self._write_lock:
+        with self._lock:
             for seq, para in enumerate(paragraphs):
                 if not para:
                     continue
@@ -376,7 +377,7 @@ class ConditionStore:
                 chunk_ids.append(chunk_id)
 
         # Mark raw row as atomised
-        with self._write_lock:
+        with self._lock:
             self.conn.execute(
                 "UPDATE conditions SET "
                 "obsolete_reason = 'atomised into ' || ? || ' findings' "
@@ -413,26 +414,27 @@ class ConditionStore:
         Returns:
             Structured text corpus for swarm consumption.
         """
-        query = """
-            SELECT id, fact, source_url, source_type, confidence,
-                   angle, iteration, verification_status
-            FROM conditions
-            WHERE consider_for_use = TRUE
-              AND row_type = 'finding'
-              AND confidence >= ?
-        """
-        params: list[Any] = [min_confidence]
+        with self._lock:
+            query = """
+                SELECT id, fact, source_url, source_type, confidence,
+                       angle, iteration, verification_status
+                FROM conditions
+                WHERE consider_for_use = TRUE
+                  AND row_type = 'finding'
+                  AND confidence >= ?
+            """
+            params: list[Any] = [min_confidence]
 
-        if iteration is not None:
-            query += " AND iteration = ?"
-            params.append(iteration)
+            if iteration is not None:
+                query += " AND iteration = ?"
+                params.append(iteration)
 
-        query += " ORDER BY confidence DESC, id ASC"
+            query += " ORDER BY confidence DESC, id ASC"
 
-        if max_rows is not None:
-            query += f" LIMIT {int(max_rows)}"
+            if max_rows is not None:
+                query += f" LIMIT {int(max_rows)}"
 
-        rows = self.conn.execute(query, params).fetchall()
+            rows = self.conn.execute(query, params).fetchall()
 
         if not rows:
             return "(corpus is empty — no findings yet)"
@@ -457,22 +459,24 @@ class ConditionStore:
 
         Returns full text, no truncation. None if no synthesis exists.
         """
-        row = self.conn.execute(
-            """SELECT fact FROM conditions
-               WHERE row_type = 'synthesis' AND iteration = ?
-               ORDER BY id DESC LIMIT 1""",
-            [iteration],
-        ).fetchone()
+        with self._lock:
+            row = self.conn.execute(
+                """SELECT fact FROM conditions
+                   WHERE row_type = 'synthesis' AND iteration = ?
+                   ORDER BY id DESC LIMIT 1""",
+                [iteration],
+            ).fetchone()
         return row[0] if row else None
 
     def get_all_syntheses(self) -> list[dict[str, Any]]:
         """Return all synthesis rows ordered by iteration."""
-        rows = self.conn.execute(
-            """SELECT id, fact, iteration, strategy, created_at
-               FROM conditions
-               WHERE row_type = 'synthesis'
-               ORDER BY iteration ASC, id ASC"""
-        ).fetchall()
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT id, fact, iteration, strategy, created_at
+                   FROM conditions
+                   WHERE row_type = 'synthesis'
+                   ORDER BY iteration ASC, id ASC"""
+            ).fetchall()
         cols = ["id", "fact", "iteration", "strategy", "created_at"]
         return [dict(zip(cols, r)) for r in rows]
 
@@ -497,99 +501,99 @@ class ConditionStore:
 
         Returns structured text that becomes the researcher's next prompt.
         """
-        lines: list[str] = []
+        with self._lock:
+            lines: list[str] = []
 
-        # Overall stats
-        total = self.count()
-        by_type = self.count_by_type()
-        lines.append(f"=== GAP ANALYSIS (after iteration {iteration}) ===")
-        lines.append(f"Total conditions: {total}")
-        lines.append(f"By type: {by_type}")
+            # Overall stats
+            total = self.count()
+            by_type = self.count_by_type()
+            lines.append(f"=== GAP ANALYSIS (after iteration {iteration}) ===")
+            lines.append(f"Total conditions: {total}")
+            lines.append(f"By type: {by_type}")
 
-        # Low-confidence findings
-        low_conf = self.conn.execute(
-            """SELECT id, fact, confidence, angle
-               FROM conditions
-               WHERE consider_for_use = TRUE
-                 AND row_type = 'finding'
-                 AND confidence < 0.4
-               ORDER BY confidence ASC
-               LIMIT 20"""
-        ).fetchall()
-        if low_conf:
-            lines.append(f"\n--- LOW CONFIDENCE ({len(low_conf)} claims need verification) ---")
-            for cid, fact, conf, angle in low_conf:
-                lines.append(f"  [#{cid}] conf={conf:.2f} [{angle}]: {fact[:200]}")
+            # Low-confidence findings
+            low_conf = self.conn.execute(
+                """SELECT id, fact, confidence, angle
+                   FROM conditions
+                   WHERE consider_for_use = TRUE
+                     AND row_type = 'finding'
+                     AND confidence < 0.4
+                   ORDER BY confidence ASC
+                   LIMIT 20"""
+            ).fetchall()
+            if low_conf:
+                lines.append(f"\n--- LOW CONFIDENCE ({len(low_conf)} claims need verification) ---")
+                for cid, fact, conf, angle in low_conf:
+                    lines.append(f"  [#{cid}] conf={conf:.2f} [{angle}]: {fact[:200]}")
 
-        # Unverified/speculative
-        speculative = self.conn.execute(
-            """SELECT id, fact, angle
-               FROM conditions
-               WHERE consider_for_use = TRUE
-                 AND row_type = 'finding'
-                 AND verification_status = 'speculative'
-               LIMIT 20"""
-        ).fetchall()
-        if speculative:
-            lines.append(f"\n--- SPECULATIVE ({len(speculative)} unverified claims) ---")
-            for cid, fact, angle in speculative:
-                lines.append(f"  [#{cid}] [{angle}]: {fact[:200]}")
+            # Unverified/speculative
+            speculative = self.conn.execute(
+                """SELECT id, fact, angle
+                   FROM conditions
+                   WHERE consider_for_use = TRUE
+                     AND row_type = 'finding'
+                     AND verification_status = 'speculative'
+                   LIMIT 20"""
+            ).fetchall()
+            if speculative:
+                lines.append(f"\n--- SPECULATIVE ({len(speculative)} unverified claims) ---")
+                for cid, fact, angle in speculative:
+                    lines.append(f"  [#{cid}] [{angle}]: {fact[:200]}")
 
-        # Unfulfilled expansion hints
-        unfulfilled = self.conn.execute(
-            """SELECT id, expansion_gap, expansion_priority
-               FROM conditions
-               WHERE expansion_gap != ''
-                 AND expansion_fulfilled = FALSE
-               ORDER BY expansion_priority DESC
-               LIMIT 10"""
-        ).fetchall()
-        if unfulfilled:
-            lines.append(f"\n--- EXPANSION GAPS ({len(unfulfilled)} unfulfilled) ---")
-            for cid, gap, priority in unfulfilled:
-                lines.append(f"  [#{cid}] priority={priority:.2f}: {gap}")
+            # Unfulfilled expansion hints
+            unfulfilled = self.conn.execute(
+                """SELECT id, expansion_gap, expansion_priority
+                   FROM conditions
+                   WHERE expansion_gap != ''
+                     AND expansion_fulfilled = FALSE
+                   ORDER BY expansion_priority DESC
+                   LIMIT 10"""
+            ).fetchall()
+            if unfulfilled:
+                lines.append(f"\n--- EXPANSION GAPS ({len(unfulfilled)} unfulfilled) ---")
+                for cid, gap, priority in unfulfilled:
+                    lines.append(f"  [#{cid}] priority={priority:.2f}: {gap}")
 
-        # Contradictions
-        contradictions = self.conn.execute(
-            """SELECT c1.id, c1.fact, c2.id, c2.fact
-               FROM conditions c1
-               JOIN conditions c2 ON c1.contradiction_partner = c2.id
-               WHERE c1.contradiction_flag = TRUE
-                 AND c1.id < c2.id
-               LIMIT 10"""
-        ).fetchall()
-        if contradictions:
-            lines.append(f"\n--- CONTRADICTIONS ({len(contradictions)} pairs) ---")
-            for c1_id, c1_fact, c2_id, c2_fact in contradictions:
-                lines.append(f"  [#{c1_id}]: {c1_fact[:150]}")
-                lines.append(f"  vs [#{c2_id}]: {c2_fact[:150]}")
+            # Contradictions
+            contradictions = self.conn.execute(
+                """SELECT c1.id, c1.fact, c2.id, c2.fact
+                   FROM conditions c1
+                   JOIN conditions c2 ON c1.contradiction_partner = c2.id
+                   WHERE c1.contradiction_flag = TRUE
+                     AND c1.id < c2.id
+                   LIMIT 10"""
+            ).fetchall()
+            if contradictions:
+                lines.append(f"\n--- CONTRADICTIONS ({len(contradictions)} pairs) ---")
+                for c1_id, c1_fact, c2_id, c2_fact in contradictions:
+                    lines.append(f"  [#{c1_id}]: {c1_fact[:150]}")
+                    lines.append(f"  vs [#{c2_id}]: {c2_fact[:150]}")
 
-        # Previous synthesis highlights
-        prev_synthesis = self.get_synthesis(iteration)
-        if prev_synthesis:
-            # Show first 2000 chars of the synthesis as context
-            lines.append(f"\n--- PRIOR SYNTHESIS (iteration {iteration}) ---")
-            lines.append(prev_synthesis[:2000])
-            if len(prev_synthesis) > 2000:
-                lines.append(f"... ({len(prev_synthesis) - 2000} more chars in full synthesis)")
+            # Previous synthesis highlights
+            prev_synthesis = self.get_synthesis(iteration)
+            if prev_synthesis:
+                lines.append(f"\n--- PRIOR SYNTHESIS (iteration {iteration}) ---")
+                lines.append(prev_synthesis[:2000])
+                if len(prev_synthesis) > 2000:
+                    lines.append(f"... ({len(prev_synthesis) - 2000} more chars in full synthesis)")
 
-        # Angle coverage
-        angles = self.conn.execute(
-            """SELECT angle, COUNT(*) as cnt,
-                      AVG(confidence) as avg_conf
-               FROM conditions
-               WHERE consider_for_use = TRUE
-                 AND row_type = 'finding'
-                 AND angle != ''
-               GROUP BY angle
-               ORDER BY cnt DESC"""
-        ).fetchall()
-        if angles:
-            lines.append("\n--- ANGLE COVERAGE ---")
-            for angle, cnt, avg_conf in angles:
-                lines.append(f"  [{angle}]: {cnt} findings, avg_conf={avg_conf:.2f}")
+            # Angle coverage
+            angles = self.conn.execute(
+                """SELECT angle, COUNT(*) as cnt,
+                          AVG(confidence) as avg_conf
+                   FROM conditions
+                   WHERE consider_for_use = TRUE
+                     AND row_type = 'finding'
+                     AND angle != ''
+                   GROUP BY angle
+                   ORDER BY cnt DESC"""
+            ).fetchall()
+            if angles:
+                lines.append("\n--- ANGLE COVERAGE ---")
+                for angle, cnt, avg_conf in angles:
+                    lines.append(f"  [{angle}]: {cnt} findings, avg_conf={avg_conf:.2f}")
 
-        return "\n".join(lines)
+            return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Report building
@@ -611,54 +615,54 @@ class ConditionStore:
             iteration: Filter to specific iteration, or None for all.
             include_sources: Whether to append source URLs.
         """
-        lines: list[str] = []
+        with self._lock:
+            lines: list[str] = []
 
-        # Synthesis reports (the main content)
-        syntheses = self.get_all_syntheses()
-        if syntheses:
-            for s in syntheses:
-                lines.append(f"\n{'='*60}")
-                lines.append(f"SYNTHESIS — Iteration {s['iteration']}")
-                lines.append(f"{'='*60}")
-                lines.append(s["fact"])
-        else:
-            # No synthesis yet — compile from findings
-            lines.append("(No gossip synthesis completed — raw findings below)")
+            # Synthesis reports (the main content)
+            syntheses = self.get_all_syntheses()
+            if syntheses:
+                for s in syntheses:
+                    lines.append(f"\n{'='*60}")
+                    lines.append(f"SYNTHESIS — Iteration {s['iteration']}")
+                    lines.append(f"{'='*60}")
+                    lines.append(s["fact"])
+            else:
+                lines.append("(No gossip synthesis completed — raw findings below)")
 
-        # High-confidence findings not covered by synthesis
-        high_conf = self.conn.execute(
-            """SELECT fact, source_url, confidence, angle
-               FROM conditions
-               WHERE consider_for_use = TRUE
-                 AND row_type = 'finding'
-                 AND confidence >= 0.7
-               ORDER BY confidence DESC
-               LIMIT 100"""
-        ).fetchall()
-        if high_conf:
-            lines.append(f"\n{'='*60}")
-            lines.append(f"HIGH-CONFIDENCE FINDINGS ({len(high_conf)})")
-            lines.append(f"{'='*60}")
-            for fact, src_url, conf, angle in high_conf:
-                src = f" — {src_url}" if src_url and include_sources else ""
-                lines.append(f"• [{conf:.2f}] {fact}{src}")
-
-        # Source catalogue
-        if include_sources:
-            sources = self.conn.execute(
-                """SELECT DISTINCT source_url, source_type
+            # High-confidence findings not covered by synthesis
+            high_conf = self.conn.execute(
+                """SELECT fact, source_url, confidence, angle
                    FROM conditions
-                   WHERE source_url != '' AND source_url IS NOT NULL
-                   ORDER BY source_type, source_url"""
+                   WHERE consider_for_use = TRUE
+                     AND row_type = 'finding'
+                     AND confidence >= 0.7
+                   ORDER BY confidence DESC
+                   LIMIT 100"""
             ).fetchall()
-            if sources:
+            if high_conf:
                 lines.append(f"\n{'='*60}")
-                lines.append(f"SOURCES ({len(sources)})")
+                lines.append(f"HIGH-CONFIDENCE FINDINGS ({len(high_conf)})")
                 lines.append(f"{'='*60}")
-                for url, stype in sources:
-                    lines.append(f"  [{stype}] {url}")
+                for fact, src_url, conf, angle in high_conf:
+                    src = f" — {src_url}" if src_url and include_sources else ""
+                    lines.append(f"• [{conf:.2f}] {fact}{src}")
 
-        return "\n".join(lines)
+            # Source catalogue
+            if include_sources:
+                sources = self.conn.execute(
+                    """SELECT DISTINCT source_url, source_type
+                       FROM conditions
+                       WHERE source_url != '' AND source_url IS NOT NULL
+                       ORDER BY source_type, source_url"""
+                ).fetchall()
+                if sources:
+                    lines.append(f"\n{'='*60}")
+                    lines.append(f"SOURCES ({len(sources)})")
+                    lines.append(f"{'='*60}")
+                    for url, stype in sources:
+                        lines.append(f"  [{stype}] {url}")
+
+            return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Count / stats
@@ -666,32 +670,35 @@ class ConditionStore:
 
     def count(self) -> int:
         """Total number of conditions in the corpus."""
-        result = self.conn.execute("SELECT COUNT(*) FROM conditions").fetchone()
+        with self._lock:
+            result = self.conn.execute("SELECT COUNT(*) FROM conditions").fetchone()
         return result[0] if result else 0
 
     def count_by_type(self) -> dict[str, int]:
         """Count conditions grouped by row_type."""
-        rows = self.conn.execute(
-            "SELECT row_type, COUNT(*) FROM conditions GROUP BY row_type"
-        ).fetchall()
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT row_type, COUNT(*) FROM conditions GROUP BY row_type"
+            ).fetchall()
         return {r[0]: r[1] for r in rows}
 
     def count_findings(self, iteration: int | None = None) -> int:
         """Count active findings, optionally filtered by iteration."""
-        if iteration is not None:
-            result = self.conn.execute(
-                """SELECT COUNT(*) FROM conditions
-                   WHERE row_type = 'finding'
-                     AND consider_for_use = TRUE
-                     AND iteration = ?""",
-                [iteration],
-            ).fetchone()
-        else:
-            result = self.conn.execute(
-                """SELECT COUNT(*) FROM conditions
-                   WHERE row_type = 'finding'
-                     AND consider_for_use = TRUE"""
-            ).fetchone()
+        with self._lock:
+            if iteration is not None:
+                result = self.conn.execute(
+                    """SELECT COUNT(*) FROM conditions
+                       WHERE row_type = 'finding'
+                         AND consider_for_use = TRUE
+                         AND iteration = ?""",
+                    [iteration],
+                ).fetchone()
+            else:
+                result = self.conn.execute(
+                    """SELECT COUNT(*) FROM conditions
+                       WHERE row_type = 'finding'
+                         AND consider_for_use = TRUE"""
+                ).fetchone()
         return result[0] if result else 0
 
     # ------------------------------------------------------------------
@@ -700,16 +707,17 @@ class ConditionStore:
 
     def get_all(self) -> list[dict[str, Any]]:
         """Return ALL conditions — nothing excluded."""
-        rows = self.conn.execute(
-            """SELECT id, fact, source_url, source_type, confidence,
-                      trust_score, novelty_score, specificity_score,
-                      relevance_score, actionability_score,
-                      duplication_score, fabrication_risk,
-                      verification_status, angle, parent_id, strategy,
-                      expansion_depth, iteration, row_type
-               FROM conditions
-               ORDER BY id ASC"""
-        ).fetchall()
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT id, fact, source_url, source_type, confidence,
+                          trust_score, novelty_score, specificity_score,
+                          relevance_score, actionability_score,
+                          duplication_score, fabrication_risk,
+                          verification_status, angle, parent_id, strategy,
+                          expansion_depth, iteration, row_type
+                   FROM conditions
+                   ORDER BY id ASC"""
+            ).fetchall()
         cols = [
             "id", "fact", "source_url", "source_type", "confidence",
             "trust_score", "novelty_score", "specificity_score",
@@ -740,7 +748,8 @@ class ConditionStore:
             params.append(angle)
         query += f" ORDER BY confidence DESC, id ASC LIMIT {int(limit)}"
 
-        rows = self.conn.execute(query, params).fetchall()
+        with self._lock:
+            rows = self.conn.execute(query, params).fetchall()
         cols = [
             "id", "fact", "source_url", "source_type", "confidence",
             "angle", "iteration", "verification_status",
@@ -749,15 +758,16 @@ class ConditionStore:
 
     def get_contradictions(self) -> list[dict[str, Any]]:
         """Return all contradiction pairs."""
-        rows = self.conn.execute(
-            """SELECT c1.id, c1.fact, c1.confidence,
-                      c2.id, c2.fact, c2.confidence
-               FROM conditions c1
-               JOIN conditions c2 ON c1.contradiction_partner = c2.id
-               WHERE c1.contradiction_flag = TRUE
-                 AND c1.id < c2.id
-               ORDER BY c1.id ASC"""
-        ).fetchall()
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT c1.id, c1.fact, c1.confidence,
+                          c2.id, c2.fact, c2.confidence
+                   FROM conditions c1
+                   JOIN conditions c2 ON c1.contradiction_partner = c2.id
+                   WHERE c1.contradiction_flag = TRUE
+                     AND c1.id < c2.id
+                   ORDER BY c1.id ASC"""
+            ).fetchall()
         result = []
         for c1_id, c1_fact, c1_conf, c2_id, c2_fact, c2_conf in rows:
             result.append({
@@ -768,13 +778,14 @@ class ConditionStore:
 
     def get_expansion_hints(self) -> list[dict[str, Any]]:
         """Return unfulfilled expansion hints."""
-        rows = self.conn.execute(
-            """SELECT id, fact, expansion_gap, expansion_priority, angle
-               FROM conditions
-               WHERE expansion_gap != ''
-                 AND expansion_fulfilled = FALSE
-               ORDER BY expansion_priority DESC"""
-        ).fetchall()
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT id, fact, expansion_gap, expansion_priority, angle
+                   FROM conditions
+                   WHERE expansion_gap != ''
+                     AND expansion_fulfilled = FALSE
+                   ORDER BY expansion_priority DESC"""
+            ).fetchall()
         cols = ["id", "fact", "expansion_gap", "expansion_priority", "angle"]
         return [dict(zip(cols, r)) for r in rows]
 
@@ -784,7 +795,8 @@ class ConditionStore:
 
     def close(self) -> None:
         """Close the DuckDB connection."""
-        try:
-            self.conn.close()
-        except Exception:
-            pass
+        with self._lock:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
