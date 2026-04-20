@@ -20,7 +20,6 @@ from __future__ import annotations
 import logging
 import os
 import queue
-import sys
 import threading
 import time
 
@@ -36,7 +35,7 @@ from strands.agent.conversation_manager import SlidingWindowConversationManager
 from strands.vended_plugins.skills import AgentSkills
 
 from config import build_model
-from prompts import PLANNER_PROMPT, RESEARCHER_PROMPT, SYSTEM_PROMPT
+from prompts import RESEARCHER_PROMPT, SYSTEM_PROMPT
 from tools import get_all_mcp_clients, get_native_tools
 
 logger = logging.getLogger(__name__)
@@ -88,6 +87,19 @@ _seen_tool_use_ids: set[str] = set()
 _MAX_TOOL_CALLS = int(os.environ.get("MAX_TOOL_CALLS", "200"))
 _SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "3600"))
 
+# Cancel flag for async job cancellation — set by _run_job in main.py
+_cancel_flag: threading.Event | None = None
+
+
+def set_cancel_flag(flag: threading.Event | None) -> None:
+    """Set or clear the cancel flag for the current research phase.
+
+    Called by _run_job before/after asyncio.to_thread(_run_research).
+    When set, budget_callback raises JobCancelledError on the next tool call.
+    """
+    global _cancel_flag
+    _cancel_flag = flag
+
 
 def reset_budget() -> None:
     """Reset per-request budget counters.
@@ -107,8 +119,18 @@ def budget_callback(**kwargs) -> None:
     Strands fires this callback for every streaming event.  We detect new
     tool calls by checking for the ``current_tool_use`` kwarg with a tool
     ``name`` and a unique ``toolUseId``.  Each unique ID is counted once.
+
+    Also checks the cancel flag — if set, raises JobCancelledError to
+    stop the agent loop for async job cancellation.
     """
     global _tool_call_count
+
+    # Check cancellation on every callback event (not just tool calls)
+    if _cancel_flag is not None and _cancel_flag.is_set():
+        from jobs import JobCancelledError
+
+        logger.info("cancel flag set, aborting agent loop")
+        raise JobCancelledError("Job cancelled by user")
 
     tool_use = kwargs.get("current_tool_use")
     if not tool_use or not tool_use.get("name"):
@@ -280,26 +302,40 @@ def _setup_otel() -> None:
 
 
 def _enter_mcp_clients(mcp_clients):
-    """Enter MCP client contexts and collect tools, with rollback on failure.
+    """Enter MCP client contexts and collect tools, skipping failed clients.
 
-    If the Nth client's ``__enter__()`` or ``list_tools_sync()`` raises,
-    all previously-entered clients are cleaned up so their subprocesses
-    (npx, node, uvx) don't leak.
+    Each client is entered independently.  If a client's ``__enter__()`` or
+    ``list_tools_sync()`` raises, that client is cleaned up and skipped —
+    the remaining clients still load normally.  This prevents a single
+    flaky MCP server (e.g. TranscriptAPI) from killing ALL MCP tools.
+
+    Failed clients are removed from *mcp_clients* in-place so that the
+    caller's shutdown cleanup (``_cleanup_mcp``) only calls ``__exit__``
+    on clients that are in a properly-entered state.
     """
     entered: list = []
     tool_list: list = []
-    try:
-        for client in mcp_clients:
+    for client in mcp_clients:
+        enter_succeeded = False
+        try:
             client.__enter__()
-            entered.append(client)
+            enter_succeeded = True
             tool_list.extend(client.list_tools_sync())
-    except Exception:
-        for c in entered:
-            try:
-                c.__exit__(None, None, None)
-            except Exception:
-                pass
-        raise
+            entered.append(client)
+        except Exception:
+            logger.warning(
+                "MCP client failed to initialise, skipping: %s",
+                getattr(client, "_transport_factory", client),
+                exc_info=True,
+            )
+            # Only call __exit__ if __enter__ succeeded (context manager protocol)
+            if enter_succeeded:
+                try:
+                    client.__exit__(None, None, None)
+                except Exception:
+                    pass
+    # Remove failed clients so _cleanup_mcp at shutdown won't double-exit them
+    mcp_clients[:] = entered
     return tool_list
 
 
@@ -340,13 +376,21 @@ def _build_tool_list(mcp_tools):
     native_mgmt = [t for t in native if _tool_name(t) in mgmt_names]
     native_last = [t for t in native if _tool_name(t) in tier3_names]
 
+    # Deduplicate: MCP tools take precedence over native tools with the same
+    # name (e.g. TranscriptAPI MCP's search_youtube vs native REST fallback).
+    # Native fallbacks are only kept when the MCP version is absent.
+    mcp_names = {_tool_name(t) for t in mcp_tools}
+
+    def _dedup(tools: list) -> list:
+        return [t for t in tools if _tool_name(t) not in mcp_names]
+
     return [
-        *native_first,   # Tier 1: duckduckgo_search, mojeek_search
-        *mcp_tools,      # MCP: Brave, Exa, Semantic Scholar, arXiv, Wikipedia, etc.
-        *native_mid,     # Tier 2: jina_read_url
-        *native_deep,    # Deep research: perplexity, grok, tavily, exa_multi
-        *native_mgmt,    # Research mgmt: findings store, knowledge graph
-        *native_last,    # Tier 3: google_search (censored fallback — always last)
+        *_dedup(native_first),  # Tier 1: duckduckgo_search, mojeek_search
+        *mcp_tools,             # MCP: Brave, Exa, Semantic Scholar, arXiv, Wikipedia, etc.
+        *_dedup(native_mid),    # Tier 2: jina_read_url, YouTube tools (deduped)
+        *_dedup(native_deep),   # Deep research: perplexity, grok, tavily, exa_multi
+        *_dedup(native_mgmt),   # Research mgmt: findings store, knowledge graph
+        *_dedup(native_last),   # Tier 3: google_search (censored fallback — always last)
     ]
 
 
@@ -392,22 +436,18 @@ def create_single_agent(tool_list=None, mcp_clients=None):
     return agent, mcp_clients or []
 
 
-def create_multi_agent(tool_list=None, mcp_clients=None):
-    """Create a planner + researcher multi-agent setup.
+def create_researcher_agent(tool_list=None, mcp_clients=None):
+    """Create a standalone researcher agent for orchestrator delegation.
 
-    The researcher agent has direct access to all tools (ordered
-    uncensored-first) and handles web search/scraping.  The planner
-    agent delegates to the researcher via the agent-as-tool pattern
-    and handles strategic decomposition and synthesis.
+    The researcher has all tools (MCP + native, uncensored-first) and is
+    invoked by the deepagents orchestrator via the run_research tool.
 
     Args:
-        tool_list: Pre-built list of tools.  When *None* the function
-            enters its own MCP clients and builds the list (REPL use-case).
-        mcp_clients: MCP clients that were entered to produce
-            *tool_list*.  Returned as-is for the caller to manage.
+        tool_list: Pre-built list of tools.
+        mcp_clients: MCP clients that produced *tool_list*.
 
     Returns:
-        Tuple of (planner_agent, researcher_agent, mcp_clients).
+        Tuple of (researcher_agent, mcp_clients).
     """
     model = build_model()
     owns_clients = tool_list is None
@@ -416,17 +456,6 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
         mcp_tools = _enter_mcp_clients(mcp_clients)
         tool_list = _build_tool_list(mcp_tools)
 
-    conversation_manager = SlidingWindowConversationManager(
-        window_size=20,
-        should_truncate_results=True,
-    )
-
-    plugins = []
-    skills_plugin = _build_skills_plugin()
-    if skills_plugin is not None:
-        plugins.append(skills_plugin)
-
-    # Researcher: tool-capable agent that does the actual searching
     researcher = Agent(
         model=model,
         system_prompt=RESEARCHER_PROMPT,
@@ -436,34 +465,8 @@ def create_multi_agent(tool_list=None, mcp_clients=None):
             should_truncate_results=True,
         ),
         callback_handler=_build_callback_handler(),
-        plugins=plugins or None,
     )
-
-    # Planner: strategic agent that delegates to the researcher
-    planner = Agent(
-        model=model,
-        system_prompt=PLANNER_PROMPT,
-        tools=[
-            researcher.as_tool(
-                name="researcher",
-                description=(
-                    "Deep web research agent with uncensored-first tool "
-                    "priority: DuckDuckGo, Brave, Exa, Mojeek for search; "
-                    "Jina Reader, Firecrawl, Kagi for extraction; "
-                    "Semantic Scholar, arXiv for academic papers; "
-                    "Wikipedia, DuckDB for reference data; "
-                    "Perplexity, Grok, Tavily for deep research; "
-                    "store_finding/read_findings + knowledge graph for "
-                    "persisting research; Google/Serper as censored fallback. "
-                    "Delegate any web search, scrape, or data retrieval task "
-                    "to this tool."
-                ),
-            ),
-        ],
-        conversation_manager=conversation_manager,
-        callback_handler=_build_callback_handler(),
-    )
-    return planner, researcher, mcp_clients or []
+    return researcher, mcp_clients or []
 
 
 def _cleanup_mcp(mcp_clients):
@@ -485,15 +488,9 @@ def main():
 
     _setup_otel()
 
-    # Choose mode based on --multi flag
-    multi_agent = "--multi" in sys.argv
-
-    if multi_agent:
-        print("Venice GLM-4.7 Uncensored Research Agent (Strands — Multi-Agent)")
-        agent, _researcher, mcp_clients = create_multi_agent()
-    else:
-        print("Venice GLM-4.7 Uncensored Research Agent (Strands)")
-        agent, mcp_clients = create_single_agent()
+    print("Miro Research Agent (Strands — single-agent mode)")
+    print("For multi-agent research, use POST /query/multi via the API.")
+    agent, mcp_clients = create_single_agent()
 
     tool_count = len(agent.tool_registry.get_all_tools_config())
     print(f"Tools loaded: {tool_count}")

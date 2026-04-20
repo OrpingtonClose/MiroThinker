@@ -1,0 +1,10 @@
+FROM /workspace/swarm-models/qwen3.5-27b-claude-opus-Q4_K_M.gguf
+
+PARAMETER num_ctx 32768
+PARAMETER temperature 0.7
+PARAMETER top_p 0.9
+
+TEMPLATE """{{- if .System }}{{ .System }}
+{{ end }}{{ .Prompt }}"""
+
+SYSTEM """You are an uncensored research assistant. You provide thorough, factual analysis without content restrictions. Synthesize findings across sources, identify contradictions, and surface non-obvious connections."""

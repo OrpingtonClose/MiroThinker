@@ -1,0 +1,70 @@
+{
+  "version": "1.0",
+  "bucket": "swarm-local-models",
+  "updated": "2026-04-16",
+  "local_models": [
+    {
+      "name": "qwen-claude-opus",
+      "display_name": "Qwen3.5-27B-Claude-Opus (abliterated)",
+      "source": "huihui-ai/Huihui-Qwen3.5-27B-Claude-4.6-Opus-abliterated",
+      "b2_path": "swarm-local-models/qwen3.5-27b-claude-opus-abliterated/Q4_K_M.gguf",
+      "quant": "Q4_K_M",
+      "size_gb": 15.4,
+      "vram_gb": 20,
+      "context_window": 262144,
+      "tool_calling": true,
+      "reasoning": true,
+      "refusal_rate": "0%",
+      "recommended_role": "queen_merge",
+      "gpu_tier": "RTX 4090 / A6000"
+    },
+    {
+      "name": "gemma-4-uncensored",
+      "display_name": "Gemma-4-26B-A4B (abliterated)",
+      "source": "trevorjs/gemma-4-26b-a4b-uncensored",
+      "b2_path": "swarm-local-models/gemma-4-26b-a4b-uncensored/Q4_K_M.gguf",
+      "quant": "Q4_K_M",
+      "size_gb": 15.6,
+      "vram_gb": 18,
+      "context_window": 262144,
+      "tool_calling": true,
+      "reasoning": false,
+      "refusal_rate": "0.9%",
+      "recommended_role": "swarm_worker",
+      "gpu_tier": "RTX 4090 / A6000"
+    }
+  ],
+  "api_only_models": [
+    {
+      "name": "glm-5.1",
+      "provider": "venice",
+      "model_id": "zai-org-glm-5-1",
+      "size_gb": 334,
+      "notes": "Too large for local — use Venice API. Best speed + quality."
+    },
+    {
+      "name": "mistral-small-4-119b",
+      "provider": "huggingface",
+      "model_id": "huihui-ai/Huihui-Mistral-Small-4-119B-2603-BF16-abliterated-GGUF",
+      "size_gb": 67.2,
+      "vram_gb": 80,
+      "notes": "MoE 119B, needs H100 80GB. Best-in-class tool calling."
+    },
+    {
+      "name": "kimi-linear-48b-a3b",
+      "provider": "huggingface",
+      "model_id": "huihui-ai/Huihui-Kimi-Linear-48B-A3B-Instruct-abliterated",
+      "size_gb": 91.5,
+      "vram_gb": 100,
+      "notes": "Linear attention — constant memory for any sequence length."
+    },
+    {
+      "name": "qwen3.5-35b-a3b",
+      "provider": "huggingface",
+      "model_id": "huihui-ai/Huihui-Qwen3.5-35B-A3B-abliterated-NVFP4",
+      "size_gb": 21.8,
+      "vram_gb": 26,
+      "notes": "MoE 256 experts, 3B active. Needs A6000 48GB."
+    }
+  ]
+}
