@@ -524,7 +524,8 @@ def youtube_download_transcript(
     2. youtube-transcript-api direct (pure Python, same IP constraints)
     3. youtube-transcript-api via proxy (residential IP bypass)
     4. TranscriptAPI.com (cloud-friendly, paid API)
-    5. Whisper audio transcription (slowest, last resort)
+    5. Whisper audio transcription (slowest, last resort — only in this tool,
+       not in youtube_bulk_transcribe)
 
     All transcripts are cached for instant retrieval on subsequent calls.
 
@@ -1258,7 +1259,9 @@ def youtube_bulk_transcribe(
     """Download transcripts for multiple YouTube videos at once.
 
     Uses the same multi-backend cascade as youtube_download_transcript
-    (yt-dlp → youtube-transcript-api → proxy → TranscriptAPI → Whisper) for each video.
+    (yt-dlp → youtube-transcript-api → proxy → TranscriptAPI) for each video.
+    Note: does NOT include the Whisper audio fallback — use
+    youtube_download_transcript individually for failed videos if Whisper is needed.
 
     Use this after youtube_search or youtube_channel_list to bulk-transcribe
     selected videos. Results are cached for future sessions.
