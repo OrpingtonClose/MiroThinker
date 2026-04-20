@@ -777,6 +777,11 @@ async def _run_job(job: "jobs.JobState") -> None:
         except asyncio.TimeoutError:
             logger.warning("job_id=<%s> | gossip final round timed out after 600s", job.job_id)
             gossip_task.cancel()
+        except Exception:
+            logger.warning(
+                "job_id=<%s> | gossip loop failed (non-fatal, research complete)",
+                job.job_id, exc_info=True,
+            )
 
         # ── Build final report from ConditionStore ────────────────
         report = store.build_report(user_query=job.query)
