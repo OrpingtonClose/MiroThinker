@@ -433,6 +433,8 @@ def create_single_agent(tool_list=None, mcp_clients=None, user_query=None):
         mcp_tools = _enter_mcp_clients(mcp_clients)
         censored_tools = _enter_mcp_clients(censored_clients)
         tool_list = _build_tool_list(mcp_tools, censored_tools)
+        # Merge so caller's _cleanup_mcp closes all entered clients
+        mcp_clients.extend(censored_clients)
 
     conversation_manager = SlidingWindowConversationManager(
         window_size=20,
@@ -484,6 +486,8 @@ def create_researcher_agent(tool_list=None, mcp_clients=None, user_query=None):
         mcp_tools = _enter_mcp_clients(mcp_clients)
         censored_tools = _enter_mcp_clients(censored_clients)
         tool_list = _build_tool_list(mcp_tools, censored_tools)
+        # Merge so caller's _cleanup_mcp closes all entered clients
+        mcp_clients.extend(censored_clients)
 
     researcher = Agent(
         model=model,

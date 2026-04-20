@@ -352,6 +352,7 @@ async def lifespan(app: FastAPI):
     cleanup_task.cancel()
     from agent import _cleanup_mcp
     _cleanup_mcp(_mcp_clients)
+    _cleanup_mcp(_censored_mcp_clients)
     logger.info("MCP connections closed")
 
 
