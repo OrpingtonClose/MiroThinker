@@ -45,6 +45,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -1107,7 +1108,7 @@ async def _openai_multi(
 
 
 class EvalRequest(BaseModel):
-    suite: str = Field(
+    suite: Literal["offline", "integ", "judge", "all"] = Field(
         default="offline",
         description="Which eval suite to run: 'offline', 'integ', 'judge', or 'all'",
     )
