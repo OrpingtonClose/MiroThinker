@@ -8,12 +8,20 @@ happened at each phase of the swarm pipeline.  Entries are immutable
 records with parent pointers, forming a DAG from final reports back to
 raw corpus sections.
 
-Two implementations:
-- ``InMemoryLineageStore``: Default, keeps entries in a list.  Useful for
-  inspection after a run, serialization to JSON, or feeding into the ADK
-  CorpusStore.
-- ADK CorpusStore adapter (external): Converts entries to AtomicConditions
-  and ingests them via ``ingest_raw()`` for full Flock scoring.
+Implementations:
+
+- ``InMemoryLineageStore``: lightweight fallback, keeps entries in a list.
+  Useful for standalone swarm runs, testing, inspection after a run, and
+  JSON serialization.  Pure in-memory — no external dependencies.
+- ``apps.strands-agent.corpus.ConditionStore`` and
+  ``apps.adk-agent.models.corpus_store.CorpusStore``: the DuckDB-backed
+  research corpora now expose a native ``emit()`` that satisfies this
+  protocol.  Passing one as ``SwarmConfig(lineage_store=...)`` unifies
+  swarm provenance, research findings, thoughts, and synthesis reports
+  into a single queryable store (see their ``get_by_phase()``,
+  ``get_by_angle()``, and ``get_lineage_chain()`` helpers).  Prefer this
+  for production — ``InMemoryLineageStore`` is intended as the
+  dependency-free fallback.
 
 Usage:
     store = InMemoryLineageStore()
