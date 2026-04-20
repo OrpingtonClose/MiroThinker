@@ -134,30 +134,54 @@ def _extract_usage(metrics_summary: dict | None) -> dict[str, int]:
 
 _research_lock = threading.Lock()
 
+# Per-job cancel event (threading.Event) bridged from asyncio cancel_event.
+# Set via _set_job_cancel_event() in _run_job, read by run_research.
+import contextvars
+_job_cancel_event: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
+    "_job_cancel_event", default=None,
+)
 
-def _invoke_researcher(task: str) -> str:
+
+def _invoke_researcher(
+    task: str,
+    cancel_event: threading.Event | None = None,
+) -> str:
     """Run the Strands researcher agent on a task (sync, holds lock).
 
-    Returns raw research text. Caller (orchestrator) ingests into
-    ConditionStore separately.
+    Args:
+        task: Research task description.
+        cancel_event: Threading event bridged from the job's asyncio
+            cancel_event. When set, budget_callback raises
+            JobCancelledError on the next tool call.
+
+    Returns:
+        Raw research text.
+
+    Raises:
+        jobs.JobCancelledError: If the cancel_event is set during research.
     """
     if _researcher_agent is None:
         return "(researcher agent not initialised)"
 
-    from agent import reset_budget, stream_capture
+    from agent import reset_budget, set_cancel_flag, stream_capture
+    from jobs import JobCancelledError
 
     with _research_lock:
         _researcher_agent.messages.clear()
         reset_budget()
+        set_cancel_flag(cancel_event)
         stream_capture.activate()
         try:
             response = _researcher_agent(task)
             return str(response)
+        except JobCancelledError:
+            raise  # Propagate cancellation to caller
         except Exception as exc:
             logger.exception("researcher agent error")
             return f"(research failed: {exc})"
         finally:
             stream_capture.deactivate()
+            set_cancel_flag(None)
 
 
 def run_research(task: str) -> str:
@@ -183,7 +207,7 @@ def run_research(task: str) -> str:
     """
     from corpus_tools import _get_store
 
-    raw_text = _invoke_researcher(task)
+    raw_text = _invoke_researcher(task, cancel_event=_job_cancel_event.get())
 
     # Ingest into ConditionStore (no truncation, no string concat)
     store = _get_store()
@@ -492,6 +516,7 @@ async def _run_job(job: "jobs.JobState") -> None:
     """
     from corpus import ConditionStore
     from corpus_tools import set_current_store
+    from jobs import JobCancelledError
     from langchain_core.messages import HumanMessage
 
     job.status = "running"
@@ -504,6 +529,17 @@ async def _run_job(job: "jobs.JobState") -> None:
     # Per-job ConditionStore (DuckDB, in-memory)
     store = ConditionStore()
     set_current_store(store)
+
+    # Cancel bridge: asyncio Event → threading Event for Strands budget_callback
+    cancel_threading = threading.Event()
+    _job_cancel_event.set(cancel_threading)
+
+    async def _cancel_bridge() -> None:
+        """Bridge job's asyncio cancel_event to threading.Event."""
+        await job.cancel_event.wait()
+        cancel_threading.set()
+
+    cancel_bridge_task = asyncio.create_task(_cancel_bridge())
 
     try:
         # Stream events from the orchestrator
@@ -617,6 +653,11 @@ async def _run_job(job: "jobs.JobState") -> None:
             "corpus_stats": store.count_by_type(),
         })
 
+    except JobCancelledError:
+        logger.info("job_id=<%s> | job cancelled by user", job.job_id)
+        job.status = "cancelled"
+        job.finished_at = time.time()
+        job.emit({"type": "job_cancelled", "reason": "user_requested"})
     except Exception as exc:
         logger.exception("job_id=<%s> | job failed", job.job_id)
         job.status = "failed"
@@ -627,6 +668,8 @@ async def _run_job(job: "jobs.JobState") -> None:
             "error": str(exc),
         })
     finally:
+        cancel_bridge_task.cancel()
+        _job_cancel_event.set(None)
         store.close()
 
 
