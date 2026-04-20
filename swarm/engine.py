@@ -190,12 +190,19 @@ class GossipSwarm:
         self,
         corpus: str,
         query: str,
+        on_event: "Callable[[dict], Awaitable[None]] | None" = None,
+        cancel_event: "asyncio.Event | None" = None,
     ) -> SwarmResult:
         """Run the full gossip swarm pipeline on the given corpus.
 
         Args:
             corpus: The full text corpus to synthesize.
             query: The user's research query.
+            on_event: Optional async callback for streaming progress events.
+                Called with structured dicts at each phase boundary and
+                gossip round completion.
+            cancel_event: Optional asyncio.Event checked between phases
+                and gossip rounds.  If set, returns a partial result.
 
         Returns:
             SwarmResult with the final synthesis, metrics, and intermediate data.
@@ -204,6 +211,18 @@ class GossipSwarm:
         metrics = SwarmMetrics()
         metrics.gossip_rounds_configured = self.config.gossip_rounds
         config = self.config
+
+        async def _emit_event(event: dict) -> None:
+            """Emit a progress event if a callback is configured."""
+            if on_event is not None:
+                try:
+                    await on_event(event)
+                except Exception:
+                    logger.debug("on_event callback failed, continuing")
+
+        def _is_cancelled() -> bool:
+            """Check if cancellation has been requested."""
+            return cancel_event is not None and cancel_event.is_set()
 
         # ── Phase 0: Corpus Analysis ─────────────────────────────────
         phase_start = time.monotonic()
@@ -275,6 +294,19 @@ class GossipSwarm:
             len(assignments), [a.angle for a in assignments],
         )
 
+        await _emit_event({
+            "type": "swarm_phase",
+            "phase": "corpus_analysis",
+            "sections": len(sections),
+            "angles": [a.angle for a in assignments],
+            "workers": len(assignments),
+            "elapsed_s": round(metrics.phase_times["corpus_analysis"], 1),
+        })
+
+        if _is_cancelled():
+            metrics.total_elapsed_s = time.monotonic() - t0
+            return SwarmResult(synthesis="[cancelled]", metrics=metrics)
+
         # Lineage: emit corpus analysis entries
         corpus_entry_id = _lid()
         self._emit(LineageEntry(
@@ -339,6 +371,23 @@ class GossipSwarm:
             "map_phase_s=<%.1f>, workers=<%d> | map phase complete",
             metrics.phase_times["map"], len(assignments),
         )
+
+        await _emit_event({
+            "type": "swarm_phase",
+            "phase": "map_complete",
+            "workers": len(assignments),
+            "elapsed_s": round(metrics.phase_times["map"], 1),
+        })
+
+        if _is_cancelled():
+            metrics.total_elapsed_s = time.monotonic() - t0
+            worker_summaries = {a.angle: a.summary for a in assignments}
+            return SwarmResult(
+                synthesis="[cancelled after map phase]",
+                metrics=metrics,
+                worker_summaries=worker_summaries,
+                angles_detected=[a.angle for a in assignments],
+            )
 
         # ── Phase 2: Gossip Rounds (parallel, adaptive) ─────────────
         phase_start = time.monotonic()
@@ -432,6 +481,28 @@ class GossipSwarm:
                 gossip_round, gossip_failures, gain,
             )
 
+            await _emit_event({
+                "type": "gossip_round",
+                "round": gossip_round,
+                "total_rounds": config.gossip_rounds,
+                "info_gain": round(gain, 4),
+                "failures": gossip_failures,
+                "elapsed_s": round(time.monotonic() - phase_start, 1),
+            })
+
+            # Check cancellation between gossip rounds
+            if _is_cancelled():
+                metrics.gossip_rounds_executed = rounds_executed
+                metrics.phase_times["gossip"] = time.monotonic() - phase_start
+                metrics.total_elapsed_s = time.monotonic() - t0
+                worker_summaries = {a.angle: a.summary for a in assignments}
+                return SwarmResult(
+                    synthesis=f"[cancelled after gossip round {gossip_round}]",
+                    metrics=metrics,
+                    worker_summaries=worker_summaries,
+                    angles_detected=[a.angle for a in assignments],
+                )
+
             # Adaptive stopping: check convergence
             # Only after min_gossip_rounds (ensure workers get enough cross-referencing)
             # Skip if ANY failures — failed workers have unchanged summaries which
@@ -498,6 +569,29 @@ class GossipSwarm:
                 "serendipity_chars=<%d> | serendipity bridge complete",
                 len(serendipity_insights),
             )
+
+            await _emit_event({
+                "type": "swarm_phase",
+                "phase": "serendipity",
+                "chars": len(serendipity_insights),
+                "elapsed_s": round(metrics.phase_times.get("serendipity", 0), 1),
+            })
+
+        # Check cancellation before queen merge
+        if _is_cancelled():
+            metrics.total_elapsed_s = time.monotonic() - t0
+            return SwarmResult(
+                synthesis="[cancelled before queen merge]",
+                metrics=metrics,
+                worker_summaries=worker_summaries,
+                serendipity_insights=serendipity_insights,
+                angles_detected=[a.angle for a in assignments],
+            )
+
+        await _emit_event({
+            "type": "swarm_phase",
+            "phase": "queen_merge_start",
+        })
 
         # ── Phase 4: Dual Output (parallel) ──────────────────────────
         # Build both reports simultaneously — they share the same inputs
@@ -578,6 +672,14 @@ class GossipSwarm:
                 "report_type": "knowledge",
             },
         ))
+
+        await _emit_event({
+            "type": "swarm_phase",
+            "phase": "queen_merge_complete",
+            "user_chars": len(user_report),
+            "knowledge_chars": len(knowledge_report),
+            "elapsed_s": round(metrics.phase_times["queen_merge"], 1),
+        })
 
         logger.info(
             "llm_calls=<%d>, elapsed_s=<%.1f>, workers=<%d>, gossip_rounds=<%d>, "

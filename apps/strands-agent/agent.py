@@ -88,6 +88,19 @@ _seen_tool_use_ids: set[str] = set()
 _MAX_TOOL_CALLS = int(os.environ.get("MAX_TOOL_CALLS", "200"))
 _SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "3600"))
 
+# Cancel flag for async job cancellation — set by _run_job in main.py
+_cancel_flag: threading.Event | None = None
+
+
+def set_cancel_flag(flag: threading.Event | None) -> None:
+    """Set or clear the cancel flag for the current research phase.
+
+    Called by _run_job before/after asyncio.to_thread(_run_research).
+    When set, budget_callback raises JobCancelledError on the next tool call.
+    """
+    global _cancel_flag
+    _cancel_flag = flag
+
 
 def reset_budget() -> None:
     """Reset per-request budget counters.
@@ -107,8 +120,18 @@ def budget_callback(**kwargs) -> None:
     Strands fires this callback for every streaming event.  We detect new
     tool calls by checking for the ``current_tool_use`` kwarg with a tool
     ``name`` and a unique ``toolUseId``.  Each unique ID is counted once.
+
+    Also checks the cancel flag — if set, raises JobCancelledError to
+    stop the agent loop for async job cancellation.
     """
     global _tool_call_count
+
+    # Check cancellation on every callback event (not just tool calls)
+    if _cancel_flag is not None and _cancel_flag.is_set():
+        from jobs import JobCancelledError
+
+        logger.info("cancel flag set, aborting agent loop")
+        raise JobCancelledError("Job cancelled by user")
 
     tool_use = kwargs.get("current_tool_use")
     if not tool_use or not tool_use.get("name"):
