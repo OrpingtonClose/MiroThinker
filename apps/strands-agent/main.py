@@ -252,13 +252,15 @@ async def lifespan(app: FastAPI):
 
     # Enter MCP clients and build combined tool list (uncensored-first)
     try:
-        _mcp_clients = get_all_mcp_clients()
+        _mcp_clients, _censored_mcp_clients = get_all_mcp_clients()
         mcp_tools = _enter_mcp_clients(_mcp_clients)
-        _search_tools = _build_tool_list(mcp_tools)
+        censored_mcp_tools = _enter_mcp_clients(_censored_mcp_clients)
+        _search_tools = _build_tool_list(mcp_tools, censored_mcp_tools)
     except Exception:
         logger.exception("failed to initialise MCP tools")
         _search_tools = _build_tool_list([])
         _mcp_clients = []
+        _censored_mcp_clients = []
 
     # Single agent (for /query endpoint — simple single-turn)
     try:
@@ -286,13 +288,16 @@ async def lifespan(app: FastAPI):
                 "thoroughly and exhaustively. Use every available tool. "
                 "Search in multiple languages if relevant.\n\n"
                 "Tool priority (uncensored-first):\n"
-                "1. TranscriptAPI: search_youtube, get_youtube_transcript, "
+                "1. Forums: forum_search, forum_deep_dive — practitioner "
+                "knowledge from MesoRx, EliteFitness, international forums\n"
+                "2. TranscriptAPI: search_youtube, get_youtube_transcript, "
                 "search_channel_videos\n"
-                "2. Uncensored web: duckduckgo_search, brave_search\n"
-                "3. Academic: semantic_scholar_search, arxiv_search\n"
-                "4. Deep research: perplexity_search, grok_search\n"
-                "5. Community: reddit_search\n"
-                "6. General web: google_search (last resort)\n\n"
+                "3. Uncensored web: duckduckgo_search, brave_search\n"
+                "4. Academic: semantic_scholar_search, arxiv_search\n"
+                "5. Deep research: perplexity_search, grok_search\n"
+                "6. Community: reddit_search\n"
+                "7. Censorship-sensitive (last resort): google_search, "
+                "exa_search — these reject health/PED queries\n\n"
                 "Return a comprehensive raw research report with ALL "
                 "data gathered. Include specific numbers, protocols, "
                 "dosages, bloodwork values, and source URLs."

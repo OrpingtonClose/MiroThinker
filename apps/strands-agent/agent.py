@@ -339,24 +339,30 @@ def _enter_mcp_clients(mcp_clients):
     return tool_list
 
 
-def _build_tool_list(mcp_tools):
+def _build_tool_list(mcp_tools, censored_mcp_tools=None):
     """Assemble the full tool list with uncensored-first ordering.
 
     Tool ordering matters — LLMs naturally prefer tools listed earlier.
-    Order: Tier 1 uncensored natives → MCP tools (Brave, Exa, Semantic
-    Scholar, arXiv, Wikipedia, etc.) → Tier 2 extraction → Deep research
-    → Research management → Tier 3 censored fallback.
+    Order: Tier 1 uncensored natives → uncensored MCP tools (Brave,
+    Semantic Scholar, arXiv, Wikipedia, etc.) → Tier 2 extraction →
+    Deep research → Research management → Tier 3 censorship-sensitive
+    (Google, Exa MCP, exa_multi_search).
 
     Args:
-        mcp_tools: Tools collected from MCP clients via list_tools_sync().
+        mcp_tools: Tools collected from uncensored MCP clients.
+        censored_mcp_tools: Tools from censorship-sensitive MCP clients
+            (e.g. Exa). Placed last alongside Tier 3 natives.
 
     Returns:
         Combined tool list ordered for uncensored-first preference.
     """
+    if censored_mcp_tools is None:
+        censored_mcp_tools = []
+
     native = get_native_tools()
     from tools import (
+        NATIVE_TOOLS_CENSORED,
         NATIVE_TOOLS_TIER1,
-        NATIVE_TOOLS_TIER3,
         NATIVE_TOOLS_DEEP_RESEARCH,
         NATIVE_TOOLS_RESEARCH_MGMT,
     )
@@ -365,32 +371,34 @@ def _build_tool_list(mcp_tools):
         return t.tool_name if hasattr(t, "tool_name") else t.__name__
 
     tier1_names = {_tool_name(t) for t in NATIVE_TOOLS_TIER1}
-    tier3_names = {_tool_name(t) for t in NATIVE_TOOLS_TIER3}
+    censored_names = {_tool_name(t) for t in NATIVE_TOOLS_CENSORED}
     deep_names = {_tool_name(t) for t in NATIVE_TOOLS_DEEP_RESEARCH}
     mgmt_names = {_tool_name(t) for t in NATIVE_TOOLS_RESEARCH_MGMT}
-    special_names = tier1_names | tier3_names | deep_names | mgmt_names
+    special_names = tier1_names | censored_names | deep_names | mgmt_names
 
     native_first = [t for t in native if _tool_name(t) in tier1_names]
     native_mid = [t for t in native if _tool_name(t) not in special_names]  # Tier 2 only
     native_deep = [t for t in native if _tool_name(t) in deep_names]
     native_mgmt = [t for t in native if _tool_name(t) in mgmt_names]
-    native_last = [t for t in native if _tool_name(t) in tier3_names]
+    native_censored = [t for t in native if _tool_name(t) in censored_names]
 
     # Deduplicate: MCP tools take precedence over native tools with the same
     # name (e.g. TranscriptAPI MCP's search_youtube vs native REST fallback).
     # Native fallbacks are only kept when the MCP version is absent.
-    mcp_names = {_tool_name(t) for t in mcp_tools}
+    all_mcp = mcp_tools + censored_mcp_tools
+    mcp_names = {_tool_name(t) for t in all_mcp}
 
     def _dedup(tools: list) -> list:
         return [t for t in tools if _tool_name(t) not in mcp_names]
 
     return [
-        *_dedup(native_first),  # Tier 1: duckduckgo_search, mojeek_search
-        *mcp_tools,             # MCP: Brave, Exa, Semantic Scholar, arXiv, Wikipedia, etc.
-        *_dedup(native_mid),    # Tier 2: jina_read_url, YouTube tools (deduped)
-        *_dedup(native_deep),   # Deep research: perplexity, grok, tavily, exa_multi
-        *_dedup(native_mgmt),   # Research mgmt: findings store, knowledge graph
-        *_dedup(native_last),   # Tier 3: google_search (censored fallback — always last)
+        *_dedup(native_first),    # Tier 1: duckduckgo_search, mojeek_search
+        *mcp_tools,               # Uncensored MCP: Brave, Semantic Scholar, arXiv, etc.
+        *_dedup(native_mid),      # Tier 2: jina_read_url, YouTube tools (deduped)
+        *_dedup(native_deep),     # Deep research: perplexity, grok, tavily
+        *_dedup(native_mgmt),     # Research mgmt: findings store, knowledge graph
+        *_dedup(native_censored), # Censorship-sensitive native: google_search, exa_multi
+        *censored_mcp_tools,      # Censorship-sensitive MCP: Exa (rejects health/PED)
     ]
 
 
@@ -421,9 +429,10 @@ def create_single_agent(tool_list=None, mcp_clients=None, user_query=None):
         model = build_model()
     owns_clients = tool_list is None
     if owns_clients:
-        mcp_clients = get_all_mcp_clients()
+        mcp_clients, censored_clients = get_all_mcp_clients()
         mcp_tools = _enter_mcp_clients(mcp_clients)
-        tool_list = _build_tool_list(mcp_tools)
+        censored_tools = _enter_mcp_clients(censored_clients)
+        tool_list = _build_tool_list(mcp_tools, censored_tools)
 
     conversation_manager = SlidingWindowConversationManager(
         window_size=20,
@@ -471,9 +480,10 @@ def create_researcher_agent(tool_list=None, mcp_clients=None, user_query=None):
         model = build_model()
     owns_clients = tool_list is None
     if owns_clients:
-        mcp_clients = get_all_mcp_clients()
+        mcp_clients, censored_clients = get_all_mcp_clients()
         mcp_tools = _enter_mcp_clients(mcp_clients)
-        tool_list = _build_tool_list(mcp_tools)
+        censored_tools = _enter_mcp_clients(censored_clients)
+        tool_list = _build_tool_list(mcp_tools, censored_tools)
 
     researcher = Agent(
         model=model,
