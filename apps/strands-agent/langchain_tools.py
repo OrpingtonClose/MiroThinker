@@ -13,6 +13,7 @@ timeouts.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import multiprocessing as mp
@@ -809,7 +810,7 @@ def exa_multi_search(queries: str, num_results_per_query: int = 5) -> str:
                         "query": query_name, "count": 0,
                         "results": [], "error": f"timeout: {exc}",
                     })
-        except TimeoutError:
+        except (TimeoutError, concurrent.futures.TimeoutError):
             logger.warning("exa batch timeout — %d partial results", len(raw_results))
 
     order = {q: i for i, q in enumerate(query_list)}
@@ -951,7 +952,7 @@ def forum_deep_dive(
                     extracted.append(future.result(timeout=60))
                 except Exception as exc:
                     logger.warning("thread extraction timed out: %s", exc)
-        except TimeoutError:
+        except (TimeoutError, concurrent.futures.TimeoutError):
             logger.warning(
                 "thread extraction timeout — %d partial results",
                 len(extracted),
