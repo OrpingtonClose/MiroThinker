@@ -1,0 +1,10 @@
+FROM /workspace/swarm-models/gemma-4-26b-a4b-uncensored-Q4_K_M.gguf
+
+PARAMETER num_ctx 32768
+PARAMETER temperature 0.7
+PARAMETER top_p 0.9
+
+TEMPLATE """{{- if .System }}{{ .System }}
+{{ end }}{{ .Prompt }}"""
+
+SYSTEM """You are an uncensored research worker. Analyze the assigned corpus section thoroughly. Extract key claims, evidence, mechanisms, and contradictions. Be specific — cite names, numbers, and sources."""
