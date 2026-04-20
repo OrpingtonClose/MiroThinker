@@ -23,6 +23,7 @@ import queue
 import threading
 import time
 
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -80,90 +81,116 @@ def _build_skills_plugin() -> AgentSkills | None:
 # when ``current_tool_use`` is present with a tool ``name`` and we haven't
 # already counted that specific invocation (keyed by ``toolUseId``).
 # Similar to the budget gating in apps/adk-agent/.env.example lines 43-44.
+#
+# Each research task in the AsyncTaskPool owns its own ResearcherBudget
+# instance so parallel researchers don't clobber each other's counters.
+# The single-agent /query path uses a module-level ``_default_budget``
+# that is reset per request (see ``reset_budget``).
 
-_session_start = time.time()
-_tool_call_count = 0
-_seen_tool_use_ids: set[str] = set()
 _MAX_TOOL_CALLS = int(os.environ.get("MAX_TOOL_CALLS", "200"))
 _SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "3600"))
 
-# Cancel flag for async job cancellation — set by _run_job in main.py
-_cancel_flag: threading.Event | None = None
+
+@dataclass
+class ResearcherBudget:
+    """Per-instance budget + cancellation state for a researcher agent.
+
+    The ``callback`` bound method plugs into Strands' composite callback
+    handler. It is safe to use multiple instances concurrently from
+    different threads — each instance's counters and ``seen_tool_use_ids``
+    set are independent.
+    """
+
+    session_start: float = field(default_factory=time.time)
+    tool_call_count: int = 0
+    seen_tool_use_ids: set[str] = field(default_factory=set)
+    max_tool_calls: int = field(default_factory=lambda: _MAX_TOOL_CALLS)
+    session_timeout: int = field(default_factory=lambda: _SESSION_TIMEOUT)
+    cancel_flag: threading.Event | None = None
+
+    def reset(self) -> None:
+        """Reset counters so a long-lived holder can reuse this budget."""
+        self.session_start = time.time()
+        self.tool_call_count = 0
+        self.seen_tool_use_ids = set()
+
+    def callback(self, **kwargs) -> None:
+        """Callback-handler guardrail that counts actual tool invocations.
+
+        Strands fires this callback for every streaming event. We detect
+        new tool calls by checking for ``current_tool_use`` with a tool
+        ``name`` and a unique ``toolUseId`` — each unique ID counted once.
+
+        Also checks ``cancel_flag`` on every event (not just tool calls)
+        so the agent loop can be aborted promptly during async job
+        cancellation.
+        """
+        if self.cancel_flag is not None and self.cancel_flag.is_set():
+            from jobs import JobCancelledError
+
+            logger.info("cancel flag set, aborting agent loop")
+            raise JobCancelledError("Job cancelled by user")
+
+        tool_use = kwargs.get("current_tool_use")
+        if not tool_use or not tool_use.get("name"):
+            return
+
+        tool_use_id = tool_use.get("toolUseId", "")
+        if tool_use_id in self.seen_tool_use_ids:
+            return
+        self.seen_tool_use_ids.add(tool_use_id)
+
+        self.tool_call_count += 1
+
+        elapsed = time.time() - self.session_start
+        if elapsed > self.session_timeout:
+            logger.warning(
+                "Session timeout reached (%.0fs > %ds). Consider wrapping up.",
+                elapsed,
+                self.session_timeout,
+            )
+
+        if self.tool_call_count > self.max_tool_calls:
+            logger.warning(
+                "Tool call budget exceeded (%d > %d). Consider wrapping up.",
+                self.tool_call_count,
+                self.max_tool_calls,
+            )
+
+        if self.tool_call_count % 10 == 0:
+            logger.info(
+                "Budget: %d tool calls, %.0fs elapsed",
+                self.tool_call_count,
+                elapsed,
+            )
+
+
+# Default budget used by the single-agent /query path. Research tasks
+# get their own ``ResearcherBudget`` via ``create_researcher_instance``.
+_default_budget = ResearcherBudget()
 
 
 def set_cancel_flag(flag: threading.Event | None) -> None:
-    """Set or clear the cancel flag for the current research phase.
+    """Set or clear the cancel flag on the default (single-agent) budget.
 
-    Called by _run_job before/after asyncio.to_thread(_run_research).
-    When set, budget_callback raises JobCancelledError on the next tool call.
+    Task-pool researcher instances carry their own ``cancel_flag`` via
+    their own ``ResearcherBudget`` and do not touch this function.
     """
-    global _cancel_flag
-    _cancel_flag = flag
+    _default_budget.cancel_flag = flag
 
 
 def reset_budget() -> None:
-    """Reset per-request budget counters.
+    """Reset counters on the default (single-agent) budget.
 
-    Call this before each HTTP request so that budget globals don't
-    accumulate across requests in a long-running server process.
+    Call this before each HTTP request on the single-agent path so
+    budgets don't accumulate across requests in a long-running server.
     """
-    global _session_start, _tool_call_count, _seen_tool_use_ids
-    _session_start = time.time()
-    _tool_call_count = 0
-    _seen_tool_use_ids = set()
+    _default_budget.reset()
 
 
 def budget_callback(**kwargs) -> None:
-    """Callback-handler guardrail that counts actual tool invocations.
-
-    Strands fires this callback for every streaming event.  We detect new
-    tool calls by checking for the ``current_tool_use`` kwarg with a tool
-    ``name`` and a unique ``toolUseId``.  Each unique ID is counted once.
-
-    Also checks the cancel flag — if set, raises JobCancelledError to
-    stop the agent loop for async job cancellation.
-    """
-    global _tool_call_count
-
-    # Check cancellation on every callback event (not just tool calls)
-    if _cancel_flag is not None and _cancel_flag.is_set():
-        from jobs import JobCancelledError
-
-        logger.info("cancel flag set, aborting agent loop")
-        raise JobCancelledError("Job cancelled by user")
-
-    tool_use = kwargs.get("current_tool_use")
-    if not tool_use or not tool_use.get("name"):
-        return
-
-    tool_use_id = tool_use.get("toolUseId", "")
-    if tool_use_id in _seen_tool_use_ids:
-        return
-    _seen_tool_use_ids.add(tool_use_id)
-
-    _tool_call_count += 1
-
-    elapsed = time.time() - _session_start
-    if elapsed > _SESSION_TIMEOUT:
-        logger.warning(
-            "Session timeout reached (%.0fs > %ds). Consider wrapping up.",
-            elapsed,
-            _SESSION_TIMEOUT,
-        )
-
-    if _tool_call_count > _MAX_TOOL_CALLS:
-        logger.warning(
-            "Tool call budget exceeded (%d > %d). Consider wrapping up.",
-            _tool_call_count,
-            _MAX_TOOL_CALLS,
-        )
-
-    if _tool_call_count % 10 == 0:
-        logger.info(
-            "Budget: %d tool calls, %.0fs elapsed",
-            _tool_call_count,
-            elapsed,
-        )
+    """Module-level wrapper so the default budget plugs into callback handlers."""
+    _default_budget.callback(**kwargs)
 
 
 class StreamCapture:
@@ -261,9 +288,27 @@ class StreamCapture:
 stream_capture = StreamCapture()
 
 
-def _build_callback_handler():
-    """Build a composite callback handler: printing + streaming capture + budget guardrail."""
-    return CompositeCallbackHandler(PrintingCallbackHandler(), stream_capture, budget_callback)
+def _build_callback_handler(
+    budget: ResearcherBudget | None = None,
+    include_stream_capture: bool = True,
+):
+    """Build a composite callback handler: printing + streaming capture + budget guardrail.
+
+    When ``budget`` is None the module-level ``_default_budget`` is used
+    (single-agent path). Research-task instances pass their own budget
+    so parallel researchers don't share counters.
+
+    When ``include_stream_capture`` is False the module-level
+    ``stream_capture`` singleton is omitted. Pool research tasks must
+    set this to ``False`` so their streaming tokens do not leak into a
+    concurrent ``/query`` SSE response.
+    """
+    budget_cb = budget.callback if budget is not None else budget_callback
+    handlers = [PrintingCallbackHandler()]
+    if include_stream_capture:
+        handlers.append(stream_capture)
+    handlers.append(budget_cb)
+    return CompositeCallbackHandler(*handlers)
 
 
 # ── OpenTelemetry setup ──────────────────────────────────────────────
@@ -457,49 +502,51 @@ def create_single_agent(tool_list=None, mcp_clients=None, user_query=None):
     return agent, mcp_clients or []
 
 
-def create_researcher_agent(tool_list=None, mcp_clients=None, user_query=None):
-    """Create a standalone researcher agent for orchestrator delegation.
+def create_researcher_instance(
+    tools: list,
+    budget: ResearcherBudget | None = None,
+    user_query: str | None = None,
+):
+    """Create a fresh researcher Agent with its own budget + conversation history.
 
-    The researcher has all tools (MCP + native, uncensored-first) and is
-    invoked by the deepagents orchestrator via the run_research tool.
-
-    When *user_query* is provided and MODEL_SELECTION=runtime, the model
-    is selected via runtime censorship probing.
+    Used by ``AsyncTaskPool.launch_research`` to spawn an isolated
+    researcher per task. MCP clients are NOT created here — they are
+    shared connection pools entered once at startup; the caller passes
+    their already-bound tool list.
 
     Args:
-        tool_list: Pre-built list of tools.
-        mcp_clients: MCP clients that produced *tool_list*.
+        tools: Shared tool list (MCP + native), built once at startup.
+        budget: Per-task budget tracker. A fresh one is created when None.
         user_query: Optional query for runtime model selection.
 
     Returns:
-        Tuple of (researcher_agent, mcp_clients).
+        A Strands ``Agent`` with RESEARCHER_PROMPT, an independent
+        conversation history, and a composite callback handler bound
+        to the provided ``budget``.
     """
+    if budget is None:
+        budget = ResearcherBudget()
+
     if user_query:
         model, selection = build_model_with_selection(user_query)
         if selection:
             logger.info("Runtime model selected: %s", selection.label)
     else:
         model = build_model()
-    owns_clients = tool_list is None
-    if owns_clients:
-        mcp_clients, censored_clients = get_all_mcp_clients()
-        mcp_tools = _enter_mcp_clients(mcp_clients)
-        censored_tools = _enter_mcp_clients(censored_clients)
-        tool_list = _build_tool_list(mcp_tools, censored_tools)
-        # Merge so caller's _cleanup_mcp closes all entered clients
-        mcp_clients.extend(censored_clients)
 
-    researcher = Agent(
+    agent = Agent(
         model=model,
         system_prompt=RESEARCHER_PROMPT,
-        tools=tool_list,
+        tools=list(tools),
         conversation_manager=SlidingWindowConversationManager(
             window_size=15,
             should_truncate_results=True,
         ),
-        callback_handler=_build_callback_handler(),
+        callback_handler=_build_callback_handler(
+            budget, include_stream_capture=False,
+        ),
     )
-    return researcher, mcp_clients or []
+    return agent
 
 
 def _cleanup_mcp(mcp_clients):

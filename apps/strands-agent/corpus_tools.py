@@ -5,17 +5,20 @@ replacing truncated string passing between research and gossip phases.
 
 The orchestrator uses these to decide:
 - What to research next (gap analysis)
-- When to trigger gossip synthesis (coverage assessment)
+- When to launch gossip synthesis (coverage assessment)
 - When to stop (sufficient coverage)
 - What contradictions need resolution
 
 All tools read from the active ConditionStore via contextvars
 (per-asyncio-task isolation for concurrent jobs).
+
+Gossip synthesis itself now runs asynchronously on the AsyncTaskPool
+(see ``task_tools.launch_gossip``); the former blocking
+``trigger_gossip`` has been removed.
 """
 
 from __future__ import annotations
 
-import asyncio
 import contextvars
 import logging
 from typing import Any
@@ -188,79 +191,6 @@ def get_gap_analysis() -> str:
     syntheses = store.get_all_syntheses()
     latest_iteration = max((s["iteration"] for s in syntheses), default=0)
     return store.query_gaps(user_query="", iteration=latest_iteration)
-
-
-def trigger_gossip(iteration: int = 0) -> str:
-    """Run gossip swarm synthesis on the current corpus.
-
-    Exports the corpus from ConditionStore as structured text,
-    runs the 6-worker gossip swarm with 3 rounds, and stores
-    the full synthesis back as row_type='synthesis'.
-
-    No truncation. Full report text stored and returned.
-
-    Args:
-        iteration: Current iteration number for tracking.
-
-    Returns:
-        The full gossip synthesis report and quality metrics.
-    """
-    import concurrent.futures
-
-    from swarm_bridge import gossip_synthesize
-
-    store = _get_store()
-    corpus_text = store.export_for_swarm(min_confidence=0.0)
-
-    if "(corpus is empty" in corpus_text:
-        return "Cannot run gossip synthesis — corpus is empty. Run research first."
-
-    # gossip_synthesize is async; run it in a fresh event loop in a thread
-    # because we're called from a sync tool context inside LangGraph
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop and loop.is_running():
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            result = pool.submit(
-                asyncio.run,
-                gossip_synthesize(corpus=corpus_text, query=store.user_query),
-            ).result()
-    else:
-        result = asyncio.run(
-            gossip_synthesize(corpus=corpus_text, query=store.user_query),
-        )
-
-    # Store full synthesis in ConditionStore (NO truncation)
-    metrics_dict: dict[str, Any] = {}
-    if hasattr(result, "metrics"):
-        m = result.metrics
-        metrics_dict = {
-            "info_gain": list(getattr(m, "gossip_info_gain", [])),
-            "llm_calls": getattr(m, "total_llm_calls", 0),
-            "elapsed_seconds": getattr(m, "total_elapsed_s", 0),
-        }
-
-    store.admit_synthesis(
-        report=result.user_report,
-        iteration=iteration,
-        metrics=metrics_dict,
-    )
-
-    lines = [
-        f"=== GOSSIP SYNTHESIS (iteration {iteration}) ===",
-        f"Corpus size: {store.count()} conditions",
-        f"Report length: {len(result.user_report)} chars",
-    ]
-    if metrics_dict.get("info_gain"):
-        lines.append(f"Info gain per round: {metrics_dict['info_gain']}")
-    if metrics_dict.get("llm_calls"):
-        lines.append(f"LLM calls: {metrics_dict['llm_calls']}")
-
-    lines.append(f"\n{result.user_report}")
-    return "\n".join(lines)
 
 
 def build_report(include_sources: bool = True) -> str:
