@@ -2,7 +2,7 @@
 # This source code is licensed under the Apache 2.0 License.
 
 """
-FastAPI server for Miro — deepagents orchestrator + gossip swarm.
+FastAPI server for Miro — deepagents orchestrator + continuous gossip swarm.
 
 Exposes the research orchestrator as an HTTP API with:
 - POST /query — single-turn query (single-agent mode, Strands)
@@ -19,14 +19,18 @@ Exposes the research orchestrator as an HTTP API with:
 - GET  /logs/{request_id} — human-readable activity log for a request
 
 Architecture:
-- /query/multi uses the deepagents orchestrator (create_deep_agent) which:
-  - Plans research strategy via TodoListMiddleware
-  - Loads OSINT methodology on-demand via SkillsMiddleware (no regex)
-  - Compacts context via SummarizationMiddleware (no truncation)
-  - Delegates research to the Strands researcher agent via run_research tool
-  - Ingests research into ConditionStore (DuckDB) — no string concatenation
-  - Triggers gossip synthesis via trigger_gossip tool
-  - Builds final report from corpus state via build_report tool
+- /query/multi runs TWO CONCURRENT TASKS sharing one ConditionStore:
+  1. Research task (deepagents orchestrator):
+     - Plans strategy via TodoListMiddleware
+     - Loads OSINT methodology on-demand via SkillsMiddleware
+     - Delegates to Strands researcher via run_research tool
+     - Ingests findings into ConditionStore as they arrive
+  2. Gossip task (_gossip_loop):
+     - Polls ConditionStore continuously for new findings
+     - Triggers gossip synthesis when 15+ findings accumulate (or 5min quiet)
+     - Stores full synthesis reports back into the corpus
+     - Orchestrator sees gossip reports via corpus tools (query_corpus, get_gap_analysis)
+  The ConditionStore IS the feedback loop — no explicit handoffs.
 - /query uses the Strands single agent (simple queries, all tools direct)
 """
 
@@ -315,17 +319,17 @@ async def lifespan(app: FastAPI):
             query_corpus,
             assess_coverage,
             get_gap_analysis,
-            trigger_gossip,
             build_report,
         )
 
         _skills_dir = Path(__file__).parent / "skills"
         skills_paths = [str(_skills_dir)] if _skills_dir.is_dir() else None
 
+        # trigger_gossip removed — gossip runs continuously via _gossip_loop
         _orchestrator = create_orchestrator(
             research_fn=run_research,
             corpus_tools=[query_corpus, assess_coverage, get_gap_analysis],
-            gossip_tools=[trigger_gossip, build_report],
+            gossip_tools=[build_report],
             skills_paths=skills_paths,
         )
         logger.info("deepagents orchestrator ready")
@@ -475,18 +479,17 @@ def query_single(req: QueryRequest):
 
 @app.post("/query/multi", response_model=JobCreateResponse)
 async def query_multi(req: QueryRequest):
-    """Create an async research job using the deepagents orchestrator.
+    """Create an async research job with continuous gossip synthesis.
 
     Returns a job ID immediately. Stream real-time progress via
     ``/query/multi/{job_id}/stream``.
 
-    The orchestrator:
-    1. Plans research strategy (TodoListMiddleware)
-    2. Delegates to researcher via run_research tool
-    3. Ingests findings into ConditionStore (DuckDB)
-    4. Triggers gossip synthesis when corpus is sufficient
-    5. Reads gap analysis and iterates until coverage is adequate
-    6. Builds final report from corpus state
+    Launches two concurrent tasks sharing one ConditionStore:
+    1. Research: orchestrator plans and delegates to researcher
+    2. Gossip: polls for new findings, synthesizes continuously
+
+    Gossip reports feed back into the corpus — the orchestrator sees
+    them via query_corpus/get_gap_analysis and adjusts research.
     """
     from jobs import job_store
 
@@ -505,14 +508,171 @@ async def query_multi(req: QueryRequest):
     )
 
 
+async def _gossip_loop(
+    job: "jobs.JobState",
+    store: "ConditionStore",
+    cancel_event: "asyncio.Event",
+) -> None:
+    """Continuous gossip loop running alongside research.
+
+    Polls the ConditionStore for new findings and triggers gossip
+    synthesis rounds as material accumulates. Gossip reports are
+    stored back into the corpus, where the orchestrator's tools
+    (query_corpus, get_gap_analysis) surface them to the researcher
+    on the next iteration — closing the feedback loop.
+
+    Trigger logic (hybrid):
+    - 15+ new findings since last round, OR
+    - 5 minutes elapsed since last round (catch stale gaps), OR
+    - research_complete flag set (one final comprehensive round)
+
+    Args:
+        job: The running job state (for SSE event emission).
+        store: Shared ConditionStore (thread-safe via RLock).
+        cancel_event: Checked every poll cycle; stops the loop.
+    """
+    from swarm_bridge import gossip_synthesize
+
+    POLL_INTERVAL_S = 30  # Check every 30 seconds
+    MIN_NEW_FINDINGS = 15  # Trigger threshold
+    MAX_QUIET_S = 300  # 5 minutes without gossip → force a round
+    gossip_round = 0
+    last_gossip_max_id = 0
+    last_gossip_time = time.time()
+
+    logger.info("job_id=<%s> | gossip loop started", job.job_id)
+
+    while not cancel_event.is_set():
+        # Sleep in short increments so we can react to cancellation
+        for _ in range(POLL_INTERVAL_S):
+            if cancel_event.is_set() or store.research_complete:
+                break
+            await asyncio.sleep(1.0)
+
+        if cancel_event.is_set():
+            break
+
+        # Check if enough new material has accumulated
+        new_count = store.count_since(last_gossip_max_id)
+        elapsed_since_gossip = time.time() - last_gossip_time
+        is_final = store.research_complete
+
+        should_trigger = (
+            new_count >= MIN_NEW_FINDINGS
+            or (elapsed_since_gossip >= MAX_QUIET_S and new_count > 0)
+            or (is_final and new_count > 0)
+        )
+
+        if not should_trigger:
+            if is_final:
+                break  # research done, no new material
+            continue
+
+        # Export corpus and run gossip
+        corpus_text = store.export_for_swarm(min_confidence=0.0)
+        if "(corpus is empty" in corpus_text:
+            if is_final:
+                break
+            continue
+
+        gossip_round += 1
+        current_max_id = store.max_id()
+        logger.info(
+            "job_id=<%s>, gossip_round=<%d>, new_findings=<%d>, is_final=<%s> "
+            "| triggering gossip synthesis",
+            job.job_id, gossip_round, new_count, is_final,
+        )
+
+        job.current_phase = "gossip"
+        job.emit({
+            "type": "gossip_start",
+            "gossip_round": gossip_round,
+            "new_findings_since_last": new_count,
+            "corpus_size": store.count(),
+            "is_final_round": is_final,
+        })
+
+        async def _on_gossip_event(e: dict) -> None:
+            job.event_queue.put_nowait(e)
+
+        try:
+            result = await gossip_synthesize(
+                corpus=corpus_text,
+                query=store.user_query,
+                on_event=_on_gossip_event,
+                cancel_event=cancel_event,
+            )
+
+            # Store full synthesis (no truncation)
+            metrics_dict: dict = {}
+            if hasattr(result, "metrics"):
+                m = result.metrics
+                metrics_dict = {
+                    "info_gain": list(getattr(m, "gossip_info_gain", [])),
+                    "llm_calls": getattr(m, "total_llm_calls", 0),
+                    "elapsed_seconds": getattr(m, "total_elapsed_s", 0),
+                }
+
+            store.admit_synthesis(
+                report=result.user_report,
+                iteration=gossip_round,
+                metrics=metrics_dict,
+            )
+
+            last_gossip_max_id = current_max_id
+            last_gossip_time = time.time()
+
+            job.emit({
+                "type": "intermediate_report",
+                "gossip_round": gossip_round,
+                "report": result.user_report,
+                "report_chars": len(result.user_report),
+                "info_gain": metrics_dict.get("info_gain", []),
+                "is_final_round": is_final,
+            })
+            job.emit({
+                "type": "gossip_end",
+                "gossip_round": gossip_round,
+            })
+
+            logger.info(
+                "job_id=<%s>, gossip_round=<%d>, report_chars=<%d> "
+                "| gossip synthesis complete",
+                job.job_id, gossip_round, len(result.user_report),
+            )
+
+        except Exception:
+            logger.exception(
+                "job_id=<%s>, gossip_round=<%d> | gossip synthesis failed",
+                job.job_id, gossip_round,
+            )
+            job.emit({
+                "type": "gossip_error",
+                "gossip_round": gossip_round,
+                "error": "gossip synthesis failed (see server logs)",
+            })
+        finally:
+            job.current_phase = "research"
+
+        if is_final:
+            break
+
+    logger.info(
+        "job_id=<%s>, total_gossip_rounds=<%d> | gossip loop ended",
+        job.job_id, gossip_round,
+    )
+
+
 async def _run_job(job: "jobs.JobState") -> None:
-    """Background task: invoke deepagents orchestrator with ConditionStore.
+    """Background task: research and gossip run concurrently.
 
-    The orchestrator handles the full research ↔ gossip feedback loop
-    internally via its tools (run_research, query_corpus, trigger_gossip,
-    build_report, etc.) and middleware (TodoList, Summarization, Skills).
+    Two concurrent async tasks share one ConditionStore:
+    - Research task: orchestrator streams events, researcher writes to store
+    - Gossip task: polls store, synthesizes when material accumulates,
+      writes reports back — which the orchestrator sees via corpus tools
 
-    Events are emitted to job.event_queue for SSE streaming.
+    The store IS the feedback loop — no explicit handoffs.
+    Events from both tasks stream to the same SSE endpoint.
     """
     from corpus import ConditionStore
     from corpus_tools import set_current_store
@@ -528,7 +688,7 @@ async def _run_job(job: "jobs.JobState") -> None:
 
     # Per-job ConditionStore (DuckDB, in-memory)
     store = ConditionStore()
-    store.user_query = job.query  # For trigger_gossip context
+    store.user_query = job.query
     set_current_store(store)
 
     # Cancel bridge: asyncio Event → threading Event for Strands budget_callback
@@ -536,16 +696,21 @@ async def _run_job(job: "jobs.JobState") -> None:
     _job_cancel_event.set(cancel_threading)
 
     async def _cancel_bridge() -> None:
-        """Bridge job's asyncio cancel_event to threading.Event."""
         await job.cancel_event.wait()
         cancel_threading.set()
 
     cancel_bridge_task = asyncio.create_task(_cancel_bridge())
 
+    # Launch continuous gossip loop alongside research
+    gossip_task = asyncio.create_task(
+        _gossip_loop(job, store, job.cancel_event)
+    )
+
     try:
-        # Stream events from the orchestrator
+        # Stream events from the orchestrator (research side)
         event_count = 0
         final_content = ""
+        job.current_phase = "research"
 
         async for event in _orchestrator.astream_events(
             {"messages": [HumanMessage(content=job.query)]},
@@ -553,14 +718,12 @@ async def _run_job(job: "jobs.JobState") -> None:
         ):
             event_count += 1
 
-            # Check cancellation
             if job.cancel_event.is_set():
                 job.status = "cancelled"
                 job.finished_at = time.time()
                 job.emit({"type": "job_cancelled", "reason": "user_requested"})
                 return
 
-            # Map LangGraph events to job events
             event_type = event.get("event", "")
             event_name = event.get("name", "")
 
@@ -581,45 +744,22 @@ async def _run_job(job: "jobs.JobState") -> None:
                     "tool_call_number": job.tool_calls,
                 })
 
-                # Detect gossip synthesis trigger
-                if event_name == "trigger_gossip":
-                    job.current_phase = "gossip"
-                    job.emit({"type": "gossip_start"})
-                elif event_name == "run_research":
+                if event_name == "run_research":
                     job.current_phase = "research"
                     job.emit({"type": "research_start"})
 
             elif event_type == "on_tool_end":
-                tool_output = event.get("data", {}).get("output", "")
-                if isinstance(tool_output, str) and len(tool_output) > 200:
-                    tool_output_summary = tool_output[:200] + "..."
-                else:
-                    tool_output_summary = str(tool_output)[:200]
-
-                # Emit intermediate report if gossip completed
-                if event_name == "trigger_gossip":
-                    job.current_phase = "idle"
-                    report_text = str(event.get("data", {}).get("output", ""))
-                    job.emit({
-                        "type": "intermediate_report",
-                        "report": report_text,
-                    })
-                    job.emit({"type": "gossip_end"})
-
-                elif event_name == "run_research":
-                    job.current_phase = "idle"
+                if event_name == "run_research":
                     job.emit({
                         "type": "research_end",
                         "tool_calls": job.tool_calls,
                     })
 
             elif event_type == "on_chat_model_stream":
-                # Capture streaming content from the orchestrator
                 chunk = event.get("data", {}).get("chunk")
                 if chunk and hasattr(chunk, "content") and chunk.content:
                     final_content += chunk.content
 
-            # Budget update every 10 tool calls (only on tool_start events)
             if event_type == "on_tool_start" and job.tool_calls > 0 and job.tool_calls % 10 == 0:
                 job.emit({
                     "type": "budget_update",
@@ -627,11 +767,25 @@ async def _run_job(job: "jobs.JobState") -> None:
                     "elapsed_s": round(time.time() - job.created_at, 1),
                 })
 
-        # ── Job complete ──────────────────────────────────────────
-        # Build final report from ConditionStore (not from string concat)
+        # ── Research complete — signal gossip for final round ─────
+        store.research_complete = True
+        logger.info("job_id=<%s> | research complete, waiting for final gossip round", job.job_id)
+
+        # Wait for gossip loop to finish its final round (with timeout)
+        try:
+            await asyncio.wait_for(gossip_task, timeout=600)
+        except asyncio.TimeoutError:
+            logger.warning("job_id=<%s> | gossip final round timed out after 600s", job.job_id)
+            gossip_task.cancel()
+        except Exception:
+            logger.warning(
+                "job_id=<%s> | gossip loop failed (non-fatal, research complete)",
+                job.job_id, exc_info=True,
+            )
+
+        # ── Build final report from ConditionStore ────────────────
         report = store.build_report(user_query=job.query)
         if not report.strip() or "(No gossip synthesis" in report:
-            # Fallback to orchestrator's final content if no synthesis ran
             report = final_content or "(no report generated)"
 
         elapsed = round(time.time() - job.created_at, 2)
@@ -669,6 +823,13 @@ async def _run_job(job: "jobs.JobState") -> None:
             "error": str(exc),
         })
     finally:
+        # Ensure gossip loop is cleaned up
+        if not gossip_task.done():
+            gossip_task.cancel()
+            try:
+                await gossip_task
+            except asyncio.CancelledError:
+                pass
         cancel_bridge_task.cancel()
         _job_cancel_event.set(None)
         store.close()

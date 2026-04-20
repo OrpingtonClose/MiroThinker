@@ -191,7 +191,13 @@ def get_gap_analysis() -> str:
 
 
 def trigger_gossip(iteration: int = 0) -> str:
-    """Run gossip swarm synthesis on the current corpus.
+    """Manually trigger gossip swarm synthesis on the current corpus.
+
+    NOTE: Gossip now runs continuously alongside research via
+    _gossip_loop in main.py. This tool is a manual override for
+    when the orchestrator wants to force an immediate synthesis
+    (e.g., before building the final report). The continuous loop
+    handles routine synthesis automatically.
 
     Exports the corpus from ConditionStore as structured text,
     runs the 6-worker gossip swarm with 3 rounds, and stores
