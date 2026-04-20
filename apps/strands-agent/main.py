@@ -404,36 +404,44 @@ def query_single(req: QueryRequest):
     )
 
 
-def _run_research(query: str) -> tuple[str, dict | None]:
-    """Phase 1: run planner+researcher to gather raw data (sync, holds lock)."""
+def _run_research_inner(query: str) -> tuple[str, dict | None]:
+    """Run planner+researcher to gather raw data. Caller must hold _agent_lock."""
     from agent import reset_budget
 
-    with _agent_lock:
-        _multi_agent.messages.clear()
-        original_prompts: dict[str, str | None] = {}
-        original_prompts["planner"] = _multi_agent.system_prompt
-        _auto_activate_skills(query, _multi_agent)
-        if _multi_researcher is not None:
-            _multi_researcher.messages.clear()
-            original_prompts["researcher"] = _multi_researcher.system_prompt
-            _auto_activate_skills(query, _multi_researcher)
-        reset_budget()
+    _multi_agent.messages.clear()
+    original_prompts: dict[str, str | None] = {}
+    original_prompts["planner"] = _multi_agent.system_prompt
+    _auto_activate_skills(query, _multi_agent)
+    if _multi_researcher is not None:
+        _multi_researcher.messages.clear()
+        original_prompts["researcher"] = _multi_researcher.system_prompt
+        _auto_activate_skills(query, _multi_researcher)
+    reset_budget()
+    try:
+        response = _multi_agent(query)
+        metrics = None
         try:
-            response = _multi_agent(query)
-            metrics = None
-            try:
-                metrics = response.metrics.get_summary()
-            except Exception:
-                pass
-        except Exception as exc:
-            logger.exception("Agent error")
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        finally:
-            if "planner" in original_prompts:
-                _multi_agent.system_prompt = original_prompts["planner"]
-            if _multi_researcher is not None and "researcher" in original_prompts:
-                _multi_researcher.system_prompt = original_prompts["researcher"]
+            metrics = response.metrics.get_summary()
+        except Exception:
+            pass
+    except Exception as exc:
+        logger.exception("Agent error")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        if "planner" in original_prompts:
+            _multi_agent.system_prompt = original_prompts["planner"]
+        if _multi_researcher is not None and "researcher" in original_prompts:
+            _multi_researcher.system_prompt = original_prompts["researcher"]
     return str(response), metrics
+
+
+def _run_research(query: str) -> tuple[str, dict | None]:
+    """Phase 1: run planner+researcher to gather raw data (sync, holds lock).
+
+    Legacy wrapper that acquires _agent_lock. Used by non-job code paths.
+    """
+    with _agent_lock:
+        return _run_research_inner(query)
 
 
 _SWARM_ITERATIONS = int(os.environ.get("SWARM_ITERATIONS", "2"))
@@ -549,32 +557,36 @@ async def _run_job(job: "jobs.JobState") -> None:
                 cancel_threading_event.set()
 
             def _sync_research():
-                set_cancel_flag(cancel_threading_event)
-                # Activate stream_capture so tool events are recorded
-                # during the research phase (StreamCapture.__call__
-                # returns early when no queue is active).
-                capture_queue = stream_capture.activate()
-                try:
-                    return _run_research(research_query)
-                finally:
-                    stream_capture.deactivate()
-                    set_cancel_flag(None)
+                # Acquire _agent_lock FIRST, then mutate shared globals.
+                # This prevents concurrent jobs from overwriting each
+                # other's cancel flag / stream capture state.
+                with _agent_lock:
+                    set_cancel_flag(cancel_threading_event)
+                    stream_capture.activate()
+                    try:
+                        return _run_research_inner(research_query)
+                    finally:
+                        stream_capture.deactivate()
+                        set_cancel_flag(None)
 
-            # Start a drain task that forwards StreamCapture events to job
+            # Start a drain task that forwards StreamCapture events to job.
+            # drain_offset tracks position within the current iteration's
+            # tool_events list (which is cleared by activate() each time).
             drain_active = True
+            drain_offset = 0
 
             async def _drain_capture():
                 """Forward tool events from StreamCapture to job event queue."""
-                loop = asyncio.get_event_loop()
+                nonlocal drain_offset
                 while drain_active:
                     try:
-                        # Poll the stream capture for tool events
                         if (
                             hasattr(stream_capture, 'tool_events')
-                            and len(stream_capture.tool_events) > job.tool_calls
+                            and len(stream_capture.tool_events) > drain_offset
                         ):
-                            new_events = stream_capture.tool_events[job.tool_calls:]
+                            new_events = stream_capture.tool_events[drain_offset:]
                             for ev in new_events:
+                                drain_offset += 1
                                 job.tool_calls += 1
                                 job.emit({
                                     "type": "tool_call",
@@ -582,7 +594,6 @@ async def _run_job(job: "jobs.JobState") -> None:
                                     "input_summary": ev.get("input", "")[:200],
                                     "tool_call_number": job.tool_calls,
                                 })
-                                # Periodic budget updates every 10 calls
                                 if job.tool_calls % 10 == 0:
                                     job.emit({
                                         "type": "budget_update",
