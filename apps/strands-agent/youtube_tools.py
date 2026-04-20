@@ -6,7 +6,7 @@ YouTube intelligence tools for the Strands research agent.
 
 Provides:
 1. Video transcript download with multi-backend cascade:
-   yt-dlp → TranscriptAPI → Bright Data (anti-block scraping)
+   yt-dlp → youtube-transcript-api → youtube-transcript-api+proxy → TranscriptAPI → Whisper
 2. YouTube search — find videos by topic query
 3. Channel search — find videos within a specific channel
 4. Bulk channel analysis (download all videos, transcribe, extract insights)
@@ -521,9 +521,11 @@ def youtube_download_transcript(
 
     Uses a multi-backend cascade for maximum reliability:
     1. yt-dlp (fastest, but blocked on some cloud IPs)
-    2. TranscriptAPI.com (cloud-friendly, paid API)
-    3. Bright Data (anti-block scraping, bypasses geo/IP restrictions)
-    4. Whisper audio transcription (slowest, last resort)
+    2. youtube-transcript-api direct (pure Python, same IP constraints)
+    3. youtube-transcript-api via proxy (residential IP bypass)
+    4. TranscriptAPI.com (cloud-friendly, paid API)
+    5. Whisper audio transcription (slowest, last resort — only in this tool,
+       not in youtube_bulk_transcribe)
 
     All transcripts are cached for instant retrieval on subsequent calls.
 
@@ -1257,7 +1259,9 @@ def youtube_bulk_transcribe(
     """Download transcripts for multiple YouTube videos at once.
 
     Uses the same multi-backend cascade as youtube_download_transcript
-    (yt-dlp → TranscriptAPI → Bright Data) for each video.
+    (yt-dlp → youtube-transcript-api → proxy → TranscriptAPI) for each video.
+    Note: does NOT include the Whisper audio fallback — use
+    youtube_download_transcript individually for failed videos if Whisper is needed.
 
     Use this after youtube_search or youtube_channel_list to bulk-transcribe
     selected videos. Results are cached for future sessions.
