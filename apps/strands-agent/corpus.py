@@ -20,9 +20,12 @@ import re
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import duckdb
+
+if TYPE_CHECKING:
+    from swarm.lineage import LineageEntry
 
 logger = logging.getLogger(__name__)
 
@@ -167,13 +170,39 @@ class ConditionStore:
                 staleness_penalty FLOAT DEFAULT 0.0,
 
                 -- For relationship rows
-                relationship_score FLOAT DEFAULT 0.0
+                relationship_score FLOAT DEFAULT 0.0,
+
+                -- Swarm lineage (unified with LineageStore)
+                phase TEXT DEFAULT '',
+                parent_ids TEXT DEFAULT ''
             )
         """)
+        # Ensure lineage columns exist on older databases (idempotent).
+        self._ensure_lineage_columns()
         # Seed next_id from existing rows
         result = self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM conditions").fetchone()
         if result:
             self._next_id = result[0] + 1
+
+    def _ensure_lineage_columns(self) -> None:
+        """Backfill phase/parent_ids columns on pre-existing databases.
+
+        Safe to call repeatedly; DuckDB's ``ADD COLUMN IF NOT EXISTS``
+        handles the idempotency.
+        """
+        for col, typedef in (
+            ("phase", "TEXT DEFAULT ''"),
+            ("parent_ids", "TEXT DEFAULT ''"),
+        ):
+            try:
+                self.conn.execute(
+                    f"ALTER TABLE conditions ADD COLUMN IF NOT EXISTS "
+                    f"{col} {typedef}"
+                )
+            except Exception:
+                # Older DuckDB versions without IF NOT EXISTS support will
+                # error on a duplicate column; swallow and continue.
+                pass
 
     # ------------------------------------------------------------------
     # Core write methods
@@ -308,6 +337,81 @@ class ConditionStore:
         if cid is None:
             raise ValueError("cannot admit empty thought")
         return cid
+
+    # ------------------------------------------------------------------
+    # Swarm LineageStore protocol (duck-typed via ``emit``)
+    # ------------------------------------------------------------------
+
+    # Mapping from swarm phase names to ``row_type`` values.  Keeps the
+    # lineage DAG visible to existing consumer-facing queries that filter
+    # on ``row_type`` (thinker/synthesiser/exports).
+    _PHASE_ROW_TYPE: dict[str, str] = {
+        "corpus_analysis": "raw",
+        "worker_synthesis": "thought",
+        "serendipity": "thought",
+        "queen_merge": "synthesis",
+        "knowledge_report": "synthesis",
+    }
+
+    @classmethod
+    def _phase_to_row_type(cls, phase: str) -> str:
+        """Resolve a swarm phase name to the ``row_type`` column value."""
+        if not phase:
+            return "thought"
+        if phase.startswith("gossip_round"):
+            return "thought"
+        return cls._PHASE_ROW_TYPE.get(phase, "thought")
+
+    def emit(self, entry: "LineageEntry") -> None:
+        """Record a :class:`swarm.lineage.LineageEntry` as a condition row.
+
+        Implements the ``LineageStore`` protocol so a ``ConditionStore``
+        instance can be passed directly as
+        ``SwarmConfig(lineage_store=...)``.  Every phase of the swarm
+        pipeline becomes a queryable row in the unified corpus.
+
+        Field mapping:
+            entry.phase       -> phase column (+ derives row_type)
+            entry.angle       -> angle
+            entry.content     -> fact
+            entry.metadata    -> strategy (JSON-serialized)
+            entry.parent_ids  -> parent_ids (JSON array of entry IDs)
+            entry.entry_id    -> source_ref (for entry_id-based lookups)
+            entry.timestamp   -> created_at (ISO8601)
+        """
+        fact = (entry.content or "").strip() or f"[{entry.phase} — empty content]"
+        row_type = self._phase_to_row_type(entry.phase)
+        try:
+            metadata_json = json.dumps(dict(entry.metadata))
+        except (TypeError, ValueError):
+            metadata_json = ""
+        parent_ids_json = json.dumps(list(entry.parent_ids))
+
+        ts = entry.timestamp
+        if isinstance(ts, (int, float)):
+            created_at = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+        else:
+            created_at = datetime.now(timezone.utc).isoformat()
+
+        with self._lock:
+            cid = self._next_id
+            self._next_id += 1
+            self.conn.execute(
+                """INSERT INTO conditions
+                   (id, fact, source_type, source_ref, row_type,
+                    consider_for_use, angle, strategy,
+                    created_at, phase, parent_ids)
+                   VALUES (?, ?, 'swarm', ?, ?, TRUE, ?, ?, ?, ?, ?)""",
+                [
+                    cid, fact, entry.entry_id, row_type,
+                    entry.angle, metadata_json,
+                    created_at, entry.phase, parent_ids_json,
+                ],
+            )
+        logger.debug(
+            "emit lineage entry #%d: phase=%s angle=%s parents=%s",
+            cid, entry.phase, entry.angle, parent_ids_json,
+        )
 
     # ------------------------------------------------------------------
     # Ingestion (raw text -> atomised conditions)
@@ -593,6 +697,54 @@ class ConditionStore:
                 for angle, cnt, avg_conf in angles:
                     lines.append(f"  [{angle}]: {cnt} findings, avg_conf={avg_conf:.2f}")
 
+            # Swarm deliberation state (gossip round 2 is the
+            # contradiction-resolution round — low info gain or
+            # unresolved contradictions surface here).
+            gossip_rows = self.conn.execute(
+                """SELECT id, phase, angle, strategy, fact
+                   FROM conditions
+                   WHERE phase LIKE 'gossip_round_%'
+                   ORDER BY id ASC"""
+            ).fetchall()
+            if gossip_rows:
+                swarm_lines: list[str] = []
+                for cid, phase, g_angle, strategy, fact in gossip_rows:
+                    # Detect unresolved contradictions in round-2 summaries.
+                    if "_2" in phase or phase.endswith("_2"):
+                        for marker in ("unresolvable", "unresolved", "contradiction"):
+                            if marker in (fact or "").lower():
+                                snippet = " ".join((fact or "").split())[:200]
+                                swarm_lines.append(
+                                    f"  [#{cid}, {phase}, angle={g_angle}]: "
+                                    f"{snippet}"
+                                )
+                                break
+
+                    # Low-info-gain rounds: metadata.info_gain stored in
+                    # the strategy JSON by the engine's _emit call.
+                    info_gain = None
+                    if strategy:
+                        try:
+                            meta = json.loads(strategy)
+                            if isinstance(meta, dict):
+                                raw_gain = meta.get("info_gain")
+                                if isinstance(raw_gain, (int, float)):
+                                    info_gain = float(raw_gain)
+                        except (TypeError, ValueError):
+                            pass
+                    if info_gain is not None and info_gain < 0.05:
+                        swarm_lines.append(
+                            f"  [#{cid}, {phase}, angle={g_angle}]: "
+                            f"Low info gain ({info_gain:.2f}) — "
+                            f"may need external data"
+                        )
+
+                if swarm_lines:
+                    lines.append(
+                        f"\n--- SWARM DELIBERATION GAPS ({len(swarm_lines)}) ---"
+                    )
+                    lines.extend(swarm_lines)
+
             return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -788,6 +940,107 @@ class ConditionStore:
             ).fetchall()
         cols = ["id", "fact", "expansion_gap", "expansion_priority", "angle"]
         return [dict(zip(cols, r)) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Lineage queries (swarm provenance)
+    # ------------------------------------------------------------------
+
+    _LINEAGE_COLUMNS: tuple[str, ...] = (
+        "id", "fact", "row_type", "angle", "phase",
+        "parent_id", "parent_ids", "strategy", "source_ref",
+        "iteration", "created_at",
+    )
+
+    def _row_to_lineage_dict(self, row: tuple) -> dict[str, Any]:
+        return dict(zip(self._LINEAGE_COLUMNS, row))
+
+    def get_by_phase(self, phase: str) -> list[dict[str, Any]]:
+        """Return condition rows whose ``phase`` matches or starts with *phase*.
+
+        Exact match is returned first, then prefix matches (so passing
+        ``"gossip_round"`` returns every gossip_round_N entry).
+        """
+        cols_sql = ", ".join(self._LINEAGE_COLUMNS)
+        with self._lock:
+            rows = self.conn.execute(
+                f"""SELECT {cols_sql} FROM conditions
+                    WHERE phase = ? OR phase LIKE ?
+                    ORDER BY id ASC""",
+                [phase, f"{phase}%"],
+            ).fetchall()
+        return [self._row_to_lineage_dict(r) for r in rows]
+
+    def get_by_angle(self, angle: str) -> list[dict[str, Any]]:
+        """Return condition rows whose ``angle`` equals *angle*."""
+        cols_sql = ", ".join(self._LINEAGE_COLUMNS)
+        with self._lock:
+            rows = self.conn.execute(
+                f"""SELECT {cols_sql} FROM conditions
+                    WHERE angle = ?
+                    ORDER BY id ASC""",
+                [angle],
+            ).fetchall()
+        return [self._row_to_lineage_dict(r) for r in rows]
+
+    def get_lineage_chain(self, condition_id: int) -> list[dict[str, Any]]:
+        """Walk the parent DAG from *condition_id* back to its root(s).
+
+        Follows both the integer ``parent_id`` FK (single parent) and the
+        JSON ``parent_ids`` array (multi-parent DAG written by
+        :meth:`emit`).  String entry IDs stored in ``parent_ids`` are
+        resolved via the ``source_ref`` column.
+
+        Returns the starting row plus every reachable ancestor in BFS
+        order (newest-first).
+        """
+        cols_sql = ", ".join(self._LINEAGE_COLUMNS)
+        chain: list[dict[str, Any]] = []
+        visited_ids: set[int] = set()
+        queue: list[int] = [condition_id]
+
+        with self._lock:
+            while queue:
+                cid = queue.pop(0)
+                if cid in visited_ids:
+                    continue
+                visited_ids.add(cid)
+                row = self.conn.execute(
+                    f"SELECT {cols_sql} FROM conditions WHERE id = ?",
+                    [cid],
+                ).fetchone()
+                if row is None:
+                    continue
+                entry = self._row_to_lineage_dict(row)
+                chain.append(entry)
+
+                # 1. Integer FK parent.
+                pid = entry.get("parent_id")
+                if isinstance(pid, int) and pid not in visited_ids:
+                    queue.append(pid)
+
+                # 2. JSON array of parent entry IDs (swarm-native).
+                raw_parents = entry.get("parent_ids") or ""
+                if raw_parents:
+                    try:
+                        parent_list = json.loads(raw_parents)
+                    except (TypeError, ValueError):
+                        parent_list = []
+                    for parent in parent_list:
+                        if isinstance(parent, int):
+                            if parent not in visited_ids:
+                                queue.append(parent)
+                        elif isinstance(parent, str) and parent:
+                            # Resolve string entry_id (e.g. "lineage-0001")
+                            # via source_ref to its integer row id.
+                            resolved = self.conn.execute(
+                                "SELECT id FROM conditions "
+                                "WHERE source_ref = ? LIMIT 1",
+                                [parent],
+                            ).fetchone()
+                            if resolved and resolved[0] not in visited_ids:
+                                queue.append(resolved[0])
+
+        return chain
 
     # ------------------------------------------------------------------
     # Cleanup
