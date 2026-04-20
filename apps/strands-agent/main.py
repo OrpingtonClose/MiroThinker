@@ -1155,7 +1155,11 @@ async def run_evals(body: EvalRequest | None = None):
     # 'all' runs everything — no filter
 
     if body.filter:
-        cmd.extend(["-k", body.filter])
+        if body.suite == "judge":
+            # Combine with existing -k llm_judge to avoid override
+            cmd[-1] = f"llm_judge and ({body.filter})"
+        else:
+            cmd.extend(["-k", body.filter])
 
     # Temp file for JSON report (delete=False so we control cleanup)
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
