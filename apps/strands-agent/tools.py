@@ -14,17 +14,19 @@ Combines:
   findings store, knowledge graph)
 
 Tools are organised into tiers:
-  Tier 1 — Uncensored search: DuckDuckGo, Brave, Exa, Mojeek, Stract,
+  Tier 1 — Uncensored search: DuckDuckGo, Brave, Mojeek, Stract,
             Yandex, Reddit
   Tier 2 — Content extraction: Jina Reader, Firecrawl, Kagi, Wayback Machine
-  Tier 3 — Censored fallback: Google/Serper
-  Deep Research — Perplexity, Grok, Tavily, Exa multi-search
+  Tier 3 — Censorship-sensitive: Google/Serper, Exa (rejects health/PED queries)
+  Deep Research — Perplexity, Grok, Tavily
   Research Mgmt — store/read findings, knowledge graph
   Preprints — bioRxiv, medRxiv, ChemRxiv, SSRN, OSF Preprints
   Research Integrity — Open Retractions, Retraction Watch
   Government — ClinicalTrials.gov, OpenFDA, CourtListener, SEC EDGAR, ICIJ
   Knowledge — OpenAlex (240M works), PubMed, Wikidata SPARQL, Google Scholar
   OSINT — Wayback CDX, IPFS, Common Crawl, IACR ePrint, Beacon Censorship
+  Forums — MesoRx, EliteFitness, Professional Muscle, AnabolicMinds,
+            T-Nation, ThinkSteroids + international (DE, PL, ES, FR, RU)
 
 Reference: apps/adk-agent/tools/mcp_tools.py, research_tools.py,
   deep_research_tools.py, knowledge_graph.py.
@@ -506,7 +508,7 @@ def similar_sites_search(domain: str) -> str:
 def google_search(query: str, max_results: int = 10) -> str:
     """Search Google via Serper API. Powerful but censored — use as fallback.
 
-    Only use this when uncensored sources (DuckDuckGo, Brave, Exa, Mojeek)
+    Only use this when uncensored sources (DuckDuckGo, Brave, Mojeek)
     don't have what you need. Requires SERPER_API_KEY.
 
     Args:
@@ -813,6 +815,11 @@ def tavily_deep_research(query: str, search_depth: str = "advanced") -> str:
 def exa_multi_search(queries: str, num_results_per_query: int = 5) -> str:
     """Run multiple Exa searches in parallel and return unified results.
 
+    CENSORSHIP WARNING: Exa rejects queries about health protocols,
+    PEDs, and certain medical topics. Prefer DuckDuckGo, Brave, or
+    Perplexity for sensitive research. Only use Exa for neutral topics
+    (companies, technology, academic subjects).
+
     Use this when you need to compare multiple topics simultaneously
     (e.g. "compare these 6 companies") or gather data on several entities
     at once. All queries run in parallel for speed.
@@ -872,8 +879,16 @@ def exa_multi_search(queries: str, num_results_per_query: int = 5) -> str:
     with ThreadPoolExecutor(max_workers=min(len(query_list), 5)) as pool:
         futures = {pool.submit(_search_one, q): q for q in query_list}
         raw_results = []
-        for future in as_completed(futures):
-            raw_results.append(future.result())
+        try:
+            for future in as_completed(futures, timeout=120):
+                try:
+                    raw_results.append(future.result(timeout=60))
+                except Exception as exc:
+                    query_name = futures.get(future, "unknown")
+                    logger.warning("exa batch search timed out for %s: %s", query_name, exc)
+                    raw_results.append({"query": query_name, "count": 0, "results": [], "error": f"timeout: {exc}"})
+        except TimeoutError:
+            logger.warning("exa batch search overall timeout — returning %d partial results", len(raw_results))
 
     # Sort to match original query order
     order = {q: i for i, q in enumerate(query_list)}
@@ -1292,10 +1307,12 @@ firecrawl_mcp = MCPClient(
     startup_timeout=_MCP_STARTUP_TIMEOUT,
 )
 
-# ── Exa MCP ──────────────────────────────────────────────────────────
+# ── Exa MCP (CENSORSHIP-SENSITIVE) ───────────────────────────────────
 # npm: exa-mcp-server  (MIT, exa-labs/exa-mcp-server)
 # Tools: web_search_exa, web_search_advanced_exa, crawling_exa,
 #   get_code_context_exa
+# WARNING: Exa rejects health/PED/sensitive queries with API errors.
+# Placed in censorship-sensitive tier — prefer Brave/DuckDuckGo/Perplexity.
 # Requires: npm install -g exa-mcp-server
 exa_mcp = MCPClient(
     lambda: stdio_client(
@@ -1470,10 +1487,15 @@ def _streamablehttp_transport(url: str, headers: dict):
 _MCP_REGISTRY = {
     "BRAVE_API_KEY": brave_mcp,
     "FIRECRAWL_API_KEY": firecrawl_mcp,
-    "EXA_API_KEY": exa_mcp,
     "KAGI_API_KEY": kagi_mcp,
     "TRANSCRIPTAPI_KEY": transcriptapi_mcp,
     "BRIGHT_DATA_API_KEY": brightdata_mcp,
+}
+
+# Censorship-sensitive MCP servers — loaded but placed last in tool list.
+# These reject certain query categories (health, PED, etc.).
+_CENSORED_MCP_REGISTRY = {
+    "EXA_API_KEY": exa_mcp,
 }
 
 # MCP servers that are free / don't require API keys — always loaded
@@ -1487,13 +1509,26 @@ _FREE_MCP_SERVERS = [
 
 
 def get_all_mcp_clients():
-    """Return list of MCP clients whose API keys are configured, plus free servers."""
+    """Return list of MCP clients whose API keys are configured, plus free servers.
+
+    Censorship-sensitive MCP servers (Exa) are included but returned
+    separately so ``_build_tool_list`` can place them last.
+
+    Returns:
+        Tuple of (uncensored_clients, censored_clients).
+    """
     clients = []
     for env_var, client in _MCP_REGISTRY.items():
         if os.environ.get(env_var):
             clients.append(client)
     clients.extend(_FREE_MCP_SERVERS)
-    return clients
+
+    censored = []
+    for env_var, client in _CENSORED_MCP_REGISTRY.items():
+        if os.environ.get(env_var):
+            censored.append(client)
+
+    return clients, censored
 
 
 # ── Native tool tier lists ───────────────────────────────────────────
@@ -1506,7 +1541,7 @@ NATIVE_TOOLS_TIER1 = [duckduckgo_search, mojeek_search, stract_search, yandex_se
 # Tier 2 content extraction tools — jina always included, wayback + archive.today always included
 NATIVE_TOOLS_TIER2 = [jina_read_url, wayback_search, wayback_fetch, archive_today_fetch]
 
-# Tier 3 censored fallback — only if API key is set
+# Tier 3 — kept for backward compat but superseded by NATIVE_TOOLS_CENSORED
 NATIVE_TOOLS_TIER3 = [google_search]
 
 # Deep research tools — gated on API keys
@@ -1514,8 +1549,11 @@ NATIVE_TOOLS_DEEP_RESEARCH = [
     perplexity_deep_research,
     grok_deep_research,
     tavily_deep_research,
-    exa_multi_search,
 ]
+
+# Censorship-sensitive tools — Exa rejects health/PED/sensitive queries
+# Placed after Tier 3 (google) so the LLM prefers uncensored alternatives.
+NATIVE_TOOLS_CENSORED = [google_search, exa_multi_search]
 
 # Research management tools — always available (no API key needed)
 NATIVE_TOOLS_RESEARCH_MGMT = [
@@ -1547,9 +1585,9 @@ def get_native_tools():
     if os.environ.get("SIMILARSITES_API_KEY"):
         tools.append(similar_sites_search)
 
-    # Tier 3 — censored fallback
+    # Censorship-sensitive — google and exa (both reject certain queries)
     if os.environ.get("SERPER_API_KEY"):
-        tools.extend(NATIVE_TOOLS_TIER3)
+        tools.append(google_search)
 
     # Deep research tools — gated on API keys
     if os.environ.get("PERPLEXITY_API_KEY"):
@@ -1558,6 +1596,8 @@ def get_native_tools():
         tools.append(grok_deep_research)
     if os.environ.get("TAVILY_API_KEY"):
         tools.append(tavily_deep_research)
+
+    # Censorship-sensitive — Exa rejects health/PED queries
     if os.environ.get("EXA_API_KEY"):
         tools.append(exa_multi_search)
 
@@ -1626,5 +1666,14 @@ def get_native_tools():
         tools.extend(OSINT_TOOLS)
     except ImportError:
         logger.debug("OSINT tools module not available — OSINT tools skipped")
+
+    # Bodybuilding & PED forum tools — MesoRx, EliteFitness, international forums.
+    # Methodology for when/how to use these is progressively disclosed via
+    # skills/forum-mining/SKILL.md and skills/osint-censored-discovery/SKILL.md.
+    try:
+        from forum_tools import FORUM_TOOLS
+        tools.extend(FORUM_TOOLS)
+    except ImportError:
+        logger.debug("Forum tools module not available — forum tools skipped")
 
     return tools

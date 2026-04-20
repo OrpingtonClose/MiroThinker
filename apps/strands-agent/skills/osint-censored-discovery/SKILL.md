@@ -23,6 +23,7 @@ allowed-tools: >
   search_youtube search_channel_videos get_channel_latest_videos
   list_channel_videos list_playlist_videos get_youtube_transcript
   youtube_harvest_channel youtube_export_corpus brave_video_search
+  forum_search forum_read_thread forum_deep_dive forum_list
   store_finding read_findings add_entity add_edge query_graph find_gaps
 ---
 
@@ -198,6 +199,16 @@ for EVERY topic — not just censored ones.
 - Anecdotes from origin countries are the highest-signal data available
 
 **Tools:**
+- `forum_search` — **PRIMARY TOOL for forums.** Parallel search across 14
+  bodybuilding/PED forums (MesoRx, EliteFitness, Professional Muscle,
+  AnabolicMinds, T-Nation, ThinkSteroids, UK-Muscle, Evolutionary +
+  international: extrem-bodybuilding.de, sfd.pl, hipertrofia.org,
+  musculacion.net, superphysique.org, ironpharm.org). Use `forums="all"`
+  for broad sweep or specify domains for targeted search.
+- `forum_deep_dive` — Search + extract full thread text in one call.
+  Use when you need deep content, not just snippets.
+- `forum_read_thread` — Extract full text from any forum thread URL.
+- `forum_list` — See all registered forums with language and description.
 - `reddit_search` / `reddit_get_subreddit_posts` / `reddit_get_post_details`
   — Direct Reddit API access. Search subreddits in ANY language.
 - `duckduckgo_search` with `site:reddit.com` — Reddit content via web index
@@ -205,6 +216,7 @@ for EVERY topic — not just censored ones.
   engines miss entirely
 - `kagi_enrich_web` — Surfaces indie/small-web forums and blogs
 - `web_search_advanced_exa` — Semantic search scoped to forum domains
+  (CENSORSHIP-SENSITIVE: rejects health/PED queries)
 - `grok_deep_research` — X/Twitter community discussion
 
 **Critical: ORIGIN-COUNTRY community mining.**
