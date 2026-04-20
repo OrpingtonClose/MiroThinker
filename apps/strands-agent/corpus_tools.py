@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import json
 import logging
 from typing import Any
 
@@ -250,13 +251,18 @@ def trigger_gossip(iteration: int = 0) -> str:
     )
 
     # Also store knowledge report if available (was previously discarded)
+    # Uses row_type='knowledge_report' to avoid polluting synthesis queries
+    # (get_synthesis and get_all_syntheses filter on row_type='synthesis')
     knowledge_report = getattr(result, "knowledge_report", "")
     if knowledge_report and knowledge_report.strip():
-        store.admit_synthesis(
-            report=knowledge_report,
-            iteration=iteration,
+        strategy = json.dumps(metrics_dict) if metrics_dict else ""
+        store.admit(
+            fact=knowledge_report,
             source_type="knowledge_report",
-            metrics=metrics_dict,
+            row_type="knowledge_report",
+            strategy=strategy,
+            iteration=iteration,
+            confidence=0.8,
         )
 
     lines = [

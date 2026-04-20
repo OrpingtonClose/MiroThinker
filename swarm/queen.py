@@ -92,7 +92,7 @@ def _build_queen_prompt(
         f"append them as a separate section.\n"
         f"  10. Identify at least one EMERGENT INSIGHT that exists in the "
         f"combined evidence but was not explicitly stated by any individual worker.\n\n"
-        f"{readability_frame}"
+        f"{readability_frame + chr(10) * 2 if readability_frame else ''}"
         f"AIM FOR 3000-6000 WORDS. Be comprehensive but not redundant. "
         f"Merge overlapping findings — do not repeat the same point from different "
         f"workers. Your synthesis must be worth more than the sum of its parts.\n\n"
