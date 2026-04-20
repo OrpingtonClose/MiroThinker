@@ -885,6 +885,7 @@ def exa_multi_search(queries: str, num_results_per_query: int = 5) -> str:
             except Exception as exc:
                 query_name = futures.get(future, "unknown")
                 logger.warning("exa batch search timed out for %s: %s", query_name, exc)
+                raw_results.append({"query": query_name, "count": 0, "results": [], "error": f"timeout: {exc}"})
 
     # Sort to match original query order
     order = {q: i for i, q in enumerate(query_list)}
