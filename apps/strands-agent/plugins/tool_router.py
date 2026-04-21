@@ -96,15 +96,22 @@ class ToolRouterPlugin(Plugin):
             + "\n\n".join(guidance_parts)
         )
 
-        # Inject as a system message prepended to the conversation
+        # Inject guidance right before the last user message so the model
+        # sees it immediately before the current query, not buried at the
+        # start of a multi-turn conversation history.
         if event.messages is not None:
             routing_message: Message = {
                 "role": "user",
                 "content": [{"text": f"[SYSTEM TOOL GUIDANCE]\n{guidance}"}],
             }
-            # Insert before the last user message so the model sees
-            # the guidance right before the actual query
-            event.messages = [routing_message] + list(event.messages)
+            msgs = list(event.messages)
+            insert_idx = len(msgs) - 1
+            for i in range(len(msgs) - 1, -1, -1):
+                if isinstance(msgs[i], dict) and msgs[i].get("role") == "user":
+                    insert_idx = i
+                    break
+            msgs.insert(insert_idx, routing_message)
+            event.messages = msgs
 
         # Auto-activate skill if one matches
         self._try_activate_skill(match)

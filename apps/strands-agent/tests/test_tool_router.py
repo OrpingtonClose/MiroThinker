@@ -64,8 +64,8 @@ class TestToolRouterPlugin:
         assert len(tools) > 0
         assert "search_pubmed" in tools or "openalex_search" in tools
 
-    def test_route_tools_injects_guidance_message(self) -> None:
-        """Test that route_tools prepends a guidance message."""
+    def test_route_tools_injects_guidance_before_last_user_message(self) -> None:
+        """Test that route_tools inserts guidance right before the last user message."""
         from unittest.mock import MagicMock
 
         event = MagicMock()
@@ -75,13 +75,37 @@ class TestToolRouterPlugin:
 
         self.plugin.route_tools(event)
 
-        # Should have prepended a routing message
+        # Should have inserted a routing message before the user message
         assert len(event.messages) == 2
-        first_msg = event.messages[0]
-        assert first_msg["role"] == "user"
-        text = first_msg["content"][0]["text"]
+        guidance_msg = event.messages[0]
+        user_msg = event.messages[1]
+        assert guidance_msg["role"] == "user"
+        text = guidance_msg["content"][0]["text"]
         assert "TOOL ROUTING" in text
         assert "ACADEMIC" in text.upper() or "openalex" in text.lower()
+        # Original user message is last
+        assert user_msg["content"][0]["text"] == "find papers on GLP-1 pharmacokinetics"
+
+    def test_route_tools_multi_turn_inserts_before_last_user(self) -> None:
+        """In multi-turn, guidance goes right before the last user message."""
+        from unittest.mock import MagicMock
+
+        event = MagicMock()
+        event.messages = [
+            {"role": "user", "content": [{"text": "old question"}]},
+            {"role": "assistant", "content": [{"text": "old response"}]},
+            {"role": "user", "content": [{"text": "find PubMed papers on insulin"}]},
+        ]
+
+        self.plugin.route_tools(event)
+
+        # Guidance should be at index 2, last user message at index 3
+        assert len(event.messages) == 4
+        assert event.messages[0]["content"][0]["text"] == "old question"
+        assert event.messages[1]["content"][0]["text"] == "old response"
+        guidance = event.messages[2]["content"][0]["text"]
+        assert "TOOL ROUTING" in guidance
+        assert event.messages[3]["content"][0]["text"] == "find PubMed papers on insulin"
 
     def test_route_tools_sets_last_match(self) -> None:
         from unittest.mock import MagicMock

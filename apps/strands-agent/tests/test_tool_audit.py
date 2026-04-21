@@ -162,14 +162,61 @@ class TestToolAuditPlugin:
         assert len(self.audit._tools_called) == 0
         assert self.audit._current_query == "new query"
 
-    def test_track_invocation_start_skips_reset_on_resume(self) -> None:
-        """Don't clear tools_called on resume iterations."""
+    def test_track_invocation_start_skips_reset_on_same_query_resume(self) -> None:
+        """Don't clear tools_called on resume with the same query."""
         self.audit._resume_count = 1
         self.audit._tools_called = {"kept_tool"}
+        self.audit._current_query = "same query"
 
         event = MagicMock()
-        event.messages = [{"role": "user", "content": [{"text": "query"}]}]
+        event.messages = [{"role": "user", "content": [{"text": "same query"}]}]
 
         self.audit.track_invocation_start(event)
 
         assert "kept_tool" in self.audit._tools_called
+        assert self.audit._resume_count == 1  # Not reset
+
+    def test_track_invocation_start_resets_on_new_query_after_resume(self) -> None:
+        """Reset state when a new query arrives on a reused agent after a resume."""
+        self.audit._resume_count = 1
+        self.audit._tools_called = {"stale_tool"}
+        self.audit._current_query = "old query"
+
+        event = MagicMock()
+        event.messages = [{"role": "user", "content": [{"text": "completely new query"}]}]
+
+        self.audit.track_invocation_start(event)
+
+        assert len(self.audit._tools_called) == 0
+        assert self.audit._resume_count == 0
+        assert self.audit._current_query == "completely new query"
+
+    def test_audit_works_after_new_query_resets_resume_count(self) -> None:
+        """Verify audit is re-enabled after a new query resets the resume count."""
+        from plugins.domains import classify_query
+
+        # Simulate: first request triggered a resume
+        self.audit._resume_count = 1
+        self.audit._current_query = "old query"
+        self.audit._tools_called = {"old_tool"}
+
+        # New request arrives on the reused agent
+        start_event = MagicMock()
+        start_event.messages = [
+            {"role": "user", "content": [{"text": "find papers on GLP-1"}]},
+        ]
+        self.audit.track_invocation_start(start_event)
+
+        # Resume count should be reset
+        assert self.audit._resume_count == 0
+
+        # Now simulate the agent only using generic search
+        self.router.last_match = classify_query("find papers on GLP-1")
+        self.audit._tools_called = {"duckduckgo_search"}
+
+        audit_event = MagicMock()
+        audit_event.resume = None
+        self.audit.audit_tool_usage(audit_event)
+
+        # Audit should trigger resume (not be permanently disabled)
+        assert audit_event.resume is not None

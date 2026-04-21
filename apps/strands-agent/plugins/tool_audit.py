@@ -86,6 +86,13 @@ class ToolAuditPlugin(Plugin):
         if self._resume_count == 0:
             self._tools_called.clear()
             self._current_query = self._extract_query(event.messages)
+        else:
+            # New request on a reused agent — detect by checking for a new query
+            new_query = self._extract_query(event.messages)
+            if new_query and new_query != self._current_query:
+                self._tools_called.clear()
+                self._resume_count = 0
+                self._current_query = new_query
 
     @hook
     def track_tool_call(self, event: AfterToolCallEvent) -> None:
