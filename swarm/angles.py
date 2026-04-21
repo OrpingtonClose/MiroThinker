@@ -463,3 +463,96 @@ def assign_workers(
         ))
 
     return assignments
+
+
+def apply_misassignment(
+    assignments: list[WorkerAssignment],
+    score_matrix: list[list[float]] | None = None,
+    ratio: float = 0.25,
+) -> list[WorkerAssignment]:
+    """Inject off-angle raw data into each worker's slice.
+
+    Each worker receives its full on-angle content PLUS a portion of the
+    most distant angle's raw content.  The off-angle data is where thread
+    discovery happens: the molecular bee reads practitioner data and its
+    worldview activates on details the practitioner overlooked.
+
+    Distance heuristic:
+    - If a score matrix is available, the most distant angle for worker i
+      is the one whose section scored LOWEST for worker i's assigned angle.
+    - Without a score matrix, use maximum positional distance (worker 0
+      pairs with worker N//2, etc.).
+
+    Args:
+        assignments: Worker assignments from ``assign_workers()``.
+        score_matrix: Optional NxM score matrix from
+            ``score_section_angle_pairs()``.  Used to determine angle distance.
+        ratio: Fraction of the distant worker's raw content to inject
+            as off-angle data.  Default 0.25 (25%).
+
+    Returns:
+        The same assignments list, mutated in-place with off-angle data
+        appended to ``raw_content``.
+    """
+    n = len(assignments)
+    if n < 2 or ratio <= 0:
+        return assignments
+
+    # Determine the most distant worker for each worker
+    distant_map: dict[int, int] = {}
+
+    if score_matrix is not None and len(score_matrix) >= n:
+        # Use score matrix: for worker i, find the worker whose angle
+        # scored LOWEST for worker i's section (= most semantically distant)
+        for i in range(n):
+            if i >= len(score_matrix):
+                distant_map[i] = (i + n // 2) % n
+                continue
+            row = score_matrix[i]
+            # Find the angle index with the lowest score (excluding own)
+            # We need to map angle indices to worker indices
+            min_score = float("inf")
+            min_worker = (i + n // 2) % n  # default fallback
+            for j in range(n):
+                if j == i:
+                    continue
+                # Use the j-th section's score row to find the least
+                # similar angle to worker i's content
+                angle_score = row[j] if j < len(row) else 5.0
+                if angle_score < min_score:
+                    min_score = angle_score
+                    min_worker = j
+            distant_map[i] = min_worker
+    else:
+        # Positional distance: pair workers maximally apart
+        for i in range(n):
+            distant_map[i] = (i + n // 2) % n
+
+    # Inject off-angle content
+    for i, assignment in enumerate(assignments):
+        distant_idx = distant_map[i]
+        distant_worker = assignments[distant_idx]
+
+        # Calculate how much off-angle content to inject
+        inject_chars = int(len(distant_worker.raw_content) * ratio)
+        if inject_chars < 100:
+            continue  # too little to be useful
+
+        off_angle_content = distant_worker.raw_content[:inject_chars]
+
+        assignment.raw_content = (
+            f"{assignment.raw_content}\n\n"
+            f"═══ OFF-ANGLE DATA (from {distant_worker.angle} specialist's "
+            f"raw findings — interpret through YOUR domain) ═══\n"
+            f"{off_angle_content}"
+        )
+        assignment.char_count = len(assignment.raw_content)
+
+    injected = sum(1 for i in range(n) if distant_map.get(i) is not None)
+    logger.info(
+        "misassignment workers=<%d>, ratio=<%.2f> | "
+        "off-angle data injected into %d workers",
+        n, ratio, injected,
+    )
+
+    return assignments
