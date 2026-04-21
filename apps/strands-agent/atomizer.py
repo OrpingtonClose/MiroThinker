@@ -162,14 +162,17 @@ def _is_junk(text: str) -> bool:
 
 def _get_atomizer_base() -> str:
     """Resolve the atomizer API base URL, defaulting to localhost vLLM."""
-    return os.environ.get("SWARM_API_BASE", "http://localhost:8000/v1")
+    return os.environ.get(
+        "SWARM_API_BASE",
+        "http://localhost:8000/v1",
+    )
 
 
 def _assert_localhost(url: str) -> None:
     """Guard: only allow localhost URLs for model endpoints."""
     parsed = urlparse(url)
     hostname = parsed.hostname or ""
-    if hostname not in ("localhost", "127.0.0.1", "::1"):
+    if hostname not in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
         msg = f"Model endpoint must be localhost, got: {url}"
         raise RuntimeError(msg)
 
