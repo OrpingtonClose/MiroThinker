@@ -264,15 +264,28 @@ async def run_swarm_test(
         config=config,
     )
 
-    # Progress callback — also updates phase contextvar so worker LLM
-    # calls logged during gossip rounds get the correct phase attribution.
+    # Progress callback — updates phase contextvar so the NEXT round's
+    # worker LLM calls get correct phase attribution.  Events fire AFTER
+    # each phase completes, so we construct the phase for the upcoming
+    # work rather than the just-finished work.
     async def on_event(event: dict) -> None:
-        phase = event.get("type", "unknown")
+        event_type = event.get("type", "unknown")
+        if event_type == "gossip_round":
+            # Event fires after round N completes; set context for round N+1
+            completed_round = event.get("round", 0)
+            _ctx_phase.set(f"gossip_round_{completed_round + 1}")
+        elif event_type == "swarm_phase":
+            phase_name = event.get("phase", "unknown")
+            _ctx_phase.set(phase_name)
+        else:
+            _ctx_phase.set(event_type)
+
         worker_id = event.get("worker", "")
-        _ctx_phase.set(phase)
         if worker_id:
             _ctx_worker.set(str(worker_id))
-        logger.info("swarm_event=<%s> | %s", phase, json.dumps(event, default=str))
+        logger.info(
+            "swarm_event=<%s> | %s", event_type, json.dumps(event, default=str),
+        )
 
     logger.info(
         "corpus_chars=<%d>, workers=<%d>, gossip_rounds=<%d>, angles=<%d> | "

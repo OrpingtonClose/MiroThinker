@@ -381,7 +381,7 @@ def enrich_angle(
                 else angle.label
             )
             import asyncio
-            results = asyncio.get_event_loop().run_until_complete(
+            results = asyncio.run(
                 _llm_relevance_filter(results, query_summary, api_base, model)
             )
 
