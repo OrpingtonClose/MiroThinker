@@ -206,6 +206,11 @@ class GossipSwarm:
 
         Returns:
             SwarmResult with the final synthesis, metrics, and intermediate data.
+
+        Notes:
+            If ``config.corpus_delta_fn`` is set, the engine calls it between
+            gossip rounds to pick up new findings from external producers.
+            The delta text is injected into each worker's next gossip prompt.
         """
         t0 = time.monotonic()
         metrics = SwarmMetrics()
@@ -392,6 +397,7 @@ class GossipSwarm:
         # ── Phase 2: Gossip Rounds (parallel, adaptive) ─────────────
         phase_start = time.monotonic()
         rounds_executed = 0
+        delta_text = ""  # corpus delta injection text for next round
 
         for gossip_round in range(1, config.gossip_rounds + 1):
             # Save previous summaries for convergence check
@@ -403,9 +409,13 @@ class GossipSwarm:
             # Get round-specific prompt modifier (if any)
             round_prompt = config.round_prompts.get(gossip_round, "")
 
+            # Capture delta_text for this round (closure-safe)
+            _round_delta = delta_text
+
             async def _bounded_gossip(
                 assignment: WorkerAssignment,
                 _round_prompt: str = round_prompt,
+                _delta: str = _round_delta,
             ) -> None:
                 nonlocal gossip_failures
                 async with sem:
@@ -435,6 +445,7 @@ class GossipSwarm:
                             max_chars=config.max_summary_chars,
                             complete_fn=self.worker_complete,
                             round_prompt=_round_prompt,
+                            delta_text=_delta,
                         )
                     except Exception:
                         gossip_failures += 1
@@ -503,6 +514,54 @@ class GossipSwarm:
                     angles_detected=[a.angle for a in assignments],
                 )
 
+            # ── Gap extraction: scan worker outputs for research gaps ──
+            gap_markers = [
+                "need more data", "cannot resolve without", "need data on",
+                "unexplained", "need bloodwork", "need practitioner",
+                "requires further", "insufficient evidence", "data gap",
+                "missing data", "no source found", "unresolved question",
+            ]
+            gaps_found: list[str] = []
+            for a in assignments:
+                for line in a.summary.split("\n"):
+                    low = line.lower()
+                    if any(marker in low for marker in gap_markers):
+                        cleaned = line.strip()
+                        if cleaned and len(cleaned) > 20:
+                            gaps_found.append(cleaned)
+            if gaps_found:
+                await _emit_event({
+                    "type": "research_gap",
+                    "gaps": gaps_found[:10],
+                    "round": gossip_round,
+                })
+                logger.info(
+                    "gossip_round=<%d>, gaps=<%d> | research gaps emitted",
+                    gossip_round, len(gaps_found),
+                )
+
+            # ── Corpus delta: fetch new findings from external producers ──
+            delta_text = ""
+            if config.corpus_delta_fn is not None:
+                try:
+                    delta_text = await config.corpus_delta_fn()
+                    if delta_text:
+                        logger.info(
+                            "gossip_round=<%d>, delta_chars=<%d> | new findings injected for next round",
+                            gossip_round, len(delta_text),
+                        )
+                        await _emit_event({
+                            "type": "corpus_delta",
+                            "round": gossip_round,
+                            "delta_chars": len(delta_text),
+                        })
+                except Exception:
+                    logger.warning(
+                        "gossip_round=<%d> | corpus_delta_fn call failed, continuing without delta",
+                        gossip_round,
+                    )
+                    delta_text = ""
+
             # Adaptive stopping: check convergence
             # Only after min_gossip_rounds (ensure workers get enough cross-referencing)
             # Skip if ANY failures — failed workers have unchanged summaries which
@@ -518,13 +577,32 @@ class GossipSwarm:
                         gossip_round, gossip_failures,
                     )
                 else:
-                    if check_convergence(current, previous, config.convergence_threshold):
+                    workers_converged = check_convergence(
+                        current, previous, config.convergence_threshold,
+                    )
+                    # Live mode: convergence requires BOTH workers agree
+                    # AND no new data arrived (convergence = silence)
+                    new_data_arrived = bool(delta_text)
+                    if workers_converged and not new_data_arrived:
                         logger.info(
-                            "gossip_round=<%d> | convergence detected, stopping early",
+                            "gossip_round=<%d> | convergence detected (workers + no new data), stopping early",
                             gossip_round,
                         )
                         metrics.gossip_converged_early = True
                         break
+                    elif workers_converged and new_data_arrived:
+                        logger.info(
+                            "gossip_round=<%d> | workers converged but new data arrived, continuing",
+                            gossip_round,
+                        )
+
+            # Hard ceiling: never exceed max_gossip_rounds
+            if gossip_round >= config.max_gossip_rounds:
+                logger.info(
+                    "gossip_round=<%d>, max=<%d> | hard ceiling reached, stopping",
+                    gossip_round, config.max_gossip_rounds,
+                )
+                break
 
         metrics.gossip_rounds_executed = rounds_executed
         metrics.phase_times["gossip"] = time.monotonic() - phase_start

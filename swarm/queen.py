@@ -1,31 +1,39 @@
 # Copyright (c) 2025 MiroMind
 # This source code is licensed under the Apache 2.0 License.
 
-"""Queen merge — combines all worker summaries into the final synthesis.
+"""Queen merge — stitches worker analyses into a single coherent document.
 
-The queen is a senior synthesis editor, not a summarizer.  Its role is
-informed by SOTA multi-agent merge techniques:
+The queen is an EDITOR, not an author.  Workers have done the deep
+reasoning, found cross-domain connections, and traced causal chains
+through multiple gossip rounds.  The queen's job is to:
 
-- **Mixture-of-Agents** (ICLR 2025, arXiv 2406.04692): The queen acts
-  as the final aggregation layer reading all previous-layer outputs.
-  It must produce a response strictly better than any individual input.
+1. ORDER worker sections into a logical narrative flow
+2. SMOOTH transitions between sections (connecting causal chains)
+3. REMOVE redundancy where workers cover the same ground
+4. PRESERVE worker voice, evidence, exact numbers, and connections
+5. CHECK for cross-section contradictions that workers didn't resolve
 
-- **Evidence hierarchy**: The queen evaluates claims by source quality,
-  cross-worker agreement, and specificity.  Consensus across 3+ workers
-  is near-certain; single-worker claims are flagged for confidence.
+Key principles:
 
-- **Contradiction resolution protocol**: When workers disagree, the queen
-  does not average -- it evaluates evidence strength, identifies the
-  methodological reason for disagreement, and either resolves or
-  explicitly preserves both positions with reasoning.
+- **Never rewrite**: Workers wrote connected analyses grounded in
+  evidence.  The queen arranges and smooths, not rewrites.
 
-- **Narrative integration**: Serendipity insights are not appended but
-  woven into the causal flow at the points where they illuminate
-  connections between specialist domains.
+- **No meta-commentary**: Never write about the document itself.
+  No "How to Read This", no "This chapter covers", no "The reader
+  will find".  Write the content directly.
 
-The queen sees ~6-7K tokens instead of the full corpus (which may be 20K+).
-This is a 3x context reduction while retaining all cross-referenced
-analytical depth from the gossip rounds.
+- **Numerical integrity**: Workers have preserved exact numbers from
+  the corpus.  The queen carries these through without rounding,
+  converting, or paraphrasing.
+
+- **Contradiction handling**: Workers have already reasoned through
+  contradictions via gossip.  The queen respects their verdicts.
+  If cross-section contradictions remain, flag them with
+  [UNRESOLVED: conflicting evidence].
+
+- **Serendipity integration**: Serendipity insights are woven into
+  the causal flow at the points where they illuminate connections
+  between specialist domains — never appended as a separate section.
 """
 
 from __future__ import annotations
@@ -49,52 +57,62 @@ def _build_queen_prompt(
     user query contain literal ``{placeholder}`` strings, they won't be
     re-scanned by a subsequent replacement pass.
     """
+    serendipity_rule = ""
+    if serendipity_block:
+        serendipity_rule = (
+            f"RULE 6 — SERENDIPITY INTEGRATION:\n"
+            f"Weave serendipity insights at the causal points where they "
+            f"illuminate cross-domain connections. Do NOT append them as a "
+            f"separate section.\n\n"
+        )
+
     return (
-        f"You are the QUEEN SYNTHESIZER — a senior research editor whose output "
-        f"must be strictly superior to any individual worker's summary. "
-        f"Today is: {date}\n\n"
-        f"{n_workers} specialist workers have independently processed different "
-        f"sections of a research corpus, then refined their summaries through "
-        f"multiple rounds of peer gossip where each worker cross-referenced "
-        f"findings from all other specialists.\n\n"
+        f"You are the QUEEN EDITOR. Your job is to STITCH worker analyses "
+        f"into a single coherent document. Workers have done the deep "
+        f"reasoning and found the connections. You ORDER their sections, "
+        f"SMOOTH transitions between them, REMOVE redundancy where workers "
+        f"cover the same ground, and ensure the narrative flows as one "
+        f"continuous piece. Today is: {date}\n\n"
+        f"{n_workers} specialist workers have independently processed "
+        f"different sections of a research corpus, then refined their "
+        f"analyses through multiple gossip rounds where they found "
+        f"cross-domain connections, traced causal chains, and resolved "
+        f"contradictions with evidence.\n\n"
         f"USER QUERY: {query}\n\n"
-        f"WORKER SUMMARIES (post-gossip refinement):\n"
+        f"WORKER ANALYSES (post-gossip, with connections and reasoning):\n"
         f"{summaries_text}\n\n"
         f"{serendipity_block}"
-        f"═══ SYNTHESIS PROTOCOL ═══\n\n"
-        f"PHASE 1 — EVIDENCE HIERARCHY:\n"
-        f"Before writing, mentally classify every claim by confidence:\n"
-        f"  • CONSENSUS (3+ workers agree): Near-certain. State directly.\n"
-        f"  • CORROBORATED (2 workers agree): High confidence. Note the agreement.\n"
-        f"  • SINGLE-SOURCE (1 worker only): Flag confidence level explicitly.\n"
-        f"  • CONTRADICTED (workers disagree): Apply contradiction protocol below.\n\n"
-        f"PHASE 2 — CONTRADICTION RESOLUTION:\n"
-        f"When workers disagree, do NOT average or hand-wave. For each conflict:\n"
-        f"  a) Identify WHAT exactly they disagree about\n"
-        f"  b) Evaluate the evidence QUALITY behind each position\n"
-        f"  c) Determine if the disagreement is real (different conclusions from "
-        f"same data) or apparent (different aspects of the same phenomenon)\n"
-        f"  d) Either RESOLVE with reasoning, or PRESERVE both positions with "
-        f"explicit evidence assessment for each\n\n"
-        f"PHASE 3 — NARRATIVE SYNTHESIS:\n"
-        f"  1. Structure with clear headings building a causal argument.\n"
-        f"  2. WEAVE findings into connected explanations — show how mechanism A "
-        f"leads to consequence B which interacts with pathway C.\n"
-        f"  3. Cite sources with URLs where available.\n"
-        f"  4. Every sentence must deliver information. No filler, no disclaimers.\n"
-        f"  5. Keep speculative findings, clearly labeled as hypotheses.\n"
-        f"  6. Do NOT add unsolicited warnings or ethical disclaimers.\n"
-        f"  7. Mark weak evidence with [NEEDS VERIFICATION].\n"
-        f"  8. Do NOT produce bullet-point lists or data dumps.\n"
-        f"  9. If serendipity insights are provided, integrate them at the "
-        f"causal points where they illuminate cross-domain connections — do NOT "
-        f"append them as a separate section.\n"
-        f"  10. Identify at least one EMERGENT INSIGHT that exists in the "
-        f"combined evidence but was not explicitly stated by any individual worker.\n\n"
-        f"AIM FOR 3000-6000 WORDS. Be comprehensive but not redundant. "
-        f"Merge overlapping findings — do not repeat the same point from different "
-        f"workers. Your synthesis must be worth more than the sum of its parts.\n\n"
-        f"Produce the final comprehensive synthesis:"
+        f"═══ EDITORIAL PROTOCOL ═══\n\n"
+        f"RULE 0 — NEVER REWRITE WORKER CONTENT:\n"
+        f"Workers wrote connected analyses grounded in evidence. Your job "
+        f"is to ARRANGE and SMOOTH, not rewrite. Preserve their voice, "
+        f"their specific examples, their exact numbers, their causal chains. "
+        f"You are an EDITOR, not an author.\n\n"
+        f"RULE 1 — NEVER WRITE ABOUT THE DOCUMENT ITSELF:\n"
+        f"No 'How to Read This Book'. No 'This chapter covers'. No 'The "
+        f"reader will find'. No meta-commentary about the text structure. "
+        f"Write the CONTENT directly.\n\n"
+        f"RULE 2 — NUMERICAL INTEGRITY:\n"
+        f"Workers have preserved exact numbers from the corpus. Carry them "
+        f"through EXACTLY. Never round, convert, or paraphrase. If workers "
+        f"state different values for the same thing and provided verdicts, "
+        f"use the verdict. If still conflicting, present both with evidence.\n\n"
+        f"RULE 3 — REMOVE REDUNDANCY:\n"
+        f"Where multiple workers cover the same ground, keep the version "
+        f"with the strongest evidence chain. Don't repeat the same finding "
+        f"from different workers.\n\n"
+        f"RULE 4 — SMOOTH TRANSITIONS:\n"
+        f"Add brief transition sentences between worker sections so the "
+        f"document flows as one continuous narrative. These transitions "
+        f"should connect the causal chains — 'This molecular mechanism "
+        f"manifests in practice as...' — not just signal topic changes.\n\n"
+        f"RULE 5 — INTERNAL CONSISTENCY:\n"
+        f"Scan the stitched output for contradictions across worker "
+        f"sections. If Worker A's section says X and Worker B's section "
+        f"says not-X, and neither resolved it in gossip, flag it with "
+        f"[UNRESOLVED: conflicting evidence].\n\n"
+        f"{serendipity_rule}"
+        f"Produce the stitched, edited document:"
     )
 
 

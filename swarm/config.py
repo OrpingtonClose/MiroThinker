@@ -37,30 +37,41 @@ CompleteFn = Callable[[str], Awaitable[str]]
 # for that round number.  Missing entries → no extra instruction.
 DEFAULT_ROUND_PROMPTS: dict[int, str] = {
     1: (
-        "ROUND 1 FOCUS — INCORPORATION:\n"
-        "Your primary task this round is to incorporate relevant findings "
-        "from your peers into your analysis. Look for data points, sources, "
-        "and mechanisms in peer summaries that complement or extend your own "
-        "findings. Pull out specific details from your raw section that "
-        "become relevant in light of what peers found."
+        "ROUND 1 FOCUS — CONNECTION DISCOVERY:\n"
+        "Your primary task is to find where your peers' findings EXPLAIN "
+        "something in your own evidence. For each peer's key finding, ask: "
+        "does this illuminate a pattern, anomaly, or mechanism in my raw "
+        "section? Where do our domains COLLIDE in a way that produces new "
+        "understanding? Trace the causal chain — if a peer's molecular "
+        "mechanism could explain the practitioner result in your section, "
+        "show the COMPLETE path from mechanism to outcome. Don't just note "
+        "overlaps — find the moments where combining two domains reveals "
+        "something neither stated alone. Preserve exact numbers verbatim."
     ),
     2: (
-        "ROUND 2 FOCUS — CONTRADICTION RESOLUTION:\n"
-        "This is your second gossip round. You have already incorporated "
-        "peer findings. Now focus on identifying and RESOLVING contradictions "
-        "between your analysis and your peers'. For each contradiction, "
-        "evaluate source quality and evidence strength to determine which "
-        "position is better supported. Note unresolvable disagreements "
-        "explicitly with both positions and evidence for each."
+        "ROUND 2 FOCUS — CAUSAL DEPTH:\n"
+        "Go deeper into the connections you and your peers found in Round 1. "
+        "For each connection: (a) trace it back to specific evidence in your "
+        "raw section AND the peer's cited sources, (b) ask 'what does this "
+        "connection PREDICT?' — if mechanism X explains outcome Y, what else "
+        "should be true? (c) look for SECOND-ORDER connections — does your "
+        "connection with Peer A, combined with Peer B's findings, reveal "
+        "something none of you stated? Resolve numerical contradictions by "
+        "comparing source evidence quality (academic > named practitioner > "
+        "anonymous forum post). The depth here creates the surface area for "
+        "serendipity."
     ),
     3: (
-        "ROUND 3 FOCUS — FINAL SYNTHESIS:\n"
-        "This is your final gossip round. You have incorporated peer findings "
-        "and resolved contradictions. Now produce your DEFINITIVE refined "
-        "analysis. Ensure every claim is cross-referenced against peer "
-        "evidence. Remove any remaining redundancy. Your output will be "
-        "the version read by the queen synthesizer, so make it as "
-        "information-dense and well-structured as possible."
+        "ROUND 3 FOCUS — GAPS AND FINAL SYNTHESIS:\n"
+        "What's still unexplained? What connections did you find that you "
+        "couldn't fully resolve because you're missing specific data? State "
+        "these gaps explicitly as research questions (e.g. 'Need bloodwork "
+        "data showing mTOR activation despite short GH-insulin window'). "
+        "Then produce your FINAL analysis: a single coherent narrative that "
+        "connects everything you know across all peer domains, at maximum "
+        "depth. Every claim must trace to evidence. Every connection must "
+        "be grounded. The connections — moments where one domain illuminates "
+        "another — are the primary output. Numbers must be exact and sourced."
     ),
 }
 
@@ -136,6 +147,8 @@ class SwarmConfig:
     dar_top_k: int = int(os.getenv("SWARM_DAR_TOP_K", "3"))
     lineage_store: LineageStore | None = None
     enable_quality_manifest: bool = True
+    corpus_delta_fn: "Callable[[], Awaitable[str]] | None" = None
+    max_gossip_rounds: int = int(os.getenv("SWARM_MAX_GOSSIP_ROUNDS", "10"))
 
     def __post_init__(self) -> None:
         """Resolve defaults that depend on other fields."""

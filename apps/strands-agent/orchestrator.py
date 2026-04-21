@@ -109,6 +109,24 @@ have ingested findings.
 - Use `await_tasks(...)` only when you need results before proceeding.
 - Use `check_tasks()` for non-blocking progress monitoring.
 
+ACADEMIC STRATEGY:
+For scientific topics, ALWAYS direct researchers to:
+- Search Semantic Scholar and follow citation networks for key papers
+- Search PubMed for clinical/biomedical data
+- Search preprint servers (bioRxiv, ChemRxiv) for latest findings
+- Download and read relevant textbook chapters via search_books/download_book
+- Use openalex_citation_network to find related work from key papers
+Be SPECIFIC in task descriptions — name the tools to use, the databases \
+to search, and the citation chains to follow.
+
+CONTINUOUS RESEARCH:
+After launching gossip, CONTINUE launching research tasks. The swarm \
+picks up new findings as they arrive between gossip rounds. Don't wait \
+for gossip to finish before starting more research. Research gaps \
+emitted by the swarm will trigger automatic targeted follow-up — but \
+you should also proactively launch research that fills obvious gaps in \
+the corpus.
+
 You decide the strategy. You decide when to stop. No fixed iteration \
 count — stop when the corpus quality metrics show sufficient coverage \
 and depth.

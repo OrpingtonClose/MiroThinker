@@ -616,6 +616,30 @@ class AsyncTaskPool:
             task.finished_at = time.time()
             return
 
+        # Build corpus delta callback — lets the swarm pick up new
+        # findings that producers ingested while gossip is running.
+        from datetime import datetime, timezone
+
+        watermark = datetime.now(timezone.utc).isoformat()
+
+        async def _corpus_delta_fn() -> str:
+            nonlocal watermark
+            delta = self._store.export_delta(since=watermark)
+            watermark = datetime.now(timezone.utc).isoformat()
+            return delta
+
+        # Wire up gap-driven research: when the swarm emits research
+        # gaps, launch targeted research tasks automatically.
+        async def _on_swarm_event(event: dict) -> None:
+            if event.get("type") == "research_gap":
+                for gap in event.get("gaps", [])[:5]:
+                    try:
+                        self.launch_research(
+                            task_desc=f"TARGETED RESEARCH GAP: {gap}",
+                        )
+                    except Exception:
+                        logger.warning("gap_text=<%s> | failed to launch gap research", gap[:80])
+
         # We're in a worker thread — run the coroutine in a fresh loop.
         try:
             result = asyncio.run(
@@ -623,6 +647,8 @@ class AsyncTaskPool:
                     corpus=corpus_text,
                     query=getattr(self._store, "user_query", "") or "",
                     cancel_event=None,   # thread cancellation only
+                    corpus_delta_fn=_corpus_delta_fn,
+                    on_event=_on_swarm_event,
                 ),
             )
         except Exception as exc:

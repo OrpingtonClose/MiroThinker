@@ -16,9 +16,9 @@ of the peer's insight. This produced 9/10 cross-referencing vs 8/10
 for summary-only gossip.
 
 Multi-round gossip with round-specific prompts:
-  Round 1: Incorporate — absorb peer findings into own analysis
-  Round 2: Resolve — identify and resolve contradictions with peers
-  Round 3: Synthesize — produce definitive refined analysis
+  Round 1: Connection Discovery — find where peers' findings explain your evidence
+  Round 2: Causal Depth — trace second-order connections and predictions
+  Round 3: Gaps and Final Synthesis — identify unknowns, produce connected narrative
 """
 
 from __future__ import annotations
@@ -71,6 +71,7 @@ def _build_gossip_prompt(
     peers_text: str,
     max_chars: int,
     round_prompt: str = "",
+    delta_text: str = "",
 ) -> str:
     """Build the gossip refinement prompt via concatenation (not .replace()).
 
@@ -78,13 +79,26 @@ def _build_gossip_prompt(
         round_prompt: Optional round-specific focus instructions injected
             before the refinement rules (e.g. "ROUND 2 FOCUS — CONTRADICTION
             RESOLUTION: ...").
+        delta_text: New findings that arrived between gossip rounds
+            (corpus delta injection).  Prepended as supplementary evidence.
     """
     round_block = f"{round_prompt}\n\n" if round_prompt else ""
+    delta_block = ""
+    if delta_text:
+        delta_block = (
+            f"═══ NEW EVIDENCE (arrived during your deliberation) ═══\n"
+            f"{delta_text}\n\n"
+            f"Process this new evidence with the SAME depth as peer "
+            f"findings. What connections emerge between this new data and "
+            f"what you and your peers have already established?\n\n"
+        )
     return (
         f"You are a specialist analyst in a peer-to-peer research gossip protocol. "
-        f"Today is: {date}\n\n"
-        f"In the previous round, you produced a summary from your section.\n"
-        f"Now you have received summaries from your PEER WORKERS who processed "
+        f"Your job is to find where your peers' findings CONNECT with your own "
+        f"evidence — not just verify facts, but discover where domains collide "
+        f"to produce new understanding. Today is: {date}\n\n"
+        f"In the previous round, you produced an analysis from your section.\n"
+        f"Now you have received analyses from your PEER WORKERS who processed "
         f"other sections of the same corpus.\n\n"
         f"YOUR ASSIGNED ANGLE: {angle}\n\n"
         f"{raw_section_block}"
@@ -92,20 +106,36 @@ def _build_gossip_prompt(
         f"{own_summary}\n\n"
         f"PEER SUMMARIES (from {n_peers} other workers):\n"
         f"{peers_text}\n\n"
+        f"{delta_block}"
         f"{round_block}"
-        f"GOSSIP REFINEMENT RULES:\n"
-        f"1. Cross-reference your findings with peers'. Note agreements and contradictions.\n"
-        f"2. If peers found information that COMPLEMENTS yours, incorporate key points.\n"
-        f"3. If peers found the SAME information, note the consensus (strengthens confidence).\n"
-        f"4. If peers CONTRADICT your findings, note the disagreement with both sources.\n"
-        f"5. Do NOT simply concatenate — SYNTHESIZE and cross-reference.\n"
-        f"6. Remove redundancy between your summary and peers'.\n"
-        f"7. Preserve all unique findings from your original section.\n"
-        f"8. If you have access to your original raw section above, go back and pull "
-        f"out specific details that become relevant in light of peer findings.\n"
-        f"9. Maintain source citations and confidence levels.\n"
-        f"10. Stay under {max_chars} characters.\n\n"
-        f"Produce your REFINED summary:"
+        f"GOSSIP RULES:\n"
+        f"1. PRIMARY TASK: Find where your peers' findings EXPLAIN something "
+        f"in your own evidence. Don't just compare — CONNECT. If a peer's "
+        f"molecular mechanism could explain a practitioner result in your "
+        f"section, trace the full causal path.\n"
+        f"2. When you find a connection, go DEEP. Show the complete chain: "
+        f"evidence A (from your section) + evidence B (from peer) → insight C "
+        f"that neither stated. The depth creates serendipity surface area.\n"
+        f"3. PRESERVE EXACT NUMBERS from your raw section. Never paraphrase "
+        f"numerical values. Quote them verbatim. When peers state different "
+        f"numbers for the same thing, quote BOTH with sources and reason about "
+        f"which is correct.\n"
+        f"4. If a peer makes a claim that CONTRADICTS your evidence, this is "
+        f"an OPPORTUNITY — contradictions often hide the most important "
+        f"connections. Go back to your raw section, find the exact source, and "
+        f"reason about whether the contradiction is real (different data) or "
+        f"apparent (same phenomenon, different angles).\n"
+        f"5. Consensus across different sources strengthens confidence. Same "
+        f"source repeated by multiple workers is NOT independent corroboration.\n"
+        f"6. If you have access to your raw section above, pull out specific "
+        f"details that become relevant in light of peer findings — details you "
+        f"may have overlooked in your initial analysis.\n"
+        f"7. Your output should be a CONNECTED narrative, not a list of facts. "
+        f"Each finding should relate to others through causal chains, "
+        f"explanatory links, or illuminating contradictions.\n"
+        f"8. Maintain source citations and evidence quality assessments.\n"
+        f"9. Stay under {max_chars} characters.\n\n"
+        f"Produce your CONNECTED analysis:"
     )
 
 
@@ -138,6 +168,7 @@ async def worker_gossip_refine(
     max_chars: int,
     complete_fn,
     round_prompt: str = "",
+    delta_text: str = "",
 ) -> str:
     """Phase 2: Worker refines its summary using peer gossip.
 
@@ -155,6 +186,8 @@ async def worker_gossip_refine(
         max_chars: Maximum summary length in characters.
         complete_fn: Async LLM completion callable.
         round_prompt: Optional round-specific focus instructions.
+        delta_text: New findings that arrived between gossip rounds
+            (corpus delta injection).
 
     Returns:
         Refined summary string.
@@ -185,6 +218,7 @@ async def worker_gossip_refine(
         peers_text=peers_text,
         max_chars=max_chars,
         round_prompt=round_prompt,
+        delta_text=delta_text,
     )
 
     return await complete_fn(prompt)
