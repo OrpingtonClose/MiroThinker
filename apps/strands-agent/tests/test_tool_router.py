@@ -144,8 +144,8 @@ class TestToolRouterPlugin:
         # General domain still has guidance
         assert len(event.messages) == 2
 
-    def test_route_tools_skips_reinjection_on_same_query(self) -> None:
-        """On resume, route_tools should not re-inject guidance for the same query."""
+    def test_route_tools_skips_reinjection_when_marker_present(self) -> None:
+        """On resume, guidance marker is already in messages — skip re-injection."""
         from unittest.mock import MagicMock
 
         # First invocation: guidance injected
@@ -155,16 +155,36 @@ class TestToolRouterPlugin:
         ]
         self.plugin.route_tools(event1)
         assert len(event1.messages) == 2
-        assert self.plugin._has_routed is True
 
-        # Second invocation (resume): same query, should be skipped
+        # Resume: messages still contain the guidance marker from first pass
+        event2 = MagicMock()
+        event2.messages = list(event1.messages)  # Includes the guidance message
+        self.plugin.route_tools(event2)
+        # No new message injected — still 2
+        assert len(event2.messages) == 2
+
+    def test_route_tools_reinjects_after_messages_cleared(self) -> None:
+        """When messages are cleared between requests, guidance is re-injected."""
+        from unittest.mock import MagicMock
+
+        # First query
+        event1 = MagicMock()
+        event1.messages = [
+            {"role": "user", "content": [{"text": "find papers on GLP-1"}]},
+        ]
+        self.plugin.route_tools(event1)
+        assert len(event1.messages) == 2
+
+        # Messages cleared (as main.py does between requests), same query again
         event2 = MagicMock()
         event2.messages = [
             {"role": "user", "content": [{"text": "find papers on GLP-1"}]},
         ]
         self.plugin.route_tools(event2)
-        # Messages unchanged — no new guidance injected
-        assert len(event2.messages) == 1
+        # Guidance re-injected because marker was gone
+        assert len(event2.messages) == 2
+        guidance = event2.messages[0]["content"][0]["text"]
+        assert "TOOL ROUTING" in guidance
 
     def test_route_tools_injects_for_new_query_after_previous(self) -> None:
         """A genuinely new query on a reused agent gets fresh guidance."""
@@ -178,7 +198,7 @@ class TestToolRouterPlugin:
         self.plugin.route_tools(event1)
         assert len(event1.messages) == 2
 
-        # Different query — should inject new guidance
+        # Different query, messages cleared — should inject new guidance
         event2 = MagicMock()
         event2.messages = [
             {"role": "user", "content": [{"text": "find SEC filings for Tesla"}]},

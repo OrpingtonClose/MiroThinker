@@ -40,6 +40,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_GUIDANCE_MARKER = "[SYSTEM TOOL GUIDANCE]"
+
 
 class ToolRouterPlugin(Plugin):
     """Classify queries and inject domain-specific tool guidance.
@@ -59,8 +61,6 @@ class ToolRouterPlugin(Plugin):
         super().__init__()
         self.last_match: DomainMatch | None = None
         self._agent: Agent | None = None
-        self._has_routed: bool = False
-        self._last_routed_query: str = ""
 
     def init_agent(self, agent: "Agent") -> None:
         """Store agent reference for skill activation."""
@@ -74,15 +74,15 @@ class ToolRouterPlugin(Plugin):
             logger.debug("no user query found in messages, skipping routing")
             return
 
-        # Skip re-injection on resume cycles — guidance is already in context
-        if query == self._last_routed_query and self._has_routed:
-            logger.debug("skipping routing, already injected for this query")
+        # Skip if guidance is already present in messages (resume cycle or
+        # repeated query on same conversation). Content-aware check avoids
+        # stale flags when messages are cleared between requests.
+        if self._guidance_already_present(event.messages):
+            logger.debug("skipping routing, guidance marker already in messages")
             return
 
         match = classify_query(query)
         self.last_match = match
-        self._last_routed_query = query
-        self._has_routed = True
 
         logger.info(
             "domains=<%s>, primary=<%s> | query classified",
@@ -111,7 +111,7 @@ class ToolRouterPlugin(Plugin):
         if event.messages is not None:
             routing_message: Message = {
                 "role": "user",
-                "content": [{"text": f"[SYSTEM TOOL GUIDANCE]\n{guidance}"}],
+                "content": [{"text": f"{_GUIDANCE_MARKER}\n{guidance}"}],
             }
             msgs = list(event.messages)
             insert_idx = len(msgs) - 1
@@ -175,6 +175,23 @@ class ToolRouterPlugin(Plugin):
             domain_tools = DOMAIN_TOOLS.get(domain, [])
             tools.update(domain_tools)
         return tools
+
+    @staticmethod
+    def _guidance_already_present(messages: list | None) -> bool:
+        """Check whether a guidance marker message is already in the conversation."""
+        if not messages:
+            return False
+        for msg in messages:
+            if not isinstance(msg, dict) or msg.get("role") != "user":
+                continue
+            content = msg.get("content", [])
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and _GUIDANCE_MARKER in block.get("text", ""):
+                        return True
+            elif isinstance(content, str) and _GUIDANCE_MARKER in content:
+                return True
+        return False
 
     @staticmethod
     def _extract_query(messages: list | None) -> str:
