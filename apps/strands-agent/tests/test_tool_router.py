@@ -144,8 +144,8 @@ class TestToolRouterPlugin:
         # General domain still has guidance
         assert len(event.messages) == 2
 
-    def test_route_tools_skips_reinjection_when_marker_present(self) -> None:
-        """On resume, guidance marker is already in messages — skip re-injection."""
+    def test_route_tools_replaces_stale_guidance_on_resume(self) -> None:
+        """On resume, old guidance is stripped and fresh guidance is injected."""
         from unittest.mock import MagicMock
 
         # First invocation: guidance injected
@@ -156,12 +156,41 @@ class TestToolRouterPlugin:
         self.plugin.route_tools(event1)
         assert len(event1.messages) == 2
 
-        # Resume: messages still contain the guidance marker from first pass
+        # Resume: messages contain the guidance marker from first pass
         event2 = MagicMock()
-        event2.messages = list(event1.messages)  # Includes the guidance message
+        event2.messages = list(event1.messages)
         self.plugin.route_tools(event2)
-        # No new message injected — still 2
+        # Old marker stripped, new one injected — still exactly 2
         assert len(event2.messages) == 2
+        # last_match is refreshed (not stale)
+        assert self.plugin.last_match is not None
+
+    def test_route_tools_strips_stale_guidance_in_multi_turn(self) -> None:
+        """In multi-turn, old guidance from turn 1 is replaced with
+        domain-appropriate guidance for turn 2."""
+        from unittest.mock import MagicMock
+
+        # Turn 1: academic query
+        event1 = MagicMock()
+        event1.messages = [
+            {"role": "user", "content": [{"text": "find papers on GLP-1 pharmacokinetics"}]},
+        ]
+        self.plugin.route_tools(event1)
+        assert len(event1.messages) == 2
+        assert ACADEMIC in self.plugin.last_match.domains
+
+        # Turn 2: multi-turn with history — different domain query
+        event2 = MagicMock()
+        event2.messages = list(event1.messages) + [
+            {"role": "assistant", "content": [{"text": "Here are the papers..."}]},
+            {"role": "user", "content": [{"text": "MesoRx forum thread about tren"}]},
+        ]
+        self.plugin.route_tools(event2)
+        # Old academic guidance stripped, new guidance injected, total = 4
+        # (user1, assistant, guidance, user2)
+        assert len(event2.messages) == 4
+        # last_match updated to the new domain
+        assert FORUM in self.plugin.last_match.domains or PRACTITIONER in self.plugin.last_match.domains
 
     def test_route_tools_reinjects_after_messages_cleared(self) -> None:
         """When messages are cleared between requests, guidance is re-injected."""
@@ -181,7 +210,6 @@ class TestToolRouterPlugin:
             {"role": "user", "content": [{"text": "find papers on GLP-1"}]},
         ]
         self.plugin.route_tools(event2)
-        # Guidance re-injected because marker was gone
         assert len(event2.messages) == 2
         guidance = event2.messages[0]["content"][0]["text"]
         assert "TOOL ROUTING" in guidance

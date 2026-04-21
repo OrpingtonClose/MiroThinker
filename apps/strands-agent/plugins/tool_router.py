@@ -68,18 +68,25 @@ class ToolRouterPlugin(Plugin):
 
     @hook
     def route_tools(self, event: BeforeInvocationEvent) -> None:
-        """Classify the query and inject tool routing guidance."""
+        """Classify the query and inject tool routing guidance.
+
+        Uses a strip-and-replace strategy: any stale guidance markers from
+        previous turns are removed first, then the current query is
+        classified and fresh guidance is injected. This ensures multi-turn
+        conversations always get domain-appropriate guidance and that
+        last_match stays current for the ToolAuditPlugin.
+        """
+        if event.messages is None:
+            return
+
         query = self._extract_query(event.messages)
         if not query:
             logger.debug("no user query found in messages, skipping routing")
             return
 
-        # Skip if guidance is already present in messages (resume cycle or
-        # repeated query on same conversation). Content-aware check avoids
-        # stale flags when messages are cleared between requests.
-        if self._guidance_already_present(event.messages):
-            logger.debug("skipping routing, guidance marker already in messages")
-            return
+        # Strip any stale guidance markers from previous turns so
+        # the model only sees guidance for the current query.
+        msgs = self._strip_guidance_markers(list(event.messages))
 
         match = classify_query(query)
         self.last_match = match
@@ -98,6 +105,7 @@ class ToolRouterPlugin(Plugin):
                 guidance_parts.append(text)
 
         if not guidance_parts:
+            event.messages = msgs
             return
 
         guidance = (
@@ -108,19 +116,17 @@ class ToolRouterPlugin(Plugin):
         # Inject guidance right before the last user message so the model
         # sees it immediately before the current query, not buried at the
         # start of a multi-turn conversation history.
-        if event.messages is not None:
-            routing_message: Message = {
-                "role": "user",
-                "content": [{"text": f"{_GUIDANCE_MARKER}\n{guidance}"}],
-            }
-            msgs = list(event.messages)
-            insert_idx = len(msgs) - 1
-            for i in range(len(msgs) - 1, -1, -1):
-                if isinstance(msgs[i], dict) and msgs[i].get("role") == "user":
-                    insert_idx = i
-                    break
-            msgs.insert(insert_idx, routing_message)
-            event.messages = msgs
+        routing_message: Message = {
+            "role": "user",
+            "content": [{"text": f"{_GUIDANCE_MARKER}\n{guidance}"}],
+        }
+        insert_idx = len(msgs) - 1
+        for i in range(len(msgs) - 1, -1, -1):
+            if isinstance(msgs[i], dict) and msgs[i].get("role") == "user":
+                insert_idx = i
+                break
+        msgs.insert(insert_idx, routing_message)
+        event.messages = msgs
 
         # Auto-activate skill if one matches
         self._try_activate_skill(match)
@@ -177,20 +183,30 @@ class ToolRouterPlugin(Plugin):
         return tools
 
     @staticmethod
-    def _guidance_already_present(messages: list | None) -> bool:
-        """Check whether a guidance marker message is already in the conversation."""
-        if not messages:
+    def _strip_guidance_markers(messages: list[dict]) -> list[dict]:
+        """Remove any messages containing the guidance marker.
+
+        Returns a new list with stale guidance messages filtered out so
+        that only the freshly generated guidance for the current query
+        is present after injection.
+        """
+        return [
+            msg for msg in messages
+            if not ToolRouterPlugin._is_guidance_message(msg)
+        ]
+
+    @staticmethod
+    def _is_guidance_message(msg: dict) -> bool:
+        """Check whether a single message contains the guidance marker."""
+        if not isinstance(msg, dict) or msg.get("role") != "user":
             return False
-        for msg in messages:
-            if not isinstance(msg, dict) or msg.get("role") != "user":
-                continue
-            content = msg.get("content", [])
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and _GUIDANCE_MARKER in block.get("text", ""):
-                        return True
-            elif isinstance(content, str) and _GUIDANCE_MARKER in content:
-                return True
+        content = msg.get("content", [])
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and _GUIDANCE_MARKER in block.get("text", ""):
+                    return True
+        elif isinstance(content, str) and _GUIDANCE_MARKER in content:
+            return True
         return False
 
     @staticmethod
