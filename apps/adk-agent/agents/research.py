@@ -30,6 +30,7 @@ from callbacks.before_model import before_model_callback
 from callbacks.before_tool import before_tool_callback
 from prompts.templates import MAIN_AGENT_INSTRUCTION
 from tools.mcp_tools import get_tools
+from tools.discovery_store import DISCOVERY_TOOLS
 from tools.knowledge_graph import KNOWLEDGE_GRAPH_TOOLS
 from tools.research_tools import RESEARCH_TOOLS
 
@@ -38,7 +39,7 @@ research_agent = Agent(
     model=build_model(),
     description="Deep research agent that uses tools and sub-agents to answer questions.",
     instruction=MAIN_AGENT_INSTRUCTION,
-    tools=get_tools(["tool-python", "qualitative-research"]) + RESEARCH_TOOLS + KNOWLEDGE_GRAPH_TOOLS,
+    tools=get_tools(["tool-python", "qualitative-research"]) + RESEARCH_TOOLS + KNOWLEDGE_GRAPH_TOOLS + DISCOVERY_TOOLS,
     sub_agents=[web_agent],  # Tier 3: web_agent owns all web tools
     before_tool_callback=before_tool_callback,
     after_tool_callback=after_tool_callback,
