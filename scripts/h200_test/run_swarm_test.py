@@ -171,8 +171,13 @@ def make_complete_fn(
     model = _get_model(model_env, default_model)
 
     async def _complete(prompt: str) -> str:
-        _ctx_phase.set(phase)
-        _ctx_worker.set(worker)
+        # Only override context for dedicated roles (queen, serendipity).
+        # Worker functions rely on on_event to set the correct
+        # phase/worker context before each LLM call — don't clobber it.
+        if phase != "unknown":
+            _ctx_phase.set(phase)
+        if worker:
+            _ctx_worker.set(worker)
         return await _vllm_complete(
             prompt, model, api_base, max_tokens, temperature,
         )
@@ -232,7 +237,9 @@ async def run_swarm_test(
         "SWARM_WORKER_MODEL", default_model,
         max_tokens=config.worker_max_tokens,
         temperature=config.worker_temperature,
-        phase="worker",
+        # phase/worker left as defaults ("unknown"/"") — on_event callback
+        # sets the correct phase (e.g. gossip_round_2) and worker ID
+        # dynamically before each LLM call.
     )
     queen_fn = make_complete_fn(
         "SWARM_QUEEN_MODEL", default_model,
