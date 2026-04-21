@@ -104,11 +104,13 @@ def _pubmed_search(query: str, max_results: int = 5) -> list[dict]:
     """PubMed search — academic papers, free API."""
     try:
         import httpx
+        # Bias toward human studies, exclude veterinary
+        pubmed_query = f"({query}) AND (human OR clinical) NOT (cattle OR bovine OR swine)"
         # Search for PMIDs
         search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
         params = {
             "db": "pubmed",
-            "term": query,
+            "term": pubmed_query,
             "retmax": max_results,
             "retmode": "json",
         }
@@ -192,6 +194,21 @@ def _jina_extract(url: str) -> str:
 
 # ── Enrichment pipeline ──────────────────────────────────────────────
 
+# Terms that indicate veterinary/livestock content (not human bodybuilding)
+_VETERINARY_TERMS = frozenset({
+    "cattle", "steers", "bovine", "livestock", "feedlot", "heifer",
+    "calf", "calves", "poultry", "swine", "porcine", "ovine", "equine",
+    "ruminant", "angus", "longissimus dorsi", "carcass quality",
+    "feed efficiency", "implant ear", "growth promotant",
+})
+
+
+def _is_veterinary(text: str) -> bool:
+    """Return True if text appears to be about veterinary/livestock use."""
+    lower = text.lower()
+    return any(term in lower for term in _VETERINARY_TERMS)
+
+
 def _search_all_backends(
     query: str,
     max_per_backend: int = 10,
@@ -220,7 +237,16 @@ def _search_all_backends(
             seen_urls.add(url)
             unique.append(r)
 
-    return unique
+    # Filter out veterinary/livestock results
+    filtered = []
+    for r in unique:
+        text = f"{r.get('title', '')} {r.get('snippet', '')}"
+        if _is_veterinary(text):
+            logger.debug("filtered veterinary result: %.80s", text)
+            continue
+        filtered.append(r)
+
+    return filtered
 
 
 def enrich_angle(

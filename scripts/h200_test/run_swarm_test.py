@@ -36,6 +36,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -70,6 +71,14 @@ def _get_model(env_var: str, default: str) -> str:
     return os.environ.get(env_var, default)
 
 
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def _strip_thinking(text: str) -> str:
+    """Strip <think>...</think> reasoning blocks from model output."""
+    return _THINK_RE.sub("", text).strip()
+
+
 async def _vllm_complete(
     prompt: str,
     model: str,
@@ -96,7 +105,8 @@ async def _vllm_complete(
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
-            return data["choices"][0]["message"]["content"]
+            raw = data["choices"][0]["message"]["content"]
+            return _strip_thinking(raw)
         except Exception:
             logger.exception(
                 "model=<%s>, url=<%s> | vLLM call failed", model, url,
@@ -342,6 +352,10 @@ def main() -> None:
     config.misassignment_ratio = 0.25
     config.enable_hive_memory = True
     config.enable_diversity_aware_gossip = True
+
+    # Cap max gossip rounds to prevent context overflow in queen merge
+    # with 32K context models. 5 rounds is enough for convergence.
+    config.max_gossip_rounds = int(os.environ.get("SWARM_MAX_GOSSIP_ROUNDS", "5"))
 
     if args.workers > 0:
         config.max_workers = args.workers
