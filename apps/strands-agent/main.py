@@ -396,6 +396,11 @@ async def _run_job(job: "jobs.JobState") -> None:
     defined in ``orchestrator_protocol``). Task lifecycle events emitted
     by the ``AsyncTaskPool`` are forwarded directly into
     ``job.event_queue`` via ``event_emit``.
+
+    The orchestrator (LangGraph/deepagents) runs in a **dedicated thread**
+    with its own asyncio event loop to prevent any blocking inside
+    LangChain/LangGraph from starving the main FastAPI event loop. Events
+    are bridged back via a thread-safe ``queue.Queue``.
     """
     from corpus import ConditionStore
     from corpus_tools import set_current_store
@@ -427,22 +432,98 @@ async def _run_job(job: "jobs.JobState") -> None:
     # Per-job AsyncTaskPool. Workers spawn fresh researcher agents and
     # auto-ingest results into ``store``. Task lifecycle events are
     # forwarded straight to the job event queue via ``event_emit``.
+    #
+    # Pass ``loop=main_loop`` explicitly so worker threads can bridge
+    # events back to the FastAPI event loop via ``call_soon_threadsafe``
+    # even though the orchestrator itself runs in a separate loop.
+    main_loop = asyncio.get_running_loop()
     pool = AsyncTaskPool(
         store=store,
         tools=_search_tools,
         job_cancel_event=cancel_threading,
         event_emit=job.emit,
         max_concurrent=int(os.environ.get("TASK_POOL_MAX_CONCURRENT", "4")),
+        loop=main_loop,
     )
     set_current_task_pool(pool)
 
+    # ── Thread-safe event bridge ──────────────────────────────────
+    #
+    # The orchestrator's ``astream_events`` can block its event loop
+    # (slow Venice API calls, LangGraph internal processing, sync
+    # middleware). Running it on the FastAPI loop would freeze health
+    # checks, SSE streams, and cancel requests.
+    #
+    # Solution: spin up a **dedicated thread** with its own asyncio
+    # event loop for the orchestrator. Events are pushed into a
+    # stdlib ``queue.Queue`` (thread-safe) and consumed by the main
+    # loop via ``run_in_executor``.
+    event_bridge: queue.Queue = queue.Queue()
+    _SENTINEL = object()  # marks end of orchestrator stream
+
+    def _orchestrator_thread() -> None:
+        """Run the orchestrator in an isolated asyncio event loop.
+
+        Sets the per-job contextvars so that tool callbacks
+        (``launch_research``, ``check_tasks``, etc.) can resolve the
+        active ``AsyncTaskPool`` and ``ConditionStore``.
+
+        The entire body is wrapped in try/except to guarantee _SENTINEL
+        reaches the queue even if new_event_loop() or set_event_loop()
+        fail (e.g. file descriptor exhaustion).
+        """
+        set_current_task_pool(pool)
+        set_current_store(store)
+
+        orch_loop = None
+        try:
+            orch_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(orch_loop)
+
+            async def _drain() -> None:
+                try:
+                    async for ev in _orchestrator.run(job.query):  # type: ignore[union-attr]
+                        event_bridge.put(ev)
+                except Exception as exc:
+                    event_bridge.put(exc)
+                finally:
+                    event_bridge.put(_SENTINEL)
+
+            orch_loop.run_until_complete(_drain())
+        except Exception as exc:
+            # Catch errors from ``run_until_complete`` itself, or from
+            # ``new_event_loop`` / ``set_event_loop``.
+            event_bridge.put(exc)
+            event_bridge.put(_SENTINEL)
+        finally:
+            if orch_loop is not None:
+                orch_loop.close()
+
+    orch_thread = None  # declared before try so finally can always join
     try:
         final_content = ""
 
         if _orchestrator is None:
             raise RuntimeError("Orchestrator not initialised")
 
-        async for event in _orchestrator.run(job.query):
+        orch_thread = threading.Thread(
+            target=_orchestrator_thread,
+            name=f"orch-{job.job_id}",
+            daemon=True,
+        )
+        orch_thread.start()
+
+        # Consume events from the bridge on the main event loop.
+        # ``run_in_executor`` blocks only a thread-pool thread, not
+        # the event loop, so FastAPI stays responsive.
+        while True:
+            item = await main_loop.run_in_executor(None, event_bridge.get)
+            if item is _SENTINEL:
+                break
+            if isinstance(item, Exception):
+                raise item
+
+            event = item
             if job.cancel_event.is_set():
                 job.status = "cancelled"
                 job.finished_at = time.time()
@@ -542,6 +623,11 @@ async def _run_job(job: "jobs.JobState") -> None:
         })
     finally:
         cancel_bridge_task.cancel()
+        # Join the orchestrator thread before closing the store — the
+        # thread may still be running LangGraph operations that access
+        # the store via tool callbacks (query_corpus, launch_research).
+        if orch_thread is not None:
+            await asyncio.to_thread(orch_thread.join, 15.0)
         try:
             # ``pool.shutdown`` performs a blocking drain of up to
             # ``drain_timeout`` seconds followed by

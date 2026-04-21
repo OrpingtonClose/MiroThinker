@@ -618,8 +618,9 @@ class GossipSwarm:
         serendipity_entry_id = ""
         if config.enable_serendipity and len(assignments) >= 2:
             phase_start = time.monotonic()
+            serendipity_llm_calls = 0
             try:
-                serendipity_insights = await find_serendipitous_connections(
+                serendipity_insights, serendipity_llm_calls = await find_serendipitous_connections(
                     worker_summaries=worker_summaries,
                     query=query,
                     complete_fn=self.serendipity_complete,
@@ -628,7 +629,7 @@ class GossipSwarm:
                 logger.warning("serendipity bridge failed, continuing without it")
                 serendipity_insights = ""
                 metrics.degradations.append("Serendipity bridge failed")
-            metrics.total_llm_calls += 1
+            metrics.total_llm_calls += serendipity_llm_calls
             metrics.serendipity_produced = bool(serendipity_insights)
             metrics.phase_times["serendipity"] = time.monotonic() - phase_start
 
@@ -644,7 +645,7 @@ class GossipSwarm:
                 ))
 
             logger.info(
-                "serendipity_chars=<%d> | serendipity bridge complete",
+                "serendipity_chars=<%d> | two-pass serendipity bridge complete",
                 len(serendipity_insights),
             )
 

@@ -30,6 +30,7 @@ import httpx
 
 from swarm.config import SwarmConfig
 from swarm.engine import GossipSwarm, SwarmResult
+from swarm.lineage import LineageStore
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,7 @@ async def gossip_synthesize(
     on_event: "Callable[[dict], Awaitable[None]] | None" = None,
     cancel_event: "asyncio.Event | None" = None,
     corpus_delta_fn: "Callable[[], Awaitable[str]] | None" = None,
+    lineage_store: "LineageStore | None" = None,
 ) -> SwarmResult:
     """Run full gossip swarm pipeline on a research corpus.
 
@@ -128,12 +130,18 @@ async def gossip_synthesize(
         corpus_delta_fn: Optional async callback that returns new findings
             as formatted text.  Called between gossip rounds to inject
             external data from producers running in parallel.
+        lineage_store: Optional LineageStore for persisting all swarm
+            phase outputs.  When provided, every bee's work (synthesis,
+            gossip rounds, serendipity, queen merge) is documented in
+            the store.
 
     Returns:
         SwarmResult with user_report, knowledge_report, metrics, etc.
     """
     config = SwarmConfig()
     config.corpus_delta_fn = corpus_delta_fn
+    if lineage_store is not None:
+        config.lineage_store = lineage_store
 
     swarm = GossipSwarm(
         complete=worker_complete,
