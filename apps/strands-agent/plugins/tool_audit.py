@@ -72,27 +72,27 @@ class ToolAuditPlugin(Plugin):
         self._tools_called: set[str] = set()
         self._resume_count: int = 0
         self._current_query: str = ""
+        self._is_resuming: bool = False
 
     def reset(self) -> None:
         """Reset per-request state."""
         self._tools_called.clear()
         self._resume_count = 0
         self._current_query = ""
+        self._is_resuming = False
 
     @hook
     def track_invocation_start(self, event: BeforeInvocationEvent) -> None:
         """Reset tracking at the start of each invocation."""
-        # Only reset on the first invocation, not on resumes
-        if self._resume_count == 0:
-            self._tools_called.clear()
-            self._current_query = self._extract_query(event.messages)
-        else:
-            # New request on a reused agent — detect by checking for a new query
-            new_query = self._extract_query(event.messages)
-            if new_query and new_query != self._current_query:
-                self._tools_called.clear()
-                self._resume_count = 0
-                self._current_query = new_query
+        if self._is_resuming:
+            # Resume cycle — preserve _tools_called and _resume_count
+            self._is_resuming = False
+            return
+
+        # Fresh request — reset everything
+        self._tools_called.clear()
+        self._resume_count = 0
+        self._current_query = self._extract_query(event.messages)
 
     @hook
     def track_tool_call(self, event: AfterToolCallEvent) -> None:
@@ -151,6 +151,7 @@ class ToolAuditPlugin(Plugin):
             self._resume_count,
         )
         self._resume_count += 1
+        self._is_resuming = True
         event.resume = nudge
 
     def _get_recommended_tools(self) -> set[str]:

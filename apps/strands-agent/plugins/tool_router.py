@@ -59,6 +59,8 @@ class ToolRouterPlugin(Plugin):
         super().__init__()
         self.last_match: DomainMatch | None = None
         self._agent: Agent | None = None
+        self._has_routed: bool = False
+        self._last_routed_query: str = ""
 
     def init_agent(self, agent: "Agent") -> None:
         """Store agent reference for skill activation."""
@@ -72,8 +74,15 @@ class ToolRouterPlugin(Plugin):
             logger.debug("no user query found in messages, skipping routing")
             return
 
+        # Skip re-injection on resume cycles — guidance is already in context
+        if query == self._last_routed_query and self._has_routed:
+            logger.debug("skipping routing, already injected for this query")
+            return
+
         match = classify_query(query)
         self.last_match = match
+        self._last_routed_query = query
+        self._has_routed = True
 
         logger.info(
             "domains=<%s>, primary=<%s> | query classified",
