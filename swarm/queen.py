@@ -370,3 +370,80 @@ async def build_knowledge_report(
         parts.append(f"- {angle}")
 
     return "\n".join(parts)
+
+
+# ── Queen Lucidity Pass ──────────────────────────────────────────────
+
+def _build_lucidity_prompt(report: str, query: str) -> str:
+    """Build the multi-pass lucidity editing prompt."""
+    date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return (
+        f"You are a senior editor performing a LUCIDITY PASS on a research "
+        f"report. The report has been produced by a multi-agent swarm and "
+        f"already contains all the correct content. Your job is to make it "
+        f"CRYSTAL CLEAR without changing the substance. Today is: {date}\n\n"
+        f"USER QUERY: {query}\n\n"
+        f"REPORT TO EDIT:\n{report}\n\n"
+        f"═══ LUCIDITY PROTOCOL ═══\n\n"
+        f"PASS 1 — STRUCTURAL ORGANIZATION:\n"
+        f"- Ensure logical flow (general → specific, cause → effect)\n"
+        f"- Move related findings together\n"
+        f"- Add clear section headings where missing\n"
+        f"- Remove any orphaned sentences or fragments\n\n"
+        f"PASS 2 — CLARITY & READABILITY:\n"
+        f"- Rewrite unclear sentences for maximum readability\n"
+        f"- Break long paragraphs into digestible chunks\n"
+        f"- Ensure every technical term is used consistently\n"
+        f"- Replace vague language with specific claims\n\n"
+        f"PASS 3 — SERENDIPITY HIGHLIGHTING:\n"
+        f"- Identify the most surprising cross-domain insights\n"
+        f"- Ensure these are prominently placed (not buried)\n"
+        f"- Add brief 'Why this is surprising' context where needed\n\n"
+        f"CONSTRAINTS:\n"
+        f"- NEVER remove content, evidence, numbers, or citations\n"
+        f"- NEVER add new claims or findings\n"
+        f"- NEVER add disclaimers, safety warnings, or moral commentary\n"
+        f"- Preserve all source attributions exactly\n"
+        f"- The output should be the same length (±10%) as the input\n\n"
+        f"Produce the edited report:"
+    )
+
+
+async def queen_lucidity_pass(
+    report: str,
+    query: str,
+    complete_fn,
+) -> str:
+    """Multi-pass lucidity editing of the queen's output.
+
+    Runs structural organization, clarity, and serendipity highlighting
+    in a single LLM call (the prompt instructs all three passes).
+
+    Args:
+        report: The queen's initial merged report.
+        query: The user's research query.
+        complete_fn: Async LLM completion callable.
+
+    Returns:
+        Polished report string.  Falls back to the original report
+        if the LLM call fails or returns garbage.
+    """
+    if not report or len(report.strip()) < 200:
+        return report
+
+    prompt = _build_lucidity_prompt(report, query)
+
+    try:
+        result = await complete_fn(prompt)
+        # Sanity check: result should be roughly the same length
+        if result and len(result.strip()) > len(report) * 0.5:
+            return result
+        logger.warning(
+            "lucidity pass returned suspiciously short output "
+            "(%d chars vs %d input), keeping original",
+            len(result.strip()) if result else 0, len(report),
+        )
+    except Exception as exc:
+        logger.warning("lucidity pass failed: %s, keeping original", exc)
+
+    return report
