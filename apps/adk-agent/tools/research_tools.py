@@ -187,7 +187,7 @@ async def exa_multi_search(
         return json.dumps({"error": "EXA_API_KEY not set"})
 
     # Safety bounds
-    queries = queries[:10]
+    # Process all queries
     num_results_per_query = min(num_results_per_query, 8)
     text_max_chars = min(text_max_chars, 10_000)
 
@@ -222,15 +222,15 @@ async def exa_multi_search(
                     {
                         "title": r.get("title", ""),
                         "url": r.get("url", ""),
-                        "snippet": " ".join(r.get("highlights", []))[:200]
-                        or r.get("text", "")[:200],
+                        "snippet": " ".join(r.get("highlights", []))
+                        or r.get("text", ""),
                     }
-                    for r in b.get("results", [])[:5]
+                    for r in b.get("results", [])
                 ],
             }
             for b in raw_results
         ],
-        "all_sources": all_sources[:30],  # cap to avoid bloat
+        "all_sources": all_sources,
     }
 
     return json.dumps(output, ensure_ascii=False)

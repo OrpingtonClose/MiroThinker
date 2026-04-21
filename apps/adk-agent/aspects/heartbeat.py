@@ -67,7 +67,7 @@ class HeartbeatAspect(Aspect):
                 ctx.collector.emit_event("phase_error", data={
                     "phase": block.name,
                     "iteration": ctx.iteration,
-                    "error": str(error)[:500],
+                    "error": str(error),
                 })
             except Exception:
                 pass

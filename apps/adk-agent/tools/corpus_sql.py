@@ -128,7 +128,7 @@ def _fix_unescaped_quotes(query: str) -> str:
 
     fixed = "".join(result)
     if fixed != query:
-        logger.debug("Fixed unescaped quotes in SQL: %s → %s", query[:200], fixed[:200])
+        logger.debug("Fixed unescaped quotes in SQL: %s → %s", query, fixed)
     return fixed
 
 

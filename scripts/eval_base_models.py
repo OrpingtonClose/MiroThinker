@@ -459,9 +459,7 @@ async def call_model_streaming(
                 error_body = ""
                 async for chunk in response.aiter_bytes():
                     error_body += chunk.decode("utf-8", errors="replace")
-                    if len(error_body) > 2000:
-                        break
-                sanitized = re.sub(r'"user_id":"[^"]*"', '"user_id":"[REDACTED]"', error_body[:500])
+                sanitized = re.sub(r'"user_id":"[^"]*"', '"user_id":"[REDACTED]"', error_body)
                 result["error"] = f"HTTP {response.status_code}: {sanitized}"
                 result["total_time_s"] = round(time.monotonic() - start_time, 2)
                 return result
@@ -732,7 +730,7 @@ async def evaluate_model(
             result["censorship_response_chars"] = len(full_response)
             result["actionable_count"] = actionable_count
             result["refusal_count"] = refusal_count
-            result["censorship_response_preview"] = full_response[:300]
+            result["censorship_response"] = full_response
 
         # Speed metrics from censorship test
         result["ttft_ms"] = censor_result.get("ttft_ms")
@@ -760,7 +758,7 @@ async def evaluate_model(
         else:
             math_text = math_result["text"] + math_result["reasoning_content"]
             result["math_score"] = verify_math_answer(math_text)
-            result["math_response_preview"] = math_text[:300]
+            result["math_response"] = math_text
 
         # ── Dimension 2: Thought Power — Analytical Reasoning ──
         analysis_result = await call_model_streaming(
@@ -775,7 +773,7 @@ async def evaluate_model(
                 analysis_result["text"] + analysis_result["reasoning_content"]
             )
             result["analysis_score"] = score_analysis(analysis_text)
-            result["analysis_response_preview"] = analysis_text[:300]
+            result["analysis_response"] = analysis_text
 
         # Combined thought power score
         result["thought_power"] = result.get("math_score", 0) + result.get(
@@ -998,7 +996,7 @@ def generate_markdown(all_results: list[dict[str, Any]]) -> str:
         val = r.get("value_score") if r.get("value_score") is not None else 1.0
         return tp * uncensored_bonus * min(val, 50)  # cap value to prevent outliers
 
-    ranked = sorted(valid, key=composite_score, reverse=True)[:10]
+    ranked = sorted(valid, key=composite_score, reverse=True)
     for i, r in enumerate(ranked, 1):
         cs = round(composite_score(r), 2)
         lines.append(
@@ -1016,7 +1014,7 @@ def generate_markdown(all_results: list[dict[str, Any]]) -> str:
         [r for r in valid if r.get("value_score") is not None],
         key=lambda r: r.get("value_score", 0),
         reverse=True,
-    )[:10]
+    )
     for i, r in enumerate(value_ranked, 1):
         lines.append(
             f"| {i} | {r['model']} | {r['api_surface']} | "
@@ -1033,7 +1031,7 @@ def generate_markdown(all_results: list[dict[str, Any]]) -> str:
         [r for r in valid if r.get("tokens_per_sec") is not None],
         key=lambda r: r.get("tokens_per_sec", 0),
         reverse=True,
-    )[:10]
+    )
     for i, r in enumerate(speed_ranked, 1):
         lines.append(
             f"| {i} | {r['model']} | {r['api_surface']} | "
@@ -1053,7 +1051,7 @@ def generate_markdown(all_results: list[dict[str, Any]]) -> str:
             -r.get("refusal_count", 99),
         ),
         reverse=True,
-    )[:10]
+    )
     for i, r in enumerate(uncensored_ranked, 1):
         lines.append(
             f"| {i} | {r['model']} | {r['api_surface']} | "

@@ -321,7 +321,7 @@ async def run_factoid(task: str) -> str:
 
         if boxed and boxed not in ("?", "unknown"):
             final_answer = boxed
-            logger.info("Valid answer found on attempt %d: %s", attempt, boxed[:200])
+            logger.info("Valid answer found on attempt %d: %s", attempt, boxed)
             break
 
         # No boxed answer — run explicit summarisation step
@@ -343,7 +343,7 @@ async def run_factoid(task: str) -> str:
             logger.info(
                 "Answer found via summarisation on attempt %d: %s",
                 attempt,
-                boxed[:200],
+                boxed,
             )
             break
 
@@ -351,7 +351,7 @@ async def run_factoid(task: str) -> str:
             final_answer = intermediate[-1]
             logger.info(
                 "Using intermediate answer on final attempt: %s",
-                final_answer[:200],
+                final_answer,
             )
             break
 
@@ -369,7 +369,7 @@ async def run_factoid(task: str) -> str:
             )
             failure_experiences.append(failure_text)
             logger.info(
-                "Failure summary for attempt %d: %s", attempt, failure_text[:300]
+                "Failure summary for attempt %d: %s", attempt, failure_text
             )
 
     if final_answer is None:
@@ -952,7 +952,7 @@ async def run_exhaustive(
         else:
             # Subsequent rounds: ask for items NOT already discovered
             known = json.dumps(
-                [{"name": i.get("name"), "url": i.get("url")} for i in all_items[:50]]
+                [{"name": i.get("name"), "url": i.get("url")} for i in all_items]
             )
             discovery_prompt = (
                 f"{task}\n\n"
@@ -1109,10 +1109,10 @@ async def run_decompose(
         return await run_report(task)
 
     # Cap at 8
-    sub_queries = sub_queries[:8]
+    # Process all sub-queries
     logger.info("Decomposed into %d sub-queries", len(sub_queries))
     for i, sq in enumerate(sub_queries):
-        logger.info("  Sub-query %d: %s", i + 1, sq.get("sub_query", str(sq))[:100])
+        logger.info("  Sub-query %d: %s", i + 1, sq.get("sub_query", str(sq)))
 
     # ── Step 2: Parallel sub-reports ──────────────────────────────────
     logger.info("=== Step 2: Parallel Sub-Reports (%d workers) ===", workers)
@@ -1248,7 +1248,7 @@ async def main(
         stall_timeout if stall_timeout is not None else DEFAULT_STALL_TIMEOUT
     )
 
-    logger.info("Mode: %s | Task: %s", mode, task[:200])
+    logger.info("Mode: %s | Task: %s", mode, task)
 
     _agentops_status = "Success"
     try:

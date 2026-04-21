@@ -132,7 +132,7 @@ class KnowledgePlugin(Plugin):
         logger.info(
             "injected=<%d>, query=<%s> | prior knowledge injected",
             len(insights),
-            query[:80],
+            query,
         )
 
     @hook
@@ -167,7 +167,7 @@ class KnowledgePlugin(Plugin):
                 source_type=self._infer_source_type(source_url),
                 topic=self._infer_topic(self._current_query),
                 confidence=0.7,
-                query_context=self._current_query[:500],
+                query_context=self._current_query,
             )
             self._store.store_insight(insight)
             stored += 1
@@ -243,7 +243,7 @@ class KnowledgePlugin(Plugin):
             if ins.get("source_url"):
                 meta.append(f"source: {ins['source_url']}")
             meta.append(f"confidence: {ins.get('confidence', 0):.2f}")
-            meta.append(f"stored: {ins.get('created_at', '')[:10]}")
+            meta.append(f"stored: {ins.get('created_at', '')}")
             access = ins.get("access_count", 0)
             if access > 1:
                 meta.append(f"accessed {access}x")
@@ -274,7 +274,7 @@ class KnowledgePlugin(Plugin):
             Confirmation message with the stored insight ID.
         """
         if self._store.has_similar_insight(fact):
-            return f"Similar insight already exists, skipping: {fact[:80]}..."
+            return f"Similar insight already exists, skipping: {fact}"
 
         insight = Insight(
             fact=fact,
@@ -284,7 +284,7 @@ class KnowledgePlugin(Plugin):
         )
         insight_id = self._store.store_insight(insight)
         logger.info("id=<%d>, topic=<%s> | insight manually stored", insight_id, topic)
-        return f"Stored insight #{insight_id}: {fact[:80]}..."
+        return f"Stored insight #{insight_id}: {fact}"
 
     @tool
     def recall_entities(self, query: str = "", limit: int = 20) -> str:
@@ -315,7 +315,7 @@ class KnowledgePlugin(Plugin):
                 line += f" ({e['entity_type']})"
             line += f" — {e.get('mention_count', 0)} mention(s)"
             if e.get("description"):
-                line += f"\n  {e['description'][:120]}"
+                line += f"\n  {e['description']}"
             lines.append(line)
         return "\n".join(lines)
 
@@ -555,7 +555,7 @@ class KnowledgePlugin(Plugin):
             w for w in query.lower().split()
             if w not in stop_words and len(w) > 2
         ]
-        return " ".join(words[:4]) if words else ""
+        return " ".join(words) if words else ""
 
     @staticmethod
     def _is_knowledge_message(msg: Any) -> bool:

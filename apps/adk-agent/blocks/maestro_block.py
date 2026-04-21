@@ -140,7 +140,7 @@ class MaestroBlock(PipelineBlock):
             expansion_targets = corpus.get_expansion_targets()
             if expansion_targets:
                 lines = ["=== ENRICHMENT TASKS (from corpus analysis) ==="]
-                for t in expansion_targets[:10]:
+                for t in expansion_targets:
                     lines.append(
                         f"- Finding [{t['id']}] needs enrichment via "
                         f"{t['strategy']}: {t['hint']}"

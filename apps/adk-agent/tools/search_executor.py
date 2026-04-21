@@ -146,7 +146,7 @@ async def _search_brave(query: str, num_results: int = 5) -> str:
                 lines.append(f"- {title} [{url}]: {desc}")
             return "\n".join(lines)
     except Exception as exc:
-        logger.warning("Brave search failed for '%s': %s", query[:60], exc)
+        logger.warning("Brave search failed for '%s': %s", query, exc)
         return ""
 
 
@@ -187,7 +187,7 @@ async def _search_exa(query: str, num_results: int = 5) -> str:
                 lines.append(f"- {title} [{url}]: {content}")
             return "\n".join(lines)
     except Exception as exc:
-        logger.warning("Exa search failed for '%s': %s", query[:60], exc)
+        logger.warning("Exa search failed for '%s': %s", query, exc)
         return ""
 
 
@@ -214,14 +214,14 @@ async def _search_kagi(query: str) -> str:
             lines = [f"Kagi search: {query}"]
             if output:
                 lines.append(output)
-            for r in refs[:5]:
+            for r in refs:
                 title = r.get("title", "")
                 url = r.get("url", "")
                 snippet = r.get("snippet", "")
                 lines.append(f"- {title} [{url}]: {snippet}")
             return "\n".join(lines)
     except Exception as exc:
-        logger.warning("Kagi search failed for '%s': %s", query[:60], exc)
+        logger.warning("Kagi search failed for '%s': %s", query, exc)
         return ""
 
 
@@ -258,7 +258,7 @@ async def _search_tavily(query: str, num_results: int = 5) -> str:
                 lines.append(f"- {title} [{url}]: {content}")
             return "\n".join(lines)
     except Exception as exc:
-        logger.warning("Tavily search failed for '%s': %s", query[:60], exc)
+        logger.warning("Tavily search failed for '%s': %s", query, exc)
         return ""
 
 
@@ -299,12 +299,12 @@ async def _search_perplexity(query: str) -> str:
             if not content:
                 return ""
             lines = [f"Perplexity search: {query}", content]
-            for i, url in enumerate(citations[:10], 1):
+            for i, url in enumerate(citations, 1):
                 if isinstance(url, str):
                     lines.append(f"  [{i}] {url}")
             return "\n".join(lines)
     except Exception as exc:
-        logger.warning("Perplexity search failed for '%s': %s", query[:60], exc)
+        logger.warning("Perplexity search failed for '%s': %s", query, exc)
         return ""
 
 
@@ -335,7 +335,7 @@ async def _search_jina(query: str, num_results: int = 5) -> str:
                 lines.append(f"- {title} [{url}]: {content}")
             return "\n".join(lines)
     except Exception as exc:
-        logger.warning("Jina search failed for '%s': %s", query[:60], exc)
+        logger.warning("Jina search failed for '%s': %s", query, exc)
         return ""
 
 
@@ -367,7 +367,7 @@ async def _search_mojeek(query: str, num_results: int = 5) -> str:
                 lines.append(f"- {title} [{url}]: {desc}")
             return "\n".join(lines)
     except Exception as exc:
-        logger.warning("Mojeek search failed for '%s': %s", query[:60], exc)
+        logger.warning("Mojeek search failed for '%s': %s", query, exc)
         return ""
 
 
@@ -396,7 +396,7 @@ async def _search_marginalia(query: str, num_results: int = 5) -> str:
                 lines.append(f"- {title} [{url}]: {desc}")
             return "\n".join(lines)
     except Exception as exc:
-        logger.warning("Marginalia search failed for '%s': %s", query[:60], exc)
+        logger.warning("Marginalia search failed for '%s': %s", query, exc)
         return ""
 
 
@@ -432,7 +432,7 @@ async def _jina_reader(url: str) -> str:
             lines.append(content)
             return "\n".join(lines)
     except Exception as exc:
-        logger.warning("Jina reader failed for '%s': %s", url[:80], exc)
+        logger.warning("Jina reader failed for '%s': %s", url, exc)
         return ""
 
 
@@ -473,7 +473,7 @@ async def _apify_extract(url: str) -> str:
             lines.append(text)
             return "\n".join(lines)
     except Exception as exc:
-        logger.warning("Apify extract failed for '%s': %s", url[:80], exc)
+        logger.warning("Apify extract failed for '%s': %s", url, exc)
         return ""
 
 
@@ -551,7 +551,7 @@ async def _search_semantic_scholar(
                 url = p.get("url", "")
                 authors = ", ".join(
                     a.get("name", "")
-                    for a in (p.get("authors") or [])[:3]
+                    for a in (p.get("authors") or [])
                 )
                 doi = (p.get("externalIds") or {}).get("DOI", "")
                 ref = f"[{url}]" if url else ""
@@ -565,7 +565,7 @@ async def _search_semantic_scholar(
     except Exception as exc:
         _circuit_record_failure(fn_name)
         logger.error(
-            "Semantic Scholar search FAILED for '%s': %s", query[:60], exc,
+            "Semantic Scholar search FAILED for '%s': %s", query, exc,
         )
         return ""
 
@@ -615,14 +615,14 @@ async def _search_arxiv(query: str, num_results: int = 3) -> str:
                 id_m = re.search(r"<id>(.*?)</id>", entry)
                 entry_url = id_m.group(1).strip() if id_m else ""
                 authors = re.findall(r"<name>(.*?)</name>", entry)
-                author_str = ", ".join(authors[:3])
+                author_str = ", ".join(authors)
                 lines.append(
                     f"- {title} ({author_str}) [{entry_url}]: {summary}"
                 )
             return "\n".join(lines)
     except Exception as exc:
         _circuit_record_failure(fn_name)
-        logger.error("arXiv search FAILED for '%s': %s", query[:60], exc)
+        logger.error("arXiv search FAILED for '%s': %s", query, exc)
         return ""
 
 
@@ -675,7 +675,7 @@ async def _search_scite(query: str, num_results: int = 5) -> str:
             return "\n".join(lines)
     except Exception as exc:
         _circuit_record_failure(fn_name)
-        logger.error("scite.ai search FAILED for '%s': %s", query[:60], exc)
+        logger.error("scite.ai search FAILED for '%s': %s", query, exc)
         return ""
 
 
@@ -1103,7 +1103,7 @@ def _validate_query_relevance(
             rejected.append(q)
             logger.warning(
                 "QUERY REJECTED (zero topical overlap with user query): %r",
-                q[:120],
+                q,
             )
 
     if rejected:
@@ -1177,8 +1177,8 @@ def _dissolve_via_llm(
         return []
 
     prompt = _DISSOLUTION_PROMPT.format(
-        user_query=user_query[:2000],
-        strategy=strategy_text[:3000],
+        user_query=user_query,
+        strategy=strategy_text,
     )
 
     body = _json.dumps({
@@ -1224,7 +1224,7 @@ def _dissolve_via_llm(
             seen.add(normalised)
             queries.append(q)
 
-    return queries[:12]
+    return queries
 
 
 def _regex_extract_queries(strategy_text: str) -> list[str]:
@@ -1262,7 +1262,7 @@ def _regex_extract_queries(strategy_text: str) -> list[str]:
                 seen.add(normalised)
                 queries.append(q)
 
-    return queries[:10]
+    return queries
 
 
 def extract_search_queries(
@@ -1417,8 +1417,8 @@ def _generate_serendipitous_queries(
             if proxy_url:
                 prompt = _SERENDIPITY_DISSOLUTION_PROMPT.format(
                     n=n_variants,
-                    user_query=user_query[:1000],
-                    queries="\n".join(f"- {q}" for q in queries[:8]),
+                    user_query=user_query,
+                    queries="\n".join(f"- {q}" for q in queries),
                 )
                 body = _json.dumps({
                     "model": "flock-model",
@@ -1477,7 +1477,7 @@ def _generate_serendipitous_queries(
     selected = rng.sample(queries, min(n_variants, len(queries)))
     variants = []
     for q in selected:
-        short_q = q[:80].strip()
+        short_q = q.strip()
         template = rng.choice(_TEMPLATES)
         variant = template.replace("{q}", short_q)
         if len(variant) >= 10:
@@ -1601,14 +1601,14 @@ async def run_search_executor(
 
     # A1. Expansion targets from the corpus
     expansion_targets = corpus.get_expansion_targets()
-    for target in expansion_targets[:6]:
+    for target in expansion_targets:
         tool = target.get("strategy", "brave_web_search")
         hint = target.get("hint", "")
         if hint:
             # Skip expansion hints that match previously executed queries
             if hint.strip().lower() in executed_fps:
                 stats["queries_deduped"] += 1
-                logger.debug("Skipping duplicate expansion query: %s", hint[:80])
+                logger.debug("Skipping duplicate expansion query: %s", hint)
                 continue
             search_tasks.append(
                 (tool, hint, f"expansion_{tool}", target["id"]),
@@ -1654,7 +1654,7 @@ async def run_search_executor(
         # Skip queries already executed in previous iterations
         if query.strip().lower() in executed_fps:
             stats["queries_deduped"] += 1
-            logger.debug("Skipping duplicate strategy query: %s", query[:80])
+            logger.debug("Skipping duplicate strategy query: %s", query)
             continue
         fan_out_tasks.append((query, i))
         new_queries.append(query)
@@ -1869,7 +1869,7 @@ async def run_search_executor(
                 except Exception:
                     logger.warning(
                         "Failed to ingest extracted content from %s",
-                        ext_url[:80], exc_info=True,
+                        ext_url, exc_info=True,
                     )
 
             logger.info(
@@ -1886,7 +1886,7 @@ async def run_search_executor(
             "Phase C: academic search triggered by thinker strategy",
         )
 
-        academic_queries = strategy_queries[:3]
+        academic_queries = strategy_queries
 
         async def _bounded_academic(coro: Any) -> str:
             async with semaphore:
@@ -1898,7 +1898,7 @@ async def run_search_executor(
             academic_coros.append(_bounded_academic(_search_arxiv(q)))
 
         if _SCITE_REFRESH_TOKEN and _SCITE_CLIENT_ID:
-            for q in academic_queries[:2]:
+            for q in academic_queries:
                 academic_coros.append(_bounded_academic(_search_scite(q)))
 
         academic_results = await asyncio.gather(
@@ -2008,7 +2008,7 @@ async def run_search_executor(
                 except Exception:
                     logger.warning(
                         "Failed to ingest citation from %s",
-                        follow_url[:80], exc_info=True,
+                        follow_url, exc_info=True,
                     )
 
             logger.info(

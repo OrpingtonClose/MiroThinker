@@ -69,12 +69,12 @@ class BlockMaintainer:
         report = DiagnosticReport(
             block_name=block.name,
             error_type=type(error).__name__,
-            error_message=str(error)[:1000],
+            error_message=str(error),
             context_snapshot={
                 "iteration": ctx.iteration,
-                "user_query": ctx.user_query[:200] if ctx.user_query else "",
+                "user_query": ctx.user_query if ctx.user_query else "",
                 "has_corpus": ctx.corpus is not None,
-                "state_keys": list(ctx.state.keys())[:20],
+                "state_keys": list(ctx.state.keys()),
             },
         )
 
