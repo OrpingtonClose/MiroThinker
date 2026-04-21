@@ -353,9 +353,15 @@ def main() -> None:
     config.enable_hive_memory = True
     config.enable_diversity_aware_gossip = True
 
-    # Cap max gossip rounds to prevent context overflow in queen merge
-    # with 32K context models. 5 rounds is enough for convergence.
+    # ── Context-aware tuning for 32K token models ──
+    # DeepSeek-R1-Distill-Qwen-32B has 32768 token context (~130K chars).
+    # Worker outputs accumulate across gossip rounds, so we cap everything
+    # to prevent context overflow in gossip prompts and queen merge.
     config.max_gossip_rounds = int(os.environ.get("SWARM_MAX_GOSSIP_ROUNDS", "5"))
+    config.max_summary_chars = int(os.environ.get("SWARM_MAX_SUMMARY_CHARS", "5000"))
+    config.worker_max_tokens = int(os.environ.get("SWARM_WORKER_MAX_TOKENS", "4096"))
+    config.queen_max_tokens = int(os.environ.get("SWARM_QUEEN_MAX_TOKENS", "8192"))
+    config.context_budget = int(os.environ.get("SWARM_CONTEXT_BUDGET", "80000"))
 
     if args.workers > 0:
         config.max_workers = args.workers
