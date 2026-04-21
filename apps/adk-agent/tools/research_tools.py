@@ -222,15 +222,16 @@ async def exa_multi_search(
                     {
                         "title": r.get("title", ""),
                         "url": r.get("url", ""),
-                        "snippet": " ".join(r.get("highlights", []))
-                        or r.get("text", ""),
+                        "snippet": (" ".join(r.get("highlights", []))
+                        or r.get("text", ""))[:500],
                     }
-                    for r in b.get("results", [])
+                    for r in b.get("results", [])[:5]
                 ],
             }
             for b in raw_results
         ],
-        "all_sources": all_sources,
+        # Context bound — full data preserved in API response, this caps agent-facing output
+        "all_sources": all_sources[:50],
     }
 
     return json.dumps(output, ensure_ascii=False)

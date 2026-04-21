@@ -719,13 +719,12 @@ class ConditionStore:
                    WHERE consider_for_use = TRUE
                      AND row_type = 'finding'
                      AND confidence < 0.4
-                   ORDER BY confidence ASC
-                   LIMIT 20"""
+                   ORDER BY confidence ASC"""
             ).fetchall()
             if low_conf:
                 lines.append(f"\n--- LOW CONFIDENCE ({len(low_conf)} claims need verification) ---")
                 for cid, fact, conf, angle in low_conf:
-                    lines.append(f"  [#{cid}] conf={conf:.2f} [{angle}]: {fact[:200]}")
+                    lines.append(f"  [#{cid}] conf={conf:.2f} [{angle}]: {fact}")
 
             # Unverified/speculative
             speculative = self.conn.execute(
@@ -734,12 +733,12 @@ class ConditionStore:
                    WHERE consider_for_use = TRUE
                      AND row_type = 'finding'
                      AND verification_status = 'speculative'
-                   LIMIT 20"""
+                   ORDER BY id ASC"""
             ).fetchall()
             if speculative:
                 lines.append(f"\n--- SPECULATIVE ({len(speculative)} unverified claims) ---")
                 for cid, fact, angle in speculative:
-                    lines.append(f"  [#{cid}] [{angle}]: {fact[:200]}")
+                    lines.append(f"  [#{cid}] [{angle}]: {fact}")
 
             # Unfulfilled expansion hints
             unfulfilled = self.conn.execute(
@@ -747,8 +746,7 @@ class ConditionStore:
                    FROM conditions
                    WHERE expansion_gap != ''
                      AND expansion_fulfilled = FALSE
-                   ORDER BY expansion_priority DESC
-                   LIMIT 10"""
+                   ORDER BY expansion_priority DESC"""
             ).fetchall()
             if unfulfilled:
                 lines.append(f"\n--- EXPANSION GAPS ({len(unfulfilled)} unfulfilled) ---")
@@ -761,22 +759,19 @@ class ConditionStore:
                    FROM conditions c1
                    JOIN conditions c2 ON c1.contradiction_partner = c2.id
                    WHERE c1.contradiction_flag = TRUE
-                     AND c1.id < c2.id
-                   LIMIT 10"""
+                     AND c1.id < c2.id"""
             ).fetchall()
             if contradictions:
                 lines.append(f"\n--- CONTRADICTIONS ({len(contradictions)} pairs) ---")
                 for c1_id, c1_fact, c2_id, c2_fact in contradictions:
-                    lines.append(f"  [#{c1_id}]: {c1_fact[:150]}")
-                    lines.append(f"  vs [#{c2_id}]: {c2_fact[:150]}")
+                    lines.append(f"  [#{c1_id}]: {c1_fact}")
+                    lines.append(f"  vs [#{c2_id}]: {c2_fact}")
 
             # Previous synthesis highlights
             prev_synthesis = self.get_synthesis(iteration)
             if prev_synthesis:
                 lines.append(f"\n--- PRIOR SYNTHESIS (iteration {iteration}) ---")
-                lines.append(prev_synthesis[:2000])
-                if len(prev_synthesis) > 2000:
-                    lines.append(f"... ({len(prev_synthesis) - 2000} more chars in full synthesis)")
+                lines.append(prev_synthesis)
 
             # Angle coverage
             angles = self.conn.execute(
@@ -810,7 +805,7 @@ class ConditionStore:
                     if phase == "gossip_round_2":
                         for marker in ("unresolvable", "unresolved", "contradiction"):
                             if marker in (fact or "").lower():
-                                snippet = " ".join((fact or "").split())[:200]
+                                snippet = " ".join((fact or "").split())
                                 swarm_lines.append(
                                     f"  [#{cid}, {phase}, angle={g_angle}]: "
                                     f"{snippet}"
@@ -886,7 +881,7 @@ class ConditionStore:
                      AND row_type = 'finding'
                      AND confidence >= 0.7
                    ORDER BY confidence DESC
-                   """
+                   LIMIT 200"""
             ).fetchall()
             if high_conf:
                 lines.append(f"\n{'='*60}")

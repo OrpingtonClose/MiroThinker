@@ -1276,7 +1276,7 @@ def extract_search_queries(
     rich search queries.  Falls back to regex extraction if the LLM
     call fails.
 
-    Returns deduplicated queries, capped at 12.
+    Returns deduplicated queries.
     """
     if not strategy_text or not strategy_text.strip():
         return []
@@ -1601,7 +1601,8 @@ async def run_search_executor(
 
     # A1. Expansion targets from the corpus
     expansion_targets = corpus.get_expansion_targets()
-    for target in expansion_targets:
+    # API cost bound — each target triggers a fan-out search across multiple APIs
+    for target in expansion_targets[:10]:
         tool = target.get("strategy", "brave_web_search")
         hint = target.get("hint", "")
         if hint:
