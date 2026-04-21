@@ -157,3 +157,6 @@ class SwarmConfig:
         # min_gossip_rounds must not exceed gossip_rounds
         if self.min_gossip_rounds > self.gossip_rounds:
             self.min_gossip_rounds = self.gossip_rounds
+        # max_gossip_rounds must be >= gossip_rounds
+        if self.max_gossip_rounds < self.gossip_rounds:
+            self.max_gossip_rounds = self.gossip_rounds

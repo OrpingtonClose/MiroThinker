@@ -399,7 +399,7 @@ class GossipSwarm:
         rounds_executed = 0
         delta_text = ""  # corpus delta injection text for next round
 
-        for gossip_round in range(1, config.gossip_rounds + 1):
+        for gossip_round in range(1, config.max_gossip_rounds + 1):
             # Save previous summaries for convergence check
             for a in assignments:
                 a.prev_summary = a.summary
