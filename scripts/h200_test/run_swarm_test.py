@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -80,9 +81,11 @@ def _strip_thinking(text: str) -> str:
     return _THINK_RE.sub("", text).strip()
 
 
-# Track which phase the current LLM call belongs to (set by callers)
-_current_phase: str = "unknown"
-_current_worker: str = ""
+# Async-safe context for phase/worker attribution in LLM call logging.
+# Each completion function closure sets these before calling _vllm_complete,
+# so concurrent async workers log the correct phase/worker identity.
+_ctx_phase: contextvars.ContextVar[str] = contextvars.ContextVar("_ctx_phase", default="unknown")
+_ctx_worker: contextvars.ContextVar[str] = contextvars.ContextVar("_ctx_worker", default="")
 
 
 async def _vllm_complete(
@@ -94,6 +97,9 @@ async def _vllm_complete(
 ) -> str:
     """Call vLLM OpenAI-compatible chat completions endpoint."""
     import httpx
+
+    phase = _ctx_phase.get()
+    worker = _ctx_worker.get()
 
     url = f"{api_base}/chat/completions"
     payload = {
@@ -116,12 +122,11 @@ async def _vllm_complete(
             cleaned = _strip_thinking(raw)
             elapsed = time.monotonic() - t0
 
-            # Log full LLM call to SQLite
             log_llm_call(
-                phase=_current_phase,
+                phase=phase,
                 prompt=prompt,
                 response=cleaned,
-                worker=_current_worker,
+                worker=worker,
                 model=model,
                 max_tokens=max_tokens,
                 temperature=temperature,
@@ -134,10 +139,10 @@ async def _vllm_complete(
                 "model=<%s>, url=<%s> | vLLM call failed", model, url,
             )
             log_llm_call(
-                phase=_current_phase,
+                phase=phase,
                 prompt=prompt,
                 response="",
-                worker=_current_worker,
+                worker=worker,
                 model=model,
                 max_tokens=max_tokens,
                 temperature=temperature,
@@ -152,12 +157,22 @@ def make_complete_fn(
     default_model: str,
     max_tokens: int = 16384,
     temperature: float = 0.3,
+    *,
+    phase: str = "unknown",
+    worker: str = "",
 ):
-    """Create a CompleteFn bound to a specific model and endpoint."""
+    """Create a CompleteFn bound to a specific model, endpoint, and phase/worker context.
+
+    The phase and worker are captured in the closure and set via
+    contextvars before each LLM call, so concurrent async workers
+    log the correct attribution in the execution graph.
+    """
     api_base = _get_api_base()
     model = _get_model(model_env, default_model)
 
     async def _complete(prompt: str) -> str:
+        _ctx_phase.set(phase)
+        _ctx_worker.set(worker)
         return await _vllm_complete(
             prompt, model, api_base, max_tokens, temperature,
         )
@@ -217,16 +232,21 @@ async def run_swarm_test(
         "SWARM_WORKER_MODEL", default_model,
         max_tokens=config.worker_max_tokens,
         temperature=config.worker_temperature,
+        phase="worker",
     )
     queen_fn = make_complete_fn(
         "SWARM_QUEEN_MODEL", default_model,
         max_tokens=config.queen_max_tokens,
         temperature=config.queen_temperature,
+        phase="queen_merge",
+        worker="queen",
     )
     serendipity_fn = make_complete_fn(
         "SWARM_SERENDIPITY_MODEL", default_model,
         max_tokens=config.worker_max_tokens,
         temperature=0.5,  # Slightly higher for serendipity creativity
+        phase="serendipity",
+        worker="serendipity",
     )
 
     swarm = GossipSwarm(
@@ -237,9 +257,14 @@ async def run_swarm_test(
         config=config,
     )
 
-    # Progress callback
+    # Progress callback — also updates phase contextvar so worker LLM
+    # calls logged during gossip rounds get the correct phase attribution.
     async def on_event(event: dict) -> None:
         phase = event.get("type", "unknown")
+        worker_id = event.get("worker", "")
+        _ctx_phase.set(phase)
+        if worker_id:
+            _ctx_worker.set(str(worker_id))
         logger.info("swarm_event=<%s> | %s", phase, json.dumps(event, default=str))
 
     logger.info(

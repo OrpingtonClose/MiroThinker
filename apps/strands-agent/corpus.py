@@ -1197,6 +1197,7 @@ class ConditionStore:
         summary = response[:300] if response else f"[LLM call failed: {error[:100]}]"
         metadata = json.dumps({
             "model": model,
+            "worker": worker,
             "input_chars": len(prompt),
             "output_chars": len(response),
             "max_tokens": max_tokens,
