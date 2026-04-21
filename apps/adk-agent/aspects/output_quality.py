@@ -137,7 +137,7 @@ def check_instruction_regurgitation(text: str) -> dict[str, Any]:
 
     return {
         "flagged": len(markers) >= 2,  # Single match could be coincidence
-        "markers": markers[:5],
+        "markers": markers,
     }
 
 

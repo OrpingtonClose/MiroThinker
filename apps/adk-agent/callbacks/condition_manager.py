@@ -222,7 +222,7 @@ def _score_and_battery(state: dict) -> dict:
         expansion_targets = corpus.get_expansion_targets()
         logger.info(
             "Expansion targets for next iteration: %s",
-            [t["strategy"] for t in expansion_targets[:5]],
+            [t["strategy"] for t in expansion_targets],
         )
 
     return battery_results

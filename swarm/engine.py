@@ -71,6 +71,8 @@ from swarm.angles import (
     assign_workers,
     detect_angles_via_llm,
     detect_sections,
+    extract_required_angles,
+    merge_angles,
     score_section_angle_pairs,
     _prepare_sections,
 )
@@ -249,12 +251,36 @@ class GossipSwarm:
             len(sections), len(corpus),
         )
 
+        # Extract required angles from the user's query (prompt-driven
+        # guarantee).  These angles are always included regardless of what
+        # the corpus contains — prevents underrepresented topics from being
+        # absorbed into dominant ones.
+        required_angles = list(config.required_angles)
+        if not required_angles:
+            required_angles = await extract_required_angles(
+                query, self.complete,
+            )
+            metrics.total_llm_calls += 1
+
+        if required_angles:
+            logger.info(
+                "required_angles=<%s> | prompt-driven angle guarantee active",
+                required_angles,
+            )
+
         # Detect angles via LLM (or fall back to section titles)
-        angles = await detect_angles_via_llm(
+        detected_angles = await detect_angles_via_llm(
             corpus, query, self.complete,
             max_angles=config.max_workers,
         )
-        metrics.total_llm_calls += 1 if angles else 0
+        metrics.total_llm_calls += 1 if detected_angles else 0
+
+        # Merge: required angles first, then detected angles fill remaining
+        angles = merge_angles(
+            detected=detected_angles or [s.title for s in sections[:config.max_workers]],
+            required=required_angles,
+            max_angles=config.max_workers,
+        )
 
         if not angles:
             angles = [s.title for s in sections[:config.max_workers]]
@@ -353,7 +379,7 @@ class GossipSwarm:
                 "corpus_chars": len(corpus),
                 "section_count": len(sections),
                 "angle_count": len(angles),
-                "query": query[:200],
+                "query": query,
             },
         ))
 
@@ -377,12 +403,12 @@ class GossipSwarm:
                     )
                 except Exception:
                     logger.warning(
-                        "worker_id=<%d>, angle=<%s> | worker synthesis failed, using raw truncation",
+                        "worker_id=<%d>, angle=<%s> | worker synthesis failed, using raw content",
                         assignment.worker_id, assignment.angle,
                     )
                     assignment.summary = assignment.raw_content[:config.max_summary_chars]
                     metrics.degradations.append(
-                        f"Worker {assignment.angle} synthesis failed, used raw truncation"
+                        f"Worker {assignment.angle} synthesis failed, used raw content"
                     )
 
         await asyncio.gather(*[_bounded_synthesize(a) for a in assignments])
@@ -603,7 +629,7 @@ class GossipSwarm:
             if gaps_found:
                 await _emit_event({
                     "type": "research_gap",
-                    "gaps": gaps_found[:10],
+                    "gaps": gaps_found,
                     "round": gossip_round,
                 })
                 logger.info(

@@ -132,7 +132,7 @@ def _preflight_api_check() -> dict[str, dict]:
             if "HTTP Error 4" in err_str or "HTTP Error 405" in err_str:
                 results[name] = {"reachable": True}
             else:
-                results[name] = {"reachable": False, "error": err_str[:200]}
+                results[name] = {"reachable": False, "error": err_str}
 
     return results
 

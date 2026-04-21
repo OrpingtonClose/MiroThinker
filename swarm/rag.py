@@ -126,7 +126,6 @@ def query_hive(
     exclude_angle: str,
     top_k: int = 5,
     min_score: float = 1.5,
-    max_chars_per_entry: int = 2000,
 ) -> list[str]:
     """Find the top-K most relevant entries from OTHER bees.
 
@@ -139,7 +138,6 @@ def query_hive(
         exclude_angle: The querying bee's own angle (excluded from results).
         top_k: Maximum number of entries to return.
         min_score: Minimum relevance score to include.
-        max_chars_per_entry: Truncate long entries to this length.
 
     Returns:
         List of formatted strings, each describing a relevant finding
@@ -171,8 +169,6 @@ def query_hive(
     results: list[str] = []
     for relevance, entry in scored[:top_k]:
         content = entry.content
-        if len(content) > max_chars_per_entry:
-            content = content[:max_chars_per_entry] + "..."
 
         phase_label = entry.phase.replace("_", " ").title()
         angle_label = entry.angle or "cross-angle"
@@ -184,7 +180,7 @@ def query_hive(
         logger.debug(
             "hive_query concepts=<%s>, exclude=<%s>, results=<%d> | "
             "hive memory query complete",
-            concepts[:5], exclude_angle, len(results),
+            concepts, exclude_angle, len(results),
         )
 
     return results

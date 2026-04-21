@@ -130,7 +130,7 @@ async def queen_merge(
     query: str,
     complete_fn,
     serendipity_insights: str = "",
-    max_summary_chars: int = 6000,
+    max_summary_chars: int = 100000,
 ) -> str:
     """Merge all worker summaries + serendipity insights into final answer.
 
@@ -310,11 +310,8 @@ async def build_knowledge_report(
         logger.warning("knowledge report exec summary failed: %s", exc)
         exec_summary = fallback_summary
 
-    # Derive a clean title from the query (first sentence, capped at 100 chars on word boundary)
+    # Derive a clean title from the query (first sentence)
     title_text = query.split(".")[0].split("?")[0].split("\n")[0].strip()
-    if len(title_text) > 100:
-        # Cut on word boundary
-        title_text = title_text[:100].rsplit(" ", 1)[0] + "..."
 
     # Assemble the full knowledge report
     parts = [

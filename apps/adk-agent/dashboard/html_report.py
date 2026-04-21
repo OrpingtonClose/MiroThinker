@@ -27,8 +27,8 @@ from typing import Any
 
 def generate_dashboard_html(data: dict[str, Any]) -> str:
     """Return a self-contained HTML string for the pipeline dashboard."""
-    query = html.escape(data.get("query", "")[:200])
-    session_id = html.escape(data.get("session_id", "")[:16])
+    query = html.escape(data.get("query", ""))
+    session_id = html.escape(data.get("session_id", ""))
     elapsed = data.get("elapsed_secs", 0)
     kpi = data.get("kpi", {})
     phases = data.get("phases", [])
@@ -72,7 +72,7 @@ def generate_dashboard_html(data: dict[str, Any]) -> str:
         if t.get("was_compressed"):
             badges += f'<span class="badge info">COMPRESSED {t.get("original_chars", 0)}→{t.get("result_chars", 0)}</span> '
         if t.get("error"):
-            badges += f'<span class="badge danger">{html.escape(t["error"][:80])}</span>'
+            badges += f'<span class="badge danger">{html.escape(t["error"])}</span>'
 
         tool_rows += f"""
         <tr{error_class}>
@@ -81,7 +81,7 @@ def generate_dashboard_html(data: dict[str, Any]) -> str:
           <td>{html.escape(t.get('agent', ''))}</td>
           <td class="mono">{t.get('duration_secs', 0):.2f}s</td>
           <td>{t.get('result_chars', 0):,}</td>
-          <td class="args-cell">{html.escape(t.get('args_summary', '')[:120])}</td>
+          <td class="args-cell">{html.escape(t.get('args_summary', ''))}</td>
           <td>{badges}</td>
         </tr>"""
 
@@ -120,7 +120,7 @@ def generate_dashboard_html(data: dict[str, Any]) -> str:
         for d in dedup_blocks:
             rows += f"""<tr>
               <td><code>{html.escape(d.get('tool_name', ''))}</code></td>
-              <td>{html.escape(d.get('query_key', '')[:80])}</td>
+              <td>{html.escape(d.get('query_key', ''))}</td>
               <td>{d.get('consecutive', 0)}</td>
             </tr>"""
         algo_sections += f"""
@@ -198,7 +198,7 @@ def generate_dashboard_html(data: dict[str, Any]) -> str:
           <td><span class="badge {_event_badge_class(e.get('event_type', ''))}">{html.escape(e.get('event_type', ''))}</span></td>
           <td>{html.escape(e.get('agent', ''))}</td>
           <td>{html.escape(e.get('phase', ''))}</td>
-          <td class="args-cell">{html.escape(json.dumps(e.get('data', {}), default=str)[:200])}</td>
+          <td class="args-cell">{html.escape(json.dumps(e.get('data', {}), default=str))}</td>
         </tr>"""
 
     # Stall warning banner

@@ -119,6 +119,91 @@ def detect_sections(corpus: str) -> list[CorpusSection]:
     ]
 
 
+async def extract_required_angles(
+    query: str,
+    complete_fn,
+) -> list[str]:
+    """Extract mandatory research angles from the user's query.
+
+    If the user mentions specific compounds, domains, or topics, each
+    one becomes a required angle that the swarm MUST cover regardless
+    of corpus composition.  This prevents underrepresented topics from
+    being absorbed into dominant ones.
+
+    Args:
+        query: The user's research query.
+        complete_fn: Async LLM completion callable.
+
+    Returns:
+        List of required angle labels (may be empty).
+    """
+    prompt = (
+        "You are a research strategist. Read the user's query and extract "
+        "the DISTINCT TOPICS, COMPOUNDS, DOMAINS, or ENTITIES that the user "
+        "explicitly wants investigated. Each becomes a mandatory research "
+        "angle.\n\n"
+        "Rules:\n"
+        "- Only extract topics the user EXPLICITLY mentions or clearly implies\n"
+        "- Each angle should be a concise label (2-6 words)\n"
+        "- Do NOT invent angles the user didn't ask about\n"
+        "- If the query mentions 5 compounds, return 5 angles\n"
+        "- If the query is broad/vague with no specific topics, return nothing\n\n"
+        "Return one per line, prefixed with REQUIRED:\n"
+        "If no specific topics are identifiable, return: REQUIRED: NONE\n\n"
+        f"USER QUERY: {query}"
+    )
+
+    try:
+        response = await complete_fn(prompt)
+        angles: list[str] = []
+        for line in response.split("\n"):
+            line = line.strip()
+            if line.upper().startswith("REQUIRED:"):
+                a = line[9:].strip().strip("'\"-.•*")
+                if a and len(a) > 2 and a.upper() != "NONE":
+                    angles.append(a[:80])
+        return angles
+    except Exception:
+        return []
+
+
+def merge_angles(
+    detected: list[str],
+    required: list[str],
+    max_angles: int,
+) -> list[str]:
+    """Merge LLM-detected angles with prompt-required angles.
+
+    Required angles always appear first.  Detected angles fill
+    remaining slots, skipping any that duplicate a required angle
+    (case-insensitive substring match).
+
+    Args:
+        detected: Angles detected from corpus content.
+        required: Mandatory angles from user query.
+        max_angles: Maximum total angles.
+
+    Returns:
+        Merged angle list (at most ``max_angles`` entries).
+    """
+    if not required:
+        return detected[:max_angles]
+
+    merged = list(required)
+    required_lower = {r.lower() for r in required}
+
+    for angle in detected:
+        if len(merged) >= max_angles:
+            break
+        # Skip if this detected angle overlaps with a required one
+        a_lower = angle.lower()
+        if any(r in a_lower or a_lower in r for r in required_lower):
+            continue
+        merged.append(angle)
+
+    return merged[:max_angles]
+
+
 async def detect_angles_via_llm(
     corpus: str,
     query: str,
@@ -129,6 +214,11 @@ async def detect_angles_via_llm(
 
     Falls back to structural section titles if LLM fails.
     """
+    # Use a generous corpus preview for angle detection — local models
+    # have large context windows and need enough material to identify
+    # underrepresented topics.
+    corpus_preview = corpus[:30000]
+
     prompt = (
         "You are a research strategist. Read the following corpus excerpt "
         "and identify the distinct specialist research ANGLES — the separate "
@@ -140,7 +230,7 @@ async def detect_angles_via_llm(
         f"Return 2-{max_angles} angles, one per line, prefixed with ANGLE:\n"
         "If the material only has one coherent direction, return just one.\n\n"
         f"USER QUERY: {query}\n\n"
-        f"CORPUS (first 8000 chars):\n{corpus[:8000]}"
+        f"CORPUS (first {len(corpus_preview)} chars):\n{corpus_preview}"
     )
 
     try:
@@ -248,7 +338,7 @@ async def score_section_angle_pairs(
     # Build compact section previews
     section_descs = []
     for i, s in enumerate(sections):
-        preview = s.content[:500].replace("\n", " ")
+        preview = s.content[:2000].replace("\n", " ")
         section_descs.append(f"S{i}: \"{s.title}\" — {preview}")
 
     angle_descs = []

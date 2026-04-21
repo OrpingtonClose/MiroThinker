@@ -146,7 +146,7 @@ async def _comprehend_query(query: str) -> QueryComprehension:
         # Fallback: minimal comprehension from query words
         words = [w for w in re.split(r"\W+", query.lower()) if len(w) > 3]
         return QueryComprehension(
-            entities=words[:10],
+            entities=words,
             sub_questions=[query],
             semantic_summary=query,
         )
@@ -161,17 +161,17 @@ async def _comprehend_query(query: str) -> QueryComprehension:
     except json.JSONDecodeError:
         words = [w for w in re.split(r"\W+", query.lower()) if len(w) > 3]
         return QueryComprehension(
-            entities=words[:10],
+            entities=words,
             sub_questions=[query],
             semantic_summary=query,
         )
 
     return QueryComprehension(
-        entities=data.get("entities", [])[:20],
-        domains=data.get("domains", [])[:15],
-        implicit_questions=data.get("implicit_questions", [])[:10],
-        adjacent_territories=data.get("adjacent_territories", [])[:10],
-        sub_questions=data.get("sub_questions", [])[:6],
+        entities=data.get("entities", []),
+        domains=data.get("domains", []),
+        implicit_questions=data.get("implicit_questions", []),
+        adjacent_territories=data.get("adjacent_territories", []),
+        sub_questions=data.get("sub_questions", []),
         semantic_summary=data.get("semantic_summary", ""),
         core_need=data.get("core_need", ""),
     )
@@ -191,7 +191,7 @@ def _extract_sub_questions(comp: QueryComprehension) -> list[str]:
                 questions.append(iq)
             if len(questions) >= 6:
                 break
-    return questions[:6]
+    return questions
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +223,7 @@ async def _probe_brave(query: str) -> dict[str, Any]:
                         "url": r.get("url", ""),
                         "snippet": r.get("description", ""),
                     }
-                    for r in results[:3]
+                    for r in results
                 ],
                 "error": None,
             }
@@ -253,7 +253,7 @@ async def _probe_kagi(query: str) -> dict[str, Any]:
                         "url": r.get("url", ""),
                         "snippet": r.get("snippet", ""),
                     }
-                    for r in refs[:3]
+                    for r in refs
                 ],
                 "summary": output if output else "",
                 "error": None,
@@ -432,7 +432,7 @@ async def run_scout_phase(
             a timed-out scout from overwriting state after the
             research loop has started.
     """
-    logger.info("Phase 0 scout: starting for query: %s", query[:100])
+    logger.info("Phase 0 scout: starting for query: %s", query)
 
     # Step 1: Comprehend
     comprehension = await _comprehend_query(query)

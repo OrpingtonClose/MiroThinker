@@ -95,7 +95,7 @@ class CostTracker:
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "provider": provider,
-            "query": query[:200],
+            "query": query,
             "estimated_cost_usd": round(cost, 4),
             "session_total_usd": 0.0,
         }

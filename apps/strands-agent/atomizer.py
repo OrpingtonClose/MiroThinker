@@ -1,29 +1,26 @@
-"""LLM-based text atomisation via Venice API.
+"""LLM-based text atomisation via local vLLM endpoint.
 
 Replaces Flock's in-SQL llm_complete for decomposing free text into
 atomic factual claims. Each atom is a dict ready for ConditionStore.admit().
 
-Uses the same Venice API endpoint as swarm_bridge.py workers.
+Uses the same localhost-only guard as swarm_bridge.py — no remote APIs.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
 
 import httpx
 
+from urllib.parse import urlparse
+
 logger = logging.getLogger(__name__)
 
-_VENICE_API_BASE = os.environ.get(
-    "VENICE_API_BASE", "https://api.venice.ai/api/v1"
-)
-_VENICE_API_KEY = os.environ.get("VENICE_API_KEY", "")
 _ATOMIZER_MODEL = os.environ.get(
     "ATOMIZER_MODEL",
-    os.environ.get("SWARM_WORKER_MODEL", "olafangensan-glm-4.7-flash-heretic"),
+    os.environ.get("SWARM_WORKER_MODEL", "gemma-4-uncensored"),
 )
 
 # Regex patterns for parsing atomised output
@@ -62,7 +59,7 @@ async def atomize_text(
     """Decompose free text into atomic factual claims via LLM.
 
     Each atom is a dict with: fact, source_url, confidence, angle.
-    Uses Venice API directly (same endpoint as swarm workers).
+    Uses local Ollama endpoint (same as swarm workers).
 
     Args:
         text: Raw text to atomise.
@@ -78,7 +75,7 @@ async def atomize_text(
     query_clause = f"Research query: {user_query}\n\n" if user_query else ""
     prompt = ATOMISATION_PROMPT.format(query_clause=query_clause, text=text)
 
-    raw_output = await _venice_complete(
+    raw_output = await _local_complete(
         prompt, model or _ATOMIZER_MODEL,
     )
 
@@ -163,18 +160,34 @@ def _is_junk(text: str) -> bool:
     return any(lower.startswith(p) for p in junk_prefixes)
 
 
-async def _venice_complete(
+def _get_atomizer_base() -> str:
+    """Resolve the atomizer API base URL, defaulting to localhost vLLM."""
+    return os.environ.get(
+        "SWARM_API_BASE",
+        "http://localhost:8000/v1",
+    )
+
+
+def _assert_localhost(url: str) -> None:
+    """Guard: only allow localhost URLs for model endpoints."""
+    parsed = urlparse(url)
+    hostname = parsed.hostname or ""
+    if hostname not in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        msg = f"Model endpoint must be localhost, got: {url}"
+        raise RuntimeError(msg)
+
+
+async def _local_complete(
     prompt: str,
     model: str,
     max_tokens: int = 4096,
     temperature: float = 0.1,
 ) -> str:
-    """Call Venice API for atomisation. Low temperature for precision."""
-    url = f"{_VENICE_API_BASE}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {_VENICE_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    """Call localhost vLLM for atomisation. Low temperature for precision."""
+    base = _get_atomizer_base()
+    _assert_localhost(base)
+
+    url = f"{base}/chat/completions"
     payload = {
         "model": model,
         "messages": [
@@ -183,12 +196,11 @@ async def _venice_complete(
         ],
         "max_tokens": max_tokens,
         "temperature": temperature,
-        "venice_parameters": {"include_venice_system_prompt": False},
     }
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         try:
-            resp = await client.post(url, json=payload, headers=headers)
+            resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
             return data["choices"][0]["message"]["content"]

@@ -247,7 +247,7 @@ def before_tool_callback(
     _c = get_active_collector()
     if _c:
         agent_name = getattr(tool_context, "agent_name", "researcher")
-        args_summary = str(args)[:300] if args else ""
+        args_summary = str(args) if args else ""
         _c.tool_start(tool_name, agent_name, args_summary)
 
     return None  # allow execution

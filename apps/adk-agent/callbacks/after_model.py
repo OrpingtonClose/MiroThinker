@@ -121,7 +121,7 @@ def after_model_callback(
         boxed = extract_boxed_content(response_text)
         if boxed:
             state["intermediate_boxed_answers"].append(boxed)
-            logger.info("Intermediate boxed answer captured: %s", boxed[:200])
+            logger.info("Intermediate boxed answer captured: %s", boxed)
 
     # Record LLM end in dashboard — but ONLY for actual completions,
     # not partial streaming chunks.  ADK fires after_model_callback on

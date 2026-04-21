@@ -14,6 +14,12 @@ An uncensored model with equivalent capability is strictly better than
 its censored counterpart — it is a superset.  The model hierarchy
 defaults to uncensored-first, with censored fallback only when the
 capability gap justifies it for non-sensitive topics.
+
+Size limits:
+    Defaults are tuned for local models with 262K token context windows
+    (e.g. Gemma-4, Qwen-Claude-Opus on Ollama).  The pipeline preserves
+    ALL raw data and intermediate outputs; only the final queen report
+    is a concise summary.
 """
 
 from __future__ import annotations
@@ -130,18 +136,18 @@ class SwarmConfig:
     max_concurrency: int = int(os.getenv("SWARM_MAX_CONCURRENCY", "0"))  # 0 = max_workers
     gossip_rounds: int = int(os.getenv("SWARM_GOSSIP_ROUNDS", "3"))
     min_gossip_rounds: int = int(os.getenv("SWARM_MIN_GOSSIP_ROUNDS", "2"))
-    max_summary_chars: int = int(os.getenv("SWARM_MAX_SUMMARY_CHARS", "10000"))
-    max_section_chars: int = int(os.getenv("SWARM_MAX_SECTION_CHARS", "30000"))
+    max_summary_chars: int = int(os.getenv("SWARM_MAX_SUMMARY_CHARS", "100000"))
+    max_section_chars: int = int(os.getenv("SWARM_MAX_SECTION_CHARS", "500000"))
     convergence_threshold: float = float(os.getenv("SWARM_CONVERGENCE_THRESHOLD", "0.85"))
-    context_budget: int = int(os.getenv("SWARM_CONTEXT_BUDGET", "100000"))
+    context_budget: int = int(os.getenv("SWARM_CONTEXT_BUDGET", "500000"))
     enable_serendipity: bool = os.getenv("SWARM_SERENDIPITY", "1") == "1"
     enable_full_corpus_gossip: bool = os.getenv("SWARM_FULL_CORPUS_GOSSIP", "1") == "1"
     enable_adaptive_rounds: bool = os.getenv("SWARM_ADAPTIVE_ROUNDS", "1") == "1"
     round_prompts: dict[int, str] = field(default_factory=lambda: dict(DEFAULT_ROUND_PROMPTS))
     worker_temperature: float = 0.3
     queen_temperature: float = 0.3
-    worker_max_tokens: int = 4096
-    queen_max_tokens: int = 8192
+    worker_max_tokens: int = int(os.getenv("SWARM_WORKER_MAX_TOKENS", "16384"))
+    queen_max_tokens: int = int(os.getenv("SWARM_QUEEN_MAX_TOKENS", "32768"))
     enable_semantic_assignment: bool = os.getenv("SWARM_SEMANTIC_ASSIGNMENT", "1") == "1"
     enable_diversity_aware_gossip: bool = os.getenv("SWARM_DAR_GOSSIP", "1") == "1"
     dar_top_k: int = int(os.getenv("SWARM_DAR_TOP_K", "3"))
@@ -149,6 +155,14 @@ class SwarmConfig:
     enable_quality_manifest: bool = True
     corpus_delta_fn: "Callable[[], Awaitable[str]] | None" = None
     max_gossip_rounds: int = int(os.getenv("SWARM_MAX_GOSSIP_ROUNDS", "10"))
+
+    # ── Prompt-driven angle guarantee ────────────────────────────────
+    # Required angles extracted from the user's query.  These are always
+    # included in the final angle list regardless of what the LLM detects
+    # from the corpus.  This prevents underrepresented topics from being
+    # absorbed into dominant ones (e.g. trenbolone disappearing into an
+    # insulin-heavy corpus).
+    required_angles: list[str] = field(default_factory=list)
 
     # ── Thread-discovery mechanisms ──────────────────────────────────
     # Deliberate misassignment: inject off-angle raw data into each bee's
