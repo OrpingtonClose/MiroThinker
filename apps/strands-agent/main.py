@@ -461,12 +461,18 @@ async def _run_job(job: "jobs.JobState") -> None:
     event_bridge: queue.Queue = queue.Queue()
     _SENTINEL = object()  # marks end of orchestrator stream
 
+    orch_thread: threading.Thread | None = None
+
     def _orchestrator_thread() -> None:
         """Run the orchestrator in an isolated asyncio event loop.
 
         Sets the per-job contextvars so that tool callbacks
         (``launch_research``, ``check_tasks``, etc.) can resolve the
         active ``AsyncTaskPool`` and ``ConditionStore``.
+
+        Checks ``cancel_threading`` between yielded events so the
+        thread terminates promptly when the job is cancelled or the
+        main loop stops consuming.
         """
         set_current_task_pool(pool)
         set_current_store(store)
@@ -477,6 +483,8 @@ async def _run_job(job: "jobs.JobState") -> None:
             async def _drain() -> None:
                 try:
                     async for ev in _orchestrator.run(job.query):  # type: ignore[union-attr]
+                        if cancel_threading.is_set():
+                            break
                         event_bridge.put(ev)
                 except Exception as exc:
                     event_bridge.put(exc)
@@ -517,6 +525,8 @@ async def _run_job(job: "jobs.JobState") -> None:
 
             event = item
             if job.cancel_event.is_set():
+                # Signal the orchestrator thread to stop producing events.
+                cancel_threading.set()
                 job.status = "cancelled"
                 job.finished_at = time.time()
                 job.emit({"type": "job_cancelled", "reason": "user_requested"})
@@ -574,9 +584,6 @@ async def _run_job(job: "jobs.JobState") -> None:
                     "error": data.get("error", ""),
                 })
 
-        # Wait for the orchestrator thread to finish cleanly.
-        orch_thread.join(timeout=10.0)
-
         # ── Job complete ──────────────────────────────────────────
         report = store.build_report(user_query=job.query)
         if not report.strip() or "(No gossip synthesis" in report:
@@ -618,6 +625,16 @@ async def _run_job(job: "jobs.JobState") -> None:
         })
     finally:
         cancel_bridge_task.cancel()
+        # Ensure the orchestrator thread is signalled to stop and
+        # joined before tearing down the pool/store it depends on.
+        cancel_threading.set()
+        if orch_thread is not None:
+            orch_thread.join(timeout=15.0)
+            if orch_thread.is_alive():
+                logger.warning(
+                    "job_id=<%s> | orchestrator thread did not exit within 15s",
+                    job.job_id,
+                )
         try:
             # ``pool.shutdown`` performs a blocking drain of up to
             # ``drain_timeout`` seconds followed by
