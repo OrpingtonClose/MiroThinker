@@ -46,6 +46,7 @@ if _STRANDS_AGENT not in sys.path:
 
 from corpus import AtomicCondition, ConditionStore
 from angles import ALL_ANGLES, AngleDefinition
+from swarm_log import log_enrichment_result
 
 logger = logging.getLogger(__name__)
 
@@ -104,11 +105,12 @@ def _pubmed_search(query: str, max_results: int = 5) -> list[dict]:
     """PubMed search — academic papers, free API."""
     try:
         import httpx
+        pubmed_query = query
         # Search for PMIDs
         search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
         params = {
             "db": "pubmed",
-            "term": query,
+            "term": pubmed_query,
             "retmax": max_results,
             "retmode": "json",
         }
@@ -192,6 +194,117 @@ def _jina_extract(url: str) -> str:
 
 # ── Enrichment pipeline ──────────────────────────────────────────────
 
+# ── LLM-based relevance gate ─────────────────────────────────────────
+# Instead of a static blacklist, we use a loose LLM check to filter
+# results that have zero pharmacological or physiological connection
+# to any compound in the research query.  Animal studies (cattle, etc.)
+# are explicitly welcome — they contain dose-response and tissue
+# composition data that directly informs human use.
+
+_RELEVANCE_PROMPT = """You are a relevance filter for a pharmacology research corpus.
+The research topic is: {query_summary}
+
+Below are search results (title + snippet). For EACH result, output Y if it
+contains ANY of the following — even indirectly, even in animal models:
+- How a compound works (mechanism, receptor binding, pharmacokinetics)
+- What it does to tissue (muscle, fat, organ, blood composition)
+- Dosing, timing, cycling, or stacking information
+- Side effects, health markers, or physiological measurements
+- Nutrient interactions, mineral/vitamin effects on compounds
+
+Output N ONLY if the result is completely unrelated (e.g. broken page,
+unrelated disease epidemiology with no mechanism, pure economics with
+no pharmacology, marketing/spam).
+
+Bias: when in doubt, output Y.  Animal studies are RELEVANT.
+
+Output one letter per line (Y or N), in order. Nothing else.
+
+Results:
+{results_block}
+"""
+
+
+async def _llm_relevance_filter(
+    results: list[dict],
+    query_summary: str,
+    api_base: str,
+    model: str,
+) -> list[dict]:
+    """Filter results using a loose LLM relevance check.
+
+    Batches results into a single LLM call. Bias: admit by default.
+    Only rejects results that are clearly zero pharmacological connection.
+    Falls back to admitting everything if the LLM call fails.
+    """
+    if not results:
+        return results
+
+    # Build the results block
+    lines = []
+    for i, r in enumerate(results):
+        title = r.get("title", "")[:200]
+        snippet = r.get("snippet", "")[:300]
+        lines.append(f"{i+1}. {title} — {snippet}")
+    results_block = "\n".join(lines)
+
+    prompt = _RELEVANCE_PROMPT.format(
+        query_summary=query_summary,
+        results_block=results_block,
+    )
+
+    try:
+        import httpx
+        url = f"{api_base}/chat/completions"
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": "Output Y or N for each result, one per line."},
+            ],
+            "max_tokens": len(results) * 4,  # ~2 chars per result + newlines
+            "temperature": 0.0,
+        }
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            raw = data["choices"][0]["message"]["content"]
+
+            # Strip think blocks if present
+            import re
+            raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+
+            # Parse Y/N lines
+            verdicts = []
+            for line in raw.strip().splitlines():
+                line = line.strip().upper()
+                if line.startswith("Y"):
+                    verdicts.append(True)
+                elif line.startswith("N"):
+                    verdicts.append(False)
+                else:
+                    verdicts.append(True)  # Bias: admit if unclear
+
+            # If we got fewer verdicts than results, admit the rest
+            while len(verdicts) < len(results):
+                verdicts.append(True)
+
+            filtered = [r for r, keep in zip(results, verdicts) if keep]
+            rejected = len(results) - len(filtered)
+            if rejected > 0:
+                logger.info(
+                    "relevance_filter=<%d/%d rejected> | LLM gate applied",
+                    rejected, len(results),
+                )
+            return filtered
+
+    except Exception as exc:
+        logger.warning("error=<%s> | relevance filter failed, admitting all", exc)
+        return results  # Fail open — admit everything
+
+
 def _search_all_backends(
     query: str,
     max_per_backend: int = 10,
@@ -229,8 +342,21 @@ def enrich_angle(
     max_per_query: int = 10,
     extract_full_text: bool = False,
     dry_run: bool = False,
+    llm_filter: bool = False,
+    api_base: str = "",
+    model: str = "",
 ) -> int:
     """Run all enrichment queries for a single angle.
+
+    Args:
+        angle: The angle definition with label and enrichment queries.
+        store: The ConditionStore to admit results into.
+        max_per_query: Max results per backend per query.
+        extract_full_text: Whether to extract full page text via Jina.
+        dry_run: If True, log what would be admitted but don't write.
+        llm_filter: If True, run LLM relevance gate on results.
+        api_base: vLLM API base URL (required if llm_filter=True).
+        model: Model name for relevance gate (required if llm_filter=True).
 
     Returns the number of conditions admitted to the store.
     """
@@ -247,6 +373,18 @@ def enrich_angle(
             angle.label, query, len(results),
         )
 
+        # LLM relevance gate — angle-aware, very loose
+        if llm_filter and results and api_base and model:
+            query_summary = (
+                f"{angle.label}: {angle.description}"
+                if hasattr(angle, "description") and angle.description
+                else angle.label
+            )
+            import asyncio
+            results = asyncio.run(
+                _llm_relevance_filter(results, query_summary, api_base, model)
+            )
+
         for result in results:
             title = result.get("title", "")
             url = result.get("url", "")
@@ -254,6 +392,11 @@ def enrich_angle(
             source = result.get("source", "web")
 
             if not snippet and not title:
+                log_enrichment_result(
+                    angle=angle.label, query=query, backend=source,
+                    title=title, url=url, snippet=snippet,
+                    admitted=False, reject_reason="empty title and snippet",
+                )
                 continue
 
             # Build the fact from title + snippet
@@ -270,6 +413,11 @@ def enrich_angle(
                 logger.info(
                     "DRY RUN | would admit: %.100s... (url=%s)", fact, url,
                 )
+                log_enrichment_result(
+                    angle=angle.label, query=query, backend=source,
+                    title=title, url=url, snippet=snippet,
+                    admitted=True, reject_reason="dry_run",
+                )
                 admitted += 1
                 continue
 
@@ -283,7 +431,14 @@ def enrich_angle(
                 confidence=0.4,  # Lower confidence for unverified web data
                 strategy="web_enrichment",
             )
-            if cid is not None:
+            was_admitted = cid is not None
+            log_enrichment_result(
+                angle=angle.label, query=query, backend=source,
+                title=title, url=url, snippet=snippet,
+                admitted=was_admitted,
+                reject_reason="" if was_admitted else "store_dedup",
+            )
+            if was_admitted:
                 admitted += 1
 
     return admitted
@@ -294,8 +449,20 @@ def enrich_all(
     max_per_query: int = 10,
     extract_full_text: bool = False,
     dry_run: bool = False,
+    llm_filter: bool = False,
+    api_base: str = "",
+    model: str = "",
 ) -> dict[str, int]:
     """Run enrichment for all angles.
+
+    Args:
+        store: The ConditionStore to admit results into.
+        max_per_query: Max results per backend per query.
+        extract_full_text: Whether to extract full page text via Jina.
+        dry_run: If True, log what would be admitted but don't write.
+        llm_filter: If True, run LLM relevance gate on each angle's results.
+        api_base: vLLM API base URL (required if llm_filter=True).
+        model: Model name for relevance gate (required if llm_filter=True).
 
     Returns a dict mapping angle labels to number of conditions admitted.
     """
@@ -308,6 +475,9 @@ def enrich_all(
             max_per_query=max_per_query,
             extract_full_text=extract_full_text,
             dry_run=dry_run,
+            llm_filter=llm_filter,
+            api_base=api_base,
+            model=model,
         )
         elapsed = time.monotonic() - t0
         results[angle.label] = count
