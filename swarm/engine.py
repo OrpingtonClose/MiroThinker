@@ -628,7 +628,7 @@ class GossipSwarm:
                 logger.warning("serendipity bridge failed, continuing without it")
                 serendipity_insights = ""
                 metrics.degradations.append("Serendipity bridge failed")
-            metrics.total_llm_calls += 1
+            metrics.total_llm_calls += 2  # two-pass serendipity (convergence + contradiction)
             metrics.serendipity_produced = bool(serendipity_insights)
             metrics.phase_times["serendipity"] = time.monotonic() - phase_start
 
@@ -644,7 +644,7 @@ class GossipSwarm:
                 ))
 
             logger.info(
-                "serendipity_chars=<%d> | serendipity bridge complete",
+                "serendipity_chars=<%d> | two-pass serendipity bridge complete",
                 len(serendipity_insights),
             )
 

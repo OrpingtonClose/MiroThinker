@@ -649,6 +649,7 @@ class AsyncTaskPool:
                     cancel_event=None,   # thread cancellation only
                     corpus_delta_fn=_corpus_delta_fn,
                     on_event=_on_swarm_event,
+                    lineage_store=self._store,  # persist all bee outputs
                 ),
             )
         except Exception as exc:

@@ -112,6 +112,15 @@ def _build_queen_prompt(
         f"says not-X, and neither resolved it in gossip, flag it with "
         f"[UNRESOLVED: conflicting evidence].\n\n"
         f"{serendipity_rule}"
+        f"RULE 7 — HIGHLIGHT CROSS-DOMAIN INSIGHTS:\n"
+        f"The most valuable content in this document is where one domain "
+        f"illuminated another — connections that no single specialist could "
+        f"have found alone. When you encounter these (from worker analyses "
+        f"or serendipity insights), give them PROMINENCE: place them at "
+        f"transition points between sections, use them to open or close "
+        f"major segments, and frame them as the key takeaways. The reader "
+        f"should walk away remembering the 2-3 most surprising cross-domain "
+        f"connections, not just a list of facts organized by topic.\n\n"
         f"Produce the stitched, edited document:"
     )
 

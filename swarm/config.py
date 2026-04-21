@@ -37,41 +37,41 @@ CompleteFn = Callable[[str], Awaitable[str]]
 # for that round number.  Missing entries → no extra instruction.
 DEFAULT_ROUND_PROMPTS: dict[int, str] = {
     1: (
-        "ROUND 1 FOCUS — CONNECTION DISCOVERY:\n"
-        "Your primary task is to find where your peers' findings EXPLAIN "
-        "something in your own evidence. For each peer's key finding, ask: "
-        "does this illuminate a pattern, anomaly, or mechanism in my raw "
-        "section? Where do our domains COLLIDE in a way that produces new "
-        "understanding? Trace the causal chain — if a peer's molecular "
-        "mechanism could explain the practitioner result in your section, "
-        "show the COMPLETE path from mechanism to outcome. Don't just note "
-        "overlaps — find the moments where combining two domains reveals "
-        "something neither stated alone. Preserve exact numbers verbatim."
+        "ROUND 1 FOCUS — CONNECTION DISCOVERY + PREDICTIONS:\n"
+        "Pick the 2-3 MOST IMPORTANT connections between your data and "
+        "peers'. For each, trace the full causal chain and state a "
+        "PREDICTION: if this connection is real, what ELSE should be true "
+        "in data you haven't seen? What would you expect a specialist in "
+        "another domain to confirm? Don't just note overlaps — find the "
+        "moments where combining two domains reveals something neither "
+        "stated alone. Go back to your raw section and re-mine it for "
+        "details you overlooked that become relevant in light of peer "
+        "findings. Preserve exact numbers verbatim."
     ),
     2: (
-        "ROUND 2 FOCUS — CAUSAL DEPTH:\n"
-        "Go deeper into the connections you and your peers found in Round 1. "
-        "For each connection: (a) trace it back to specific evidence in your "
-        "raw section AND the peer's cited sources, (b) ask 'what does this "
-        "connection PREDICT?' — if mechanism X explains outcome Y, what else "
-        "should be true? (c) look for SECOND-ORDER connections — does your "
-        "connection with Peer A, combined with Peer B's findings, reveal "
-        "something none of you stated? Resolve numerical contradictions by "
-        "comparing source evidence quality (academic > named practitioner > "
-        "anonymous forum post). The depth here creates the surface area for "
-        "serendipity."
+        "ROUND 2 FOCUS — TEST PREDICTIONS + SECOND-ORDER EFFECTS:\n"
+        "Review the predictions you and peers made in Round 1. Does the "
+        "evidence from other peers CONFIRM or REFUTE those predictions? "
+        "For each confirmed prediction, go deeper: what SECOND-ORDER "
+        "effects emerge? If mechanism X explains outcome Y, and Y is "
+        "confirmed by Peer B's data, what does Y then predict about Z? "
+        "Look for COMPOUNDING effects — where connections from Round 1 "
+        "amplify each other. Resolve contradictions by comparing source "
+        "evidence quality (academic > named practitioner > anonymous "
+        "forum post). State what would DISPROVE each connection — if "
+        "nothing could disprove it, it's not a real insight."
     ),
     3: (
-        "ROUND 3 FOCUS — GAPS AND FINAL SYNTHESIS:\n"
-        "What's still unexplained? What connections did you find that you "
-        "couldn't fully resolve because you're missing specific data? State "
-        "these gaps explicitly as research questions (e.g. 'Need bloodwork "
-        "data showing mTOR activation despite short GH-insulin window'). "
-        "Then produce your FINAL analysis: a single coherent narrative that "
-        "connects everything you know across all peer domains, at maximum "
-        "depth. Every claim must trace to evidence. Every connection must "
-        "be grounded. The connections — moments where one domain illuminates "
-        "another — are the primary output. Numbers must be exact and sourced."
+        "ROUND 3 FOCUS — GAPS + STRONGEST CONNECTIONS:\n"
+        "State your TOP 3 connections ranked by how much they change "
+        "understanding of the query. Each must carry: (1) evidence chain "
+        "with exact sources, (2) prediction that was tested or could be "
+        "tested, (3) what would disprove it. Then state the GAPS: what "
+        "connections did you find that you couldn't fully resolve? State "
+        "these as specific research questions aimed at other specialists. "
+        "Your final output should be a connected narrative where every "
+        "claim traces to evidence and every connection is grounded in "
+        "cross-domain reasoning. The connections ARE the primary output."
     ),
 }
 
@@ -130,7 +130,7 @@ class SwarmConfig:
     max_concurrency: int = int(os.getenv("SWARM_MAX_CONCURRENCY", "0"))  # 0 = max_workers
     gossip_rounds: int = int(os.getenv("SWARM_GOSSIP_ROUNDS", "3"))
     min_gossip_rounds: int = int(os.getenv("SWARM_MIN_GOSSIP_ROUNDS", "2"))
-    max_summary_chars: int = int(os.getenv("SWARM_MAX_SUMMARY_CHARS", "6000"))
+    max_summary_chars: int = int(os.getenv("SWARM_MAX_SUMMARY_CHARS", "10000"))
     max_section_chars: int = int(os.getenv("SWARM_MAX_SECTION_CHARS", "30000"))
     convergence_threshold: float = float(os.getenv("SWARM_CONVERGENCE_THRESHOLD", "0.85"))
     context_budget: int = int(os.getenv("SWARM_CONTEXT_BUDGET", "100000"))
@@ -149,6 +149,16 @@ class SwarmConfig:
     enable_quality_manifest: bool = True
     corpus_delta_fn: "Callable[[], Awaitable[str]] | None" = None
     max_gossip_rounds: int = int(os.getenv("SWARM_MAX_GOSSIP_ROUNDS", "10"))
+
+    # ── Three-tier topology settings (disabled by default — flat swarm) ──
+    enable_hierarchy: bool = os.getenv("SWARM_HIERARCHY", "0") == "1"
+    max_leaf_size: int = int(os.getenv("SWARM_MAX_LEAF_SIZE", "25"))
+    min_leaf_size: int = int(os.getenv("SWARM_MIN_LEAF_SIZE", "5"))
+    bridge_rounds: int = int(os.getenv("SWARM_BRIDGE_ROUNDS", "3"))
+    serendipity_panel_size: int = int(os.getenv("SWARM_PANEL_SIZE", "5"))
+    coordinator_max_chars: int = int(os.getenv("SWARM_COORD_MAX_CHARS", "4000"))
+    enable_serendipity_panel: bool = os.getenv("SWARM_PANEL", "1") == "1"
+    enable_queen_lucidity_pass: bool = os.getenv("SWARM_LUCIDITY", "1") == "1"
 
     def __post_init__(self) -> None:
         """Resolve defaults that depend on other fields."""
