@@ -3,25 +3,32 @@
 
 """GossipSwarm — the main orchestrator for parallel corpus synthesis.
 
-Architecture (angle-based gossip with full-corpus access):
+Architecture (information-asymmetric conversation):
+
+    OPERATING PRINCIPLE: No worker hosts the whole corpus.
+    Each worker sees a SLICE of the findings relevant to its angle.
+    Cross-domain insights emerge from the conversation between workers,
+    not from individual analysis of the full dataset.
 
     ┌──────────────────────────────────────────────────────────┐
     │                    QUEEN (merge)                          │
-    │   Reads all gossip-refined summaries + serendipity        │
+    │   Reads all conversation-refined summaries + serendipity  │
     │   insights → produces final unified synthesis             │
     └──────────┬──────────┬──────────┬──────────┬─────────────┘
                │          │          │          │
     ┌──────────▼──┐ ┌─────▼─────┐ ┌──▼────────┐ │
     │  Worker A   │ │ Worker B  │ │ Worker C  │ ...
     │  Angle 1    │ │ Angle 2   │ │ Angle 3   │
-    │  + raw data │ │ + raw data│ │ + raw data│
+    │  SLICE of   │ │ SLICE of  │ │ SLICE of  │
+    │  corpus     │ │ corpus    │ │ corpus    │
     └──────┬──────┘ └──────┬────┘ └──────┬────┘
            │               │             │
            └───────────────┼─────────────┘
-                    Gossip Round(s)
+                    Conversation Round(s)
               (each worker reads peers'
-               summaries + own raw section,
-               refines with cross-references)
+               summaries + own slice,
+               discovers connections across
+               domains it couldn't see alone)
                            │
                ┌───────────▼───────────┐
                │  Serendipity Bridge   │
@@ -67,9 +74,11 @@ from dataclasses import dataclass, field
 
 from swarm.angles import (
     WorkerAssignment,
+    _parse_findings,
     assign_workers,
     detect_angles_via_llm,
     detect_sections,
+    distribute_findings_to_angles,
     score_section_angle_pairs,
     _prepare_sections,
 )
@@ -247,31 +256,69 @@ class GossipSwarm:
         if not angles:
             angles = [s.title for s in sections[:config.max_workers]]
 
-        # ── Angle-first worker creation ───────────────────────────
+        # ── Angle-driven worker creation ──────────────────────────
         #
-        # Workers are driven by ANGLES, not sections.  Each angle
-        # gets its own worker instance.  When the corpus has fewer
-        # structural sections than detected angles (common for flat
-        # text from ConditionStore.export_for_swarm()), every worker
-        # receives the FULL corpus and analyses it through its
-        # specific angle.  When enough sections exist, the semantic
-        # or keyword assignment distributes sections to angles.
+        # OPERATING PRINCIPLE: no worker hosts the whole corpus.
+        # Each worker gets a SLICE of the findings, assigned by the
+        # LLM based on angle relevance.  Information asymmetry is
+        # what makes the conversation between workers productive —
+        # Worker A knows things Worker B doesn't, and vice versa.
+        # Cross-domain insights (e.g. the iron-trenbolone link)
+        # emerge from the conversation, not from individual analysis.
+        #
+        # When the corpus has fewer structural sections than detected
+        # angles (common for flat text from export_for_swarm()), we
+        # parse the corpus into individual findings and distribute
+        # them across angles via LLM.  When enough sections exist,
+        # the existing semantic/keyword assignment handles it.
         if len(sections) < len(angles):
-            # Fewer sections than angles — give every worker the
-            # full corpus, differentiated only by angle.
-            logger.info(
-                "sections=<%d>, angles=<%d> | fewer sections than angles, "
-                "assigning full corpus to each angle worker",
-                len(sections), len(angles),
-            )
-            assignments = [
-                WorkerAssignment(
-                    worker_id=i,
-                    angle=angle,
-                    raw_content=corpus,
+            findings = _parse_findings(corpus)
+            if len(findings) >= len(angles):
+                # Distribute findings across angles — each worker
+                # gets a different slice of the corpus
+                angle_to_findings = await distribute_findings_to_angles(
+                    findings, angles, self.complete,
                 )
-                for i, angle in enumerate(angles)
-            ]
+                metrics.total_llm_calls += 1
+
+                assignments = []
+                for i, angle in enumerate(angles):
+                    finding_indices = angle_to_findings.get(angle, [])
+                    # Build this worker's slice from its assigned findings
+                    slice_lines = [findings[idx][1] for idx in finding_indices]
+                    worker_content = "\n".join(slice_lines)
+                    assignments.append(
+                        WorkerAssignment(
+                            worker_id=i,
+                            angle=angle,
+                            raw_content=worker_content,
+                        )
+                    )
+
+                logger.info(
+                    "sections=<%d>, angles=<%d>, findings=<%d> | "
+                    "distributed findings across angle workers: %s",
+                    len(sections), len(angles), len(findings),
+                    {a: len(idxs) for a, idxs in angle_to_findings.items()},
+                )
+            else:
+                # Very few findings — split evenly with round-robin
+                logger.info(
+                    "sections=<%d>, angles=<%d>, findings=<%d> | "
+                    "too few findings for LLM distribution, using round-robin",
+                    len(sections), len(angles), len(findings),
+                )
+                buckets: dict[int, list[str]] = {i: [] for i in range(len(angles))}
+                for idx, (_, text) in enumerate(findings):
+                    buckets[idx % len(angles)].append(text)
+                assignments = [
+                    WorkerAssignment(
+                        worker_id=i,
+                        angle=angle,
+                        raw_content="\n".join(buckets[i]),
+                    )
+                    for i, angle in enumerate(angles)
+                ]
         else:
             # Enough sections — use semantic or keyword assignment
             score_matrix = None
