@@ -52,6 +52,7 @@ class LangChainOrchestrator(ResearchOrchestrator):
             async for raw in self._graph.astream_events(
                 {"messages": [HumanMessage(content=query)]},
                 version="v2",
+                config={"recursion_limit": 9_999},
             ):
                 mapped = self._map(raw)
                 if mapped is not None:
