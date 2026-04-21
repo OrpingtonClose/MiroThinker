@@ -456,7 +456,10 @@ class KnowledgePlugin(Plugin):
             # Check for factual indicators
             has_number = bool(re.search(r'\d+', sentence))
             has_year = bool(re.search(r'\b(19|20)\d{2}\b', sentence))
-            has_proper_noun = bool(re.search(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', sentence))
+            # Skip first word (sentence-initial capitalization) when checking for proper nouns
+            words = sentence.split()
+            rest = " ".join(words[1:]) if len(words) > 1 else ""
+            has_proper_noun = bool(re.search(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', rest))
             has_unit = bool(re.search(
                 r'\d+\s*(?:mg|mcg|kg|ml|%|percent|billion|million|thousand)',
                 sentence, re.IGNORECASE,
@@ -560,4 +563,6 @@ class KnowledgePlugin(Plugin):
             for block in content:
                 if isinstance(block, dict) and _KNOWLEDGE_MARKER in block.get("text", ""):
                     return True
+        elif isinstance(content, str) and _KNOWLEDGE_MARKER in content:
+            return True
         return False
