@@ -1194,7 +1194,7 @@ class ConditionStore:
         Returns:
             Condition ID of the new row, or None.
         """
-        summary = response[:300] if response else f"[LLM call failed: {error[:100]}]"
+        summary = response[:300] if response else (f"[LLM call failed: {error[:100]}]" if error else "[empty response]")
         metadata = json.dumps({
             "model": model,
             "worker": worker,

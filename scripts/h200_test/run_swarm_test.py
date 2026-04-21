@@ -467,6 +467,10 @@ def main() -> None:
     if args.gossip_rounds > 0:
         config.gossip_rounds = args.gossip_rounds
 
+    # Re-establish invariant: max_gossip_rounds must be >= gossip_rounds
+    if config.max_gossip_rounds < config.gossip_rounds:
+        config.max_gossip_rounds = config.gossip_rounds
+
     # Load corpus — the store is already created above as the universal sink
     corpus = ""
 
