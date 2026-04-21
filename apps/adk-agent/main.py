@@ -1108,8 +1108,8 @@ async def run_decompose(
         logger.info("No sub-queries generated; falling back to report mode")
         return await run_report(task)
 
-    # Cap at 8
-    # Process all sub-queries
+    # Resource bound — each sub-query spawns a full research session
+    sub_queries = sub_queries[:8]
     logger.info("Decomposed into %d sub-queries", len(sub_queries))
     for i, sq in enumerate(sub_queries):
         logger.info("  Sub-query %d: %s", i + 1, sq.get("sub_query", str(sq)))

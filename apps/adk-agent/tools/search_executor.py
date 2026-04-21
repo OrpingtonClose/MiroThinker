@@ -1886,7 +1886,8 @@ async def run_search_executor(
             "Phase C: academic search triggered by thinker strategy",
         )
 
-        academic_queries = strategy_queries
+        # API cost bound — each query triggers Semantic Scholar + arXiv + scite calls
+        academic_queries = strategy_queries[:4]
 
         async def _bounded_academic(coro: Any) -> str:
             async with semaphore:

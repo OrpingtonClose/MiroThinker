@@ -186,8 +186,8 @@ async def exa_multi_search(
     if not _EXA_API_KEY:
         return json.dumps({"error": "EXA_API_KEY not set"})
 
-    # Safety bounds
-    # Process all queries
+    # Safety bounds — API cost protection, not data truncation
+    queries = queries[:10]
     num_results_per_query = min(num_results_per_query, 8)
     text_max_chars = min(text_max_chars, 10_000)
 
