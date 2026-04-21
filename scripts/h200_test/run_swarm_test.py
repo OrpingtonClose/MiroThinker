@@ -276,7 +276,12 @@ async def run_swarm_test(
             _ctx_phase.set(f"gossip_round_{completed_round + 1}")
         elif event_type == "swarm_phase":
             phase_name = event.get("phase", "unknown")
-            _ctx_phase.set(phase_name)
+            if phase_name == "map_complete":
+                # map_complete fires right before gossip round 1 begins —
+                # set context so round 1's worker LLM calls log correctly.
+                _ctx_phase.set("gossip_round_1")
+            else:
+                _ctx_phase.set(phase_name)
         else:
             _ctx_phase.set(event_type)
 
