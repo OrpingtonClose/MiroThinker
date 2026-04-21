@@ -104,7 +104,10 @@ class TestApplyMisassignment:
             ),
         ]
         return [
-            WorkerAssignment(worker_id=i, angle=angles[i], raw_content=contents[i])
+            WorkerAssignment(
+                worker_id=i, angle=angles[i], raw_content=contents[i],
+                angle_idx=i,
+            )
             for i in range(n)
         ]
 
@@ -457,8 +460,8 @@ class TestWorldviewSynthPrompt:
         assert "EXPLAIN it through your domain" in prompt
         assert "mechanisms, frameworks, and first principles" in prompt
 
-    def test_prompt_mentions_off_angle_data(self):
-        """Prompt should instruct the bee to pay attention to off-angle data."""
+    def test_prompt_mentions_off_angle_data_when_enabled(self):
+        """Prompt should mention off-angle data only when misassignment is active."""
         prompt = _build_synth_prompt(
             date="2025-01-15",
             angle="Safety Profile",
@@ -466,8 +469,22 @@ class TestWorldviewSynthPrompt:
             section_content="Safety data mixed with some PK data",
             query="What are the risks?",
             max_chars=10000,
+            has_off_angle_data=True,
         )
-        assert "OFF-ANGLE" in prompt or "off-angle" in prompt or "OTHER DOMAINS" in prompt
+        assert "OTHER DOMAINS" in prompt
+
+    def test_prompt_omits_off_angle_note_when_disabled(self):
+        """Without misassignment, prompt should NOT claim off-angle data exists."""
+        prompt = _build_synth_prompt(
+            date="2025-01-15",
+            angle="Safety Profile",
+            char_count=4000,
+            section_content="Safety data only",
+            query="What are the risks?",
+            max_chars=10000,
+            has_off_angle_data=False,
+        )
+        assert "RAW DATA FROM OTHER DOMAINS" not in prompt
 
     def test_prompt_uses_core_identity_label(self):
         """Should use 'CORE IDENTITY' instead of 'ASSIGNED ANGLE'."""

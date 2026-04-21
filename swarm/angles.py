@@ -55,6 +55,7 @@ class WorkerAssignment:
     char_count: int = 0
     summary: str = ""
     prev_summary: str = ""  # previous round's summary (for convergence detection)
+    angle_idx: int = -1  # index into the original angles list (-1 = unknown)
 
     def __post_init__(self) -> None:
         self.char_count = len(self.raw_content)
@@ -460,6 +461,7 @@ def assign_workers(
             worker_id=i,
             angle=unique_angle,
             raw_content=section.content,
+            angle_idx=angle_idx,
         ))
 
     return assignments
@@ -502,23 +504,26 @@ def apply_misassignment(
     distant_map: dict[int, int] = {}
 
     if score_matrix is not None and len(score_matrix) >= n:
-        # Use score matrix: for worker i, find the worker whose angle
-        # scored LOWEST for worker i's section (= most semantically distant)
+        # Use score matrix: for worker i, find the worker whose assigned
+        # angle scored LOWEST for worker i's section (= most semantically
+        # distant).  score_matrix is sections x angles, so we must look up
+        # each worker's actual angle_idx, not assume worker j = angle j.
         for i in range(n):
             if i >= len(score_matrix):
                 distant_map[i] = (i + n // 2) % n
                 continue
             row = score_matrix[i]
-            # Find the angle index with the lowest score (excluding own)
-            # We need to map angle indices to worker indices
             min_score = float("inf")
             min_worker = (i + n // 2) % n  # default fallback
             for j in range(n):
                 if j == i:
                     continue
-                # Use the j-th section's score row to find the least
-                # similar angle to worker i's content
-                angle_score = row[j] if j < len(row) else 5.0
+                # Look up worker j's actual angle column in the score matrix
+                j_angle_idx = assignments[j].angle_idx
+                if j_angle_idx < 0 or j_angle_idx >= len(row):
+                    angle_score = 5.0  # neutral fallback
+                else:
+                    angle_score = row[j_angle_idx]
                 if angle_score < min_score:
                     min_score = angle_score
                     min_worker = j

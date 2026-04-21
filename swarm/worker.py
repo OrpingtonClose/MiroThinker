@@ -25,6 +25,16 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+_OFF_ANGLE_NOTE = (
+    "NOTE: Your section contains MOSTLY data from your domain, but also "
+    "some RAW DATA FROM OTHER DOMAINS. This off-angle data is the most "
+    "valuable part of your section — it contains details that specialists "
+    "in those domains may have overlooked but that YOUR expertise can "
+    "illuminate. When you encounter data outside your field, EXPLAIN it "
+    "through your {angle} lens. What mechanisms from your field explain "
+    "what you're seeing? What would your domain predict about it?\n\n"
+)
+
 
 def _build_synth_prompt(
     date: str,
@@ -33,6 +43,7 @@ def _build_synth_prompt(
     section_content: str,
     query: str,
     max_chars: int,
+    has_off_angle_data: bool = False,
 ) -> str:
     """Build the worker synthesis prompt via concatenation (not .replace()).
 
@@ -53,13 +64,7 @@ def _build_synth_prompt(
         f"YOUR SECTION ({char_count} chars):\n"
         f"{section_content}\n\n"
         f"USER QUERY: {query}\n\n"
-        f"NOTE: Your section contains MOSTLY data from your domain, but also "
-        f"some RAW DATA FROM OTHER DOMAINS. This off-angle data is the most "
-        f"valuable part of your section — it contains details that specialists "
-        f"in those domains may have overlooked but that YOUR expertise can "
-        f"illuminate. When you encounter data outside your field, EXPLAIN it "
-        f"through your domain's lens. What mechanisms from your field explain "
-        f"what you're seeing? What would your domain predict about it?\n\n"
+        f"{_OFF_ANGLE_NOTE.format(angle=angle) if has_off_angle_data else ''}"
         f"ANALYSIS RULES — REASON THROUGH YOUR LENS:\n"
         f"1. For each key finding, state what it IMPLIES through the lens of "
         f"{angle}. Don't just say 'ferritin elevated 340%' — explain what "
@@ -197,8 +202,19 @@ async def worker_synthesize(
     query: str,
     max_chars: int,
     complete_fn,
+    has_off_angle_data: bool = False,
 ) -> str:
-    """Phase 1: Worker synthesizes its assigned corpus section."""
+    """Phase 1: Worker synthesizes its assigned corpus section.
+
+    Args:
+        angle: The worker's assigned research angle.
+        section_content: The raw corpus section to analyze.
+        query: The user's research query.
+        max_chars: Maximum summary length in characters.
+        complete_fn: Async LLM completion callable.
+        has_off_angle_data: Whether this worker's slice contains
+            deliberately injected off-angle data from misassignment.
+    """
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     prompt = _build_synth_prompt(
         date=date,
@@ -207,6 +223,7 @@ async def worker_synthesize(
         section_content=section_content,
         query=query,
         max_chars=max_chars,
+        has_off_angle_data=has_off_angle_data,
     )
     return await complete_fn(prompt)
 

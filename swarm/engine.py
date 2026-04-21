@@ -307,12 +307,14 @@ class GossipSwarm:
         # portion (20-30%) is where thread discovery happens: the bee's
         # worldview activates on foreign data that other specialists
         # would have overlooked.
+        misassignment_applied = False
         if config.enable_misassignment and len(assignments) >= 2:
             apply_misassignment(
                 assignments,
                 score_matrix=score_matrix,
                 ratio=config.misassignment_ratio,
             )
+            misassignment_applied = True
             logger.info(
                 "misassignment_ratio=<%.2f>, workers=<%d> | "
                 "off-angle data injected for thread discovery",
@@ -360,6 +362,8 @@ class GossipSwarm:
         sem = asyncio.Semaphore(config.max_concurrency)
         worker_entry_ids: dict[int, str] = {}
 
+        _has_off_angle = misassignment_applied
+
         async def _bounded_synthesize(assignment: WorkerAssignment) -> None:
             async with sem:
                 try:
@@ -369,6 +373,7 @@ class GossipSwarm:
                         query=query,
                         max_chars=config.max_summary_chars,
                         complete_fn=self.worker_complete,
+                        has_off_angle_data=_has_off_angle,
                     )
                 except Exception:
                     logger.warning(
