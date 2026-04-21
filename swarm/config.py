@@ -150,6 +150,17 @@ class SwarmConfig:
     corpus_delta_fn: "Callable[[], Awaitable[str]] | None" = None
     max_gossip_rounds: int = int(os.getenv("SWARM_MAX_GOSSIP_ROUNDS", "10"))
 
+    # ── Thread-discovery mechanisms ──────────────────────────────────
+    # Deliberate misassignment: inject off-angle raw data into each bee's
+    # slice.  The off-angle portion is where threads get discovered.
+    enable_misassignment: bool = os.getenv("SWARM_MISASSIGNMENT", "1") == "1"
+    misassignment_ratio: float = float(os.getenv("SWARM_MISASSIGNMENT_RATIO", "0.25"))
+
+    # Swarm-internal RAG: bees query the persistent store between gossip
+    # rounds for relevant findings from other bees.
+    enable_hive_memory: bool = os.getenv("SWARM_HIVE_MEMORY", "1") == "1"
+    hive_memory_top_k: int = int(os.getenv("SWARM_HIVE_TOP_K", "5"))
+
     # ── Three-tier topology settings (disabled by default — flat swarm) ──
     enable_hierarchy: bool = os.getenv("SWARM_HIERARCHY", "0") == "1"
     max_leaf_size: int = int(os.getenv("SWARM_MAX_LEAF_SIZE", "25"))
