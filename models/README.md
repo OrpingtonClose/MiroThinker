@@ -42,12 +42,17 @@ ollama run huihui_ai/qwen3.5-abliterated:27b-Claude    # Queen
 ollama run trevorjs/gemma-4-26b-a4b-uncensored          # Workers
 ```
 
-### 3. Configure proxies to use local models
+### 3. Configure swarm to use local models
 
-Set in your `.env`:
+The gossip swarm **only** accepts localhost URLs (a guard rejects remote APIs at startup). Set in your `.env`:
 ```bash
-OLLAMA_BASE_URL=http://localhost:11434    # or http://<gpu-host>:11434
+OLLAMA_BASE_URL=http://localhost:11434    # or override with SWARM_API_BASE
+# SWARM_API_BASE=http://localhost:11434/v1  # auto-derived from OLLAMA_BASE_URL
+# SWARM_WORKER_MODEL=gemma-4-uncensored    # default
+# SWARM_QUEEN_MODEL=qwen-claude-opus       # default
 ```
+
+**Note:** The swarm will refuse to start if the API base URL points to a non-localhost host. This is a security guard — all swarm LLM calls must stay on the local machine.
 
 ## B2 Bucket Structure
 
