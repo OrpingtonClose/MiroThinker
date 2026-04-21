@@ -92,11 +92,9 @@ def openalex_search(
         title = work.get("title", "Unknown")
         authors = [
             a.get("author", {}).get("display_name", "")
-            for a in work.get("authorships", [])[:5]
+            for a in work.get("authorships", [])
         ]
         authors_str = ", ".join(a for a in authors if a)
-        if len(work.get("authorships", [])) > 5:
-            authors_str += f" +{len(work['authorships']) - 5} more"
         year = work.get("publication_year", "")
         citations = work.get("cited_by_count", 0)
         refs_count = work.get("referenced_works_count", 0)
@@ -120,11 +118,11 @@ def openalex_search(
                 for pos in positions:
                     word_positions.append((pos, word))
             word_positions.sort()
-            abstract = " ".join(w for _, w in word_positions)[:300]
+            abstract = " ".join(w for _, w in word_positions)
 
         # Top concepts
         concepts = work.get("concepts", [])
-        concept_names = [c.get("display_name", "") for c in concepts[:3]]
+        concept_names = [c.get("display_name", "") for c in concepts]
 
         retracted_flag = " ⚠ RETRACTED" if is_retracted else ""
         oa_flag = " [OPEN ACCESS]" if is_oa else ""
@@ -200,7 +198,7 @@ def openalex_get_work(work_id: str) -> str:
     pdf_url = oa.get("oa_url", "")
 
     # Referenced works (first 10)
-    refs = work.get("referenced_works", [])[:10]
+    refs = work.get("referenced_works", [])
 
     output = [
         f"**{title}**",
@@ -292,7 +290,7 @@ def openalex_citation_network(
         title = work.get("title", "Unknown")
         authors = [
             a.get("author", {}).get("display_name", "")
-            for a in work.get("authorships", [])[:3]
+            for a in work.get("authorships", [])
         ]
         year = work.get("publication_year", "")
         citations = work.get("cited_by_count", 0)
@@ -394,9 +392,7 @@ def search_pubmed(
 
         title = article.get("title", "Unknown")
         authors = article.get("authors", [])
-        author_str = ", ".join(a.get("name", "") for a in authors[:5])
-        if len(authors) > 5:
-            author_str += f" +{len(authors) - 5} more"
+        author_str = ", ".join(a.get("name", "") for a in authors)
         pub_date = article.get("pubdate", "")
         source = article.get("source", "")
         doi_list = article.get("articleids", [])
@@ -447,7 +443,7 @@ def pubmed_get_abstract(pmid: str) -> str:
             timeout=30,
         )
         resp.raise_for_status()
-        return resp.text[:5000] if resp.text else f"No abstract found for PMID: {pmid}"
+        return resp.text if resp.text else f"No abstract found for PMID: {pmid}"
     except Exception as exc:
         return f"[TOOL_ERROR] PubMed abstract fetch failed: {exc}"
 
@@ -560,7 +556,7 @@ def wikidata_sparql(query: str) -> str:
     formatted.append("| " + " | ".join(["---"] * len(columns)) + " |")
 
     # Rows (cap at 50)
-    for row in bindings[:50]:
+    for row in bindings:
         values = []
         for col in columns:
             cell = row.get(col, {})
@@ -568,11 +564,10 @@ def wikidata_sparql(query: str) -> str:
             # Shorten Wikidata URIs
             if val.startswith("http://www.wikidata.org/entity/"):
                 val = val.split("/")[-1]
-            values.append(val[:60])
+            values.append(val)
         formatted.append("| " + " | ".join(values) + " |")
 
-    if len(bindings) > 50:
-        formatted.append(f"\n... and {len(bindings) - 50} more rows")
+
 
     return "\n".join(formatted)
 
@@ -621,14 +616,14 @@ def wikidata_get_entity(qid: str) -> str:
         f"Description: {description}",
     ]
     if aliases:
-        output.append(f"Aliases: {', '.join(aliases[:10])}")
+        output.append(f"Aliases: {', '.join(aliases)}")
 
     # Extract key claims (properties)
     claims = entity.get("claims", {})
     if claims:
-        output.append(f"\n**Properties** ({len(claims)} total, showing top 20):")
-        for prop_id, claim_list in list(claims.items())[:20]:
-            for claim in claim_list[:1]:  # Just first value per property
+        output.append(f"\n**Properties** ({len(claims)} total):")
+        for prop_id, claim_list in list(claims.items()):
+            for claim in claim_list:  # All values per property
                 mainsnak = claim.get("mainsnak", {})
                 datavalue = mainsnak.get("datavalue", {})
                 val_type = datavalue.get("type", "")
@@ -644,7 +639,7 @@ def wikidata_get_entity(qid: str) -> str:
                 elif val_type == "monolingualtext":
                     val = datavalue.get("value", {}).get("text", "")
                 else:
-                    val = str(datavalue.get("value", ""))[:80]
+                    val = str(datavalue.get("value", ""))
 
                 output.append(f"  {prop_id}: {val}")
 
@@ -699,7 +694,7 @@ def search_google_scholar(
                 formatted = [f"**Google Scholar: {query}** ({len(results)} results)\n"]
                 for i, r in enumerate(results[:max_results], 1):
                     title = r.get("title", "Unknown")
-                    snippet = r.get("snippet", "")[:200]
+                    snippet = r.get("snippet", "")
                     link = r.get("link", "")
                     pub_info = r.get("publication_info", {}).get("summary", "")
                     citations = r.get("inline_links", {}).get("cited_by", {}).get("total", 0)
@@ -741,7 +736,7 @@ def search_google_scholar(
                 for i, title_html in enumerate(titles[:max_results], 1):
                     # Clean HTML
                     title = re.sub(r"<[^>]+>", "", title_html).strip()
-                    snippet = re.sub(r"<[^>]+>", "", snippets[i - 1]).strip()[:200] if i <= len(snippets) else ""
+                    snippet = re.sub(r"<[^>]+>", "", snippets[i - 1]).strip() if i <= len(snippets) else ""
                     formatted.append(
                         f"  {i}. **{title}**\n"
                         + (f"     {snippet}..." if snippet else "")

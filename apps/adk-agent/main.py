@@ -82,6 +82,16 @@ from prompts.templates import (
     FAILURE_SUMMARY_PROMPT,
     build_main_summary_prompt,
 )
+from tools.discovery_store import (
+    DISCOVERY_TOOLS,
+    add_items as discovery_add_items,
+    build_digest as discovery_digest,
+    clear_store as clear_discovery_store,
+    get_all_items as discovery_get_all_items,
+    get_seen_urls as discovery_get_seen_urls,
+    load_store as load_discovery_store,
+    total_count as discovery_total_count,
+)
 from tools.knowledge_graph import clear_graph, load_graph, query_graph
 from tools.research_tools import clear_findings, read_findings, set_findings_file
 from utils.boxed import extract_boxed_content
@@ -321,7 +331,7 @@ async def run_factoid(task: str) -> str:
 
         if boxed and boxed not in ("?", "unknown"):
             final_answer = boxed
-            logger.info("Valid answer found on attempt %d: %s", attempt, boxed[:200])
+            logger.info("Valid answer found on attempt %d: %s", attempt, boxed)
             break
 
         # No boxed answer — run explicit summarisation step
@@ -343,7 +353,7 @@ async def run_factoid(task: str) -> str:
             logger.info(
                 "Answer found via summarisation on attempt %d: %s",
                 attempt,
-                boxed[:200],
+                boxed,
             )
             break
 
@@ -351,7 +361,7 @@ async def run_factoid(task: str) -> str:
             final_answer = intermediate[-1]
             logger.info(
                 "Using intermediate answer on final attempt: %s",
-                final_answer[:200],
+                final_answer,
             )
             break
 
@@ -369,7 +379,7 @@ async def run_factoid(task: str) -> str:
             )
             failure_experiences.append(failure_text)
             logger.info(
-                "Failure summary for attempt %d: %s", attempt, failure_text[:300]
+                "Failure summary for attempt %d: %s", attempt, failure_text
             )
 
     if final_answer is None:
@@ -925,12 +935,15 @@ async def run_exhaustive(
     if not resume:
         clear_findings()
         clear_graph()
+        clear_discovery_store()
     else:
         load_graph()
+        load_discovery_store()
 
     # ── Multi-round iterative discovery ────────────────────────────────
-    all_items: list[dict] = []
-    seen_urls: set[str] = set()
+    # Items are persisted to the discovery store (JSONL-backed) and the
+    # LLM receives a compact digest + query tools instead of raw JSON.
+    # Zero data loss: every item is stored, nothing is trimmed.
 
     for round_num in range(1, crawl_depth + 1):
         logger.info("=== Exhaustive Discovery Round %d/%d ===", round_num, crawl_depth)
@@ -950,17 +963,17 @@ async def run_exhaustive(
                 "Format: ```json\n[...]\n```"
             )
         else:
-            # Subsequent rounds: ask for items NOT already discovered
-            known = json.dumps(
-                [{"name": i.get("name"), "url": i.get("url")} for i in all_items[:50]]
-            )
+            # Subsequent rounds: give the LLM a digest + tools to query
+            # the persistent store, instead of dumping raw JSON into prompt
+            digest = discovery_digest()
             discovery_prompt = (
                 f"{task}\n\n"
                 f"EXHAUSTIVE DISCOVERY — ROUND {round_num}/{crawl_depth}:\n"
-                f"We already found {len(all_items)} items in previous rounds. "
-                "Search for items NOT in this list:\n"
-                f"{known}\n\n"
-                "Try different search angles:\n"
+                f"ALREADY DISCOVERED: {digest}\n\n"
+                "Use check_discovered(url=...) or check_discovered(name=...) to "
+                "verify whether a specific item was already found. "
+                "Use list_discovered(category=...) to see items by category.\n\n"
+                "Search for items NOT already discovered. Try different search angles:\n"
                 "- Different keywords and phrasings\n"
                 "- Different source types (forums, news, academic, vendor sites)\n"
                 "- Foreign-language sources\n"
@@ -1002,27 +1015,22 @@ async def run_exhaustive(
         except (json.JSONDecodeError, TypeError):
             logger.warning("Round %d: could not parse items as JSON", round_num)
 
-        # Deduplicate
-        added = 0
-        for item in new_items:
-            url = item.get("url", "")
-            if url and url not in seen_urls:
-                seen_urls.add(url)
-                all_items.append(item)
-                added += 1
+        # Persist to discovery store (handles dedup internally)
+        added = discovery_add_items(new_items)
 
         logger.info(
             "Round %d: found %d new items (%d duplicates skipped), total now %d",
             round_num,
             added,
             len(new_items) - added,
-            len(all_items),
+            discovery_total_count(),
         )
 
         if added == 0 and round_num > 1:
             logger.info("No new items in round %d; stopping discovery early", round_num)
             break
 
+    all_items = discovery_get_all_items()
     if not all_items:
         logger.info("No items discovered; falling back to report mode")
         return await run_report(task)
@@ -1108,11 +1116,11 @@ async def run_decompose(
         logger.info("No sub-queries generated; falling back to report mode")
         return await run_report(task)
 
-    # Cap at 8
+    # Resource bound — each sub-query spawns a full research session
     sub_queries = sub_queries[:8]
     logger.info("Decomposed into %d sub-queries", len(sub_queries))
     for i, sq in enumerate(sub_queries):
-        logger.info("  Sub-query %d: %s", i + 1, sq.get("sub_query", str(sq))[:100])
+        logger.info("  Sub-query %d: %s", i + 1, sq.get("sub_query", str(sq)))
 
     # ── Step 2: Parallel sub-reports ──────────────────────────────────
     logger.info("=== Step 2: Parallel Sub-Reports (%d workers) ===", workers)
@@ -1248,7 +1256,7 @@ async def main(
         stall_timeout if stall_timeout is not None else DEFAULT_STALL_TIMEOUT
     )
 
-    logger.info("Mode: %s | Task: %s", mode, task[:200])
+    logger.info("Mode: %s | Task: %s", mode, task)
 
     _agentops_status = "Success"
     try:

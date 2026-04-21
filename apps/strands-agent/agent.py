@@ -36,6 +36,7 @@ from strands.agent.conversation_manager import SlidingWindowConversationManager
 from strands.vended_plugins.skills import AgentSkills
 
 from config import build_model, build_model_with_selection
+from plugins.knowledge import KnowledgePlugin
 from prompts import RESEARCHER_PROMPT, SYSTEM_PROMPT
 from tools import get_all_mcp_clients, get_native_tools
 
@@ -491,6 +492,12 @@ def create_single_agent(tool_list=None, mcp_clients=None, user_query=None):
     if skills_plugin is not None:
         plugins.append(skills_plugin)
 
+    # Knowledge persistence plugin (cross-conversation learning)
+    # Tools (recall_knowledge, store_insight, etc.) are auto-discovered
+    # from the plugin via the SDK's @tool decorator on Plugin methods.
+    knowledge_plugin = KnowledgePlugin()
+    plugins.append(knowledge_plugin)
+
     agent = Agent(
         model=model,
         system_prompt=SYSTEM_PROMPT,
@@ -534,6 +541,10 @@ def create_researcher_instance(
     else:
         model = build_model()
 
+    # Knowledge persistence for researchers too
+    # Tools auto-discovered from the plugin.
+    knowledge_plugin = KnowledgePlugin()
+
     agent = Agent(
         model=model,
         system_prompt=RESEARCHER_PROMPT,
@@ -545,6 +556,7 @@ def create_researcher_instance(
         callback_handler=_build_callback_handler(
             budget, include_stream_capture=False,
         ),
+        plugins=[knowledge_plugin],
     )
     return agent
 

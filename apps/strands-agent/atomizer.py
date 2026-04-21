@@ -1,25 +1,22 @@
-"""LLM-based text atomisation via local model.
+"""LLM-based text atomisation via local vLLM endpoint.
 
 Replaces Flock's in-SQL llm_complete for decomposing free text into
 atomic factual claims. Each atom is a dict ready for ConditionStore.admit().
 
-Uses the same localhost-only endpoint as swarm_bridge.py workers.
-Remote API URLs are rejected by the localhost guard.
+Uses the same localhost-only guard as swarm_bridge.py — no remote APIs.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
 
 import httpx
 
-logger = logging.getLogger(__name__)
+from urllib.parse import urlparse
 
-# Import the localhost guard and API base from swarm_bridge
-from swarm_bridge import _assert_localhost, _SWARM_API_BASE
+logger = logging.getLogger(__name__)
 
 _ATOMIZER_MODEL = os.environ.get(
     "ATOMIZER_MODEL",
@@ -62,7 +59,7 @@ async def atomize_text(
     """Decompose free text into atomic factual claims via LLM.
 
     Each atom is a dict with: fact, source_url, confidence, angle.
-    Uses localhost-only endpoint (same as swarm workers).
+    Uses local Ollama endpoint (same as swarm workers).
 
     Args:
         text: Raw text to atomise.
@@ -163,17 +160,34 @@ def _is_junk(text: str) -> bool:
     return any(lower.startswith(p) for p in junk_prefixes)
 
 
+def _get_atomizer_base() -> str:
+    """Resolve the atomizer API base URL, defaulting to localhost vLLM."""
+    return os.environ.get(
+        "SWARM_API_BASE",
+        "http://localhost:8000/v1",
+    )
+
+
+def _assert_localhost(url: str) -> None:
+    """Guard: only allow localhost URLs for model endpoints."""
+    parsed = urlparse(url)
+    hostname = parsed.hostname or ""
+    if hostname not in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        msg = f"Model endpoint must be localhost, got: {url}"
+        raise RuntimeError(msg)
+
+
 async def _local_complete(
     prompt: str,
     model: str,
     max_tokens: int = 4096,
     temperature: float = 0.1,
 ) -> str:
-    """Call localhost model for atomisation. Low temperature for precision."""
-    _assert_localhost(_SWARM_API_BASE)
+    """Call localhost vLLM for atomisation. Low temperature for precision."""
+    base = _get_atomizer_base()
+    _assert_localhost(base)
 
-    url = f"{_SWARM_API_BASE}/chat/completions"
-    headers = {"Content-Type": "application/json"}
+    url = f"{base}/chat/completions"
     payload = {
         "model": model,
         "messages": [
@@ -186,10 +200,10 @@ async def _local_complete(
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         try:
-            resp = await client.post(url, json=payload, headers=headers)
+            resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
             return data["choices"][0]["message"]["content"]
         except Exception:
-            logger.exception("model=<%s>, url=<%s> | atomisation LLM call failed", model, url)
+            logger.exception("model=<%s> | atomisation LLM call failed", model)
             return ""

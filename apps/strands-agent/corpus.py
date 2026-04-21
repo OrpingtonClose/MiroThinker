@@ -562,7 +562,7 @@ class ConditionStore:
         self,
         since: str,
         min_confidence: float = 0.0,
-        max_rows: int = 100,
+        max_rows: int = 10000,
     ) -> str:
         """Return findings created after *since* as formatted text.
 
@@ -573,7 +573,7 @@ class ConditionStore:
             since: ISO-8601 timestamp — only findings with
                 ``created_at > since`` are returned.
             min_confidence: Minimum confidence threshold.
-            max_rows: Hard cap on returned findings to avoid prompt bloat.
+            max_rows: Safety cap on returned findings (default 10000).
 
         Returns:
             Formatted text block of new findings, or empty string if none.
@@ -605,6 +605,53 @@ class ConditionStore:
 
         return (
             f"=== {len(rows)} NEW FINDINGS (since last round) ===\n"
+            + "\n".join(lines)
+        )
+
+    def export_prior_research(self) -> str:
+        """Export prior thoughts and insights as corpus text.
+
+        Returns worker synthesis outputs, gossip round outputs, and
+        cross-domain insights — the reasoning artifacts that
+        ``export_for_swarm`` does NOT include (it only exports raw
+        findings).  This avoids duplicating findings in the swarm
+        input when both methods are used together.
+
+        Returns:
+            Formatted text block of prior thoughts/insights, or empty string.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT id, fact, source_url, source_type, confidence,
+                          angle, row_type, iteration
+                   FROM conditions
+                   WHERE consider_for_use = TRUE
+                     AND row_type IN ('thought', 'insight')
+                   ORDER BY iteration ASC, id ASC"""
+            ).fetchall()
+
+        if not rows:
+            return ""
+
+        lines: list[str] = []
+        for row in rows:
+            cid, fact, src_url, src_type, conf, angle, rtype, itr = row
+            tags = []
+            if src_type:
+                tags.append(f"[{src_type}]")
+            if rtype != "finding":
+                tags.append(f"[{rtype}]")
+            if angle:
+                tags.append(f"[angle:{angle}]")
+            if conf != 0.5:
+                tags.append(f"[conf={conf:.2f}]")
+            tag_str = " ".join(tags)
+            url_tag = f" ({src_url})" if src_url else ""
+            lines.append(f"[#{cid}] {tag_str} {fact}{url_tag}")
+
+        return (
+            f"=== PRIOR RESEARCH: {len(rows)} entries "
+            f"(thoughts + insights) ===\n"
             + "\n".join(lines)
         )
 
@@ -687,6 +734,7 @@ class ConditionStore:
                    WHERE consider_for_use = TRUE
                      AND row_type = 'finding'
                      AND verification_status = 'speculative'
+                   ORDER BY id ASC
                    LIMIT 20"""
             ).fetchall()
             if speculative:
@@ -720,16 +768,14 @@ class ConditionStore:
             if contradictions:
                 lines.append(f"\n--- CONTRADICTIONS ({len(contradictions)} pairs) ---")
                 for c1_id, c1_fact, c2_id, c2_fact in contradictions:
-                    lines.append(f"  [#{c1_id}]: {c1_fact[:150]}")
-                    lines.append(f"  vs [#{c2_id}]: {c2_fact[:150]}")
+                    lines.append(f"  [#{c1_id}]: {c1_fact}")
+                    lines.append(f"  vs [#{c2_id}]: {c2_fact}")
 
             # Previous synthesis highlights
             prev_synthesis = self.get_synthesis(iteration)
             if prev_synthesis:
                 lines.append(f"\n--- PRIOR SYNTHESIS (iteration {iteration}) ---")
-                lines.append(prev_synthesis[:2000])
-                if len(prev_synthesis) > 2000:
-                    lines.append(f"... ({len(prev_synthesis) - 2000} more chars in full synthesis)")
+                lines.append(prev_synthesis)
 
             # Angle coverage
             angles = self.conn.execute(
@@ -763,7 +809,7 @@ class ConditionStore:
                     if phase == "gossip_round_2":
                         for marker in ("unresolvable", "unresolved", "contradiction"):
                             if marker in (fact or "").lower():
-                                snippet = " ".join((fact or "").split())[:200]
+                                snippet = " ".join((fact or "").split())
                                 swarm_lines.append(
                                     f"  [#{cid}, {phase}, angle={g_angle}]: "
                                     f"{snippet}"
@@ -839,7 +885,7 @@ class ConditionStore:
                      AND row_type = 'finding'
                      AND confidence >= 0.7
                    ORDER BY confidence DESC
-                   LIMIT 100"""
+                   LIMIT 200"""
             ).fetchall()
             if high_conf:
                 lines.append(f"\n{'='*60}")

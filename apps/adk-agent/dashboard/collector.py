@@ -180,7 +180,7 @@ class PipelineCollector:
             rec = _ToolCallRecord(
                 tool_name=tool_name,
                 agent=agent,
-                args_summary=args_summary[:300],
+                args_summary=args_summary,
                 start_time=time.time(),
             )
             self._pending_tool[tool_name] = rec
@@ -189,7 +189,7 @@ class PipelineCollector:
                 agent=agent,
                 data={
                     "tool_name": tool_name,
-                    "args_summary": args_summary[:300],
+                    "args_summary": args_summary,
                 },
             )
 
@@ -251,7 +251,7 @@ class PipelineCollector:
         with self._lock:
             entry = {
                 "tool_name": tool_name,
-                "error": error[:500],
+                "error": error,
                 "timestamp": time.time(),
             }
             self.bad_results.append(entry)
@@ -413,7 +413,7 @@ class PipelineCollector:
                 "agent": t.agent,
                 "duration_secs": round(t.duration_secs, 2),
                 "result_chars": t.result_chars,
-                "error": t.error[:100] if t.error else "",
+                "error": t.error if t.error else "",
                 "was_compressed": t.was_compressed,
             }
             for t in self.tool_calls[-10:]
@@ -441,7 +441,7 @@ class PipelineCollector:
         return {
             "status": "finalized" if self._finalized else "running",
             "session_id": self.session_id,
-            "query": self.query[:200],
+            "query": self.query,
             "started_at": self.started_at,
             "elapsed_secs": round(elapsed, 1),
             "current_phase": self._current_phase,

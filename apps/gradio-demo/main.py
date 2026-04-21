@@ -512,7 +512,7 @@ def _format_search_results(tool_input: dict, tool_output: dict) -> str:
 
         # Results list
         lines.append('<div class="search-results">')
-        for item in results[:10]:  # Limit to 10 results
+        for item in results:
             title = item.get("title", "Untitled")
             link = item.get("link", "#")
 
@@ -572,7 +572,7 @@ def _format_sogou_search_results(tool_input: dict, tool_output: dict) -> str:
 
         # Results list
         lines.append('<div class="search-results">')
-        for item in results[:10]:  # Limit to 10 results
+        for item in results:
             title = item.get("title", "Untitled")
             link = item.get("url", item.get("link", "#"))
 
@@ -602,7 +602,7 @@ def _format_scrape_results(tool_input: dict, tool_output: dict) -> str:
         lines.append('<div class="scrape-header">')
         lines.append('<span class="scrape-icon">🌐</span>')
         lines.append(
-            f'<span class="scrape-url">{url[:60]}{"..." if len(url) > 60 else ""}</span>'
+            f'<span class="scrape-url">{url}</span>'
         )
         lines.append("</div>")
         lines.append('<div class="scrape-status error">❌ Failed</div>')
@@ -615,7 +615,7 @@ def _format_scrape_results(tool_input: dict, tool_output: dict) -> str:
         lines.append('<div class="scrape-header">')
         lines.append('<span class="scrape-icon">🌐</span>')
         lines.append(
-            f'<span class="scrape-url">{url[:60]}{"..." if len(url) > 60 else ""}</span>'
+            f'<span class="scrape-url">{url}</span>'
         )
         lines.append("</div>")
         lines.append('<div class="scrape-status success">✓ Done</div>')
@@ -712,7 +712,7 @@ def _render_markdown(state: dict) -> str:
                     if isinstance(output, str) and output.strip():
                         lines.append("\n**Output:**\n")
                         lines.append(
-                            f'\n```text\n{output[:1000]}{"..." if len(output) > 1000 else ""}\n```\n'
+                            f'\n```text\n{output}\n```\n'
                         )
                 lines.append("\n✅ Executed\n")
                 continue
@@ -726,10 +726,8 @@ def _render_markdown(state: dict) -> str:
                     # Show brief input summary
                     if isinstance(tool_input, dict):
                         brief = ", ".join(
-                            f"{k}: {str(v)[:30]}..."
-                            if len(str(v)) > 30
-                            else f"{k}: {v}"
-                            for k, v in list(tool_input.items())[:2]
+                            f"{k}: {v}"
+                            for k, v in tool_input.items()
                         )
                         target_lines.append(f'<div class="tool-brief">{brief}</div>')
                 if has_output:

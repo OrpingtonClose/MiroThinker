@@ -1,6 +1,6 @@
 # MiroThinker — Local Model Serving
 
-MiroThinker's swarm workers and queen merge can run on **local uncensored models** via Ollama, removing dependency on remote APIs for sensitive research topics.
+MiroThinker's gossip swarm **only** accepts localhost URLs (a guard rejects remote APIs at startup and before every LLM call). Workers and queen merge run on local uncensored models via Ollama.
 
 ## Architecture
 

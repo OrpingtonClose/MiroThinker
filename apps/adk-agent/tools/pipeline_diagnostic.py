@@ -159,42 +159,42 @@ def parse_log_file(log_path: str) -> dict[str, Any]:
         if " error " in lower or "error:" in lower or "failed" in lower:
             summary["error_count"] += 1
             if len(summary["errors"]) < 50:
-                summary["errors"].append(line.strip()[:300])
+                summary["errors"].append(line.strip())
 
         if " warning " in lower or "warning:" in lower:
             summary["warning_count"] += 1
             if len(summary["warnings"]) < 30:
-                summary["warnings"].append(line.strip()[:300])
+                summary["warnings"].append(line.strip())
 
         # Phase completion
         if "phase" in lower and "complete" in lower:
-            summary["phases_completed"].append(line.strip()[:200])
+            summary["phases_completed"].append(line.strip())
 
         # Circuit breaker trips
         if "circuit breaker tripped" in lower:
-            summary["circuit_breakers_tripped"].append(line.strip()[:200])
+            summary["circuit_breakers_tripped"].append(line.strip())
 
         # Stall/timeout events
         if "timed out" in lower or "stall" in lower or "timeout" in lower:
-            summary["stall_events"].append(line.strip()[:200])
+            summary["stall_events"].append(line.strip())
 
         # Heartbeats
         if "heartbeat" in lower:
-            summary["heartbeats"].append(line.strip()[:200])
+            summary["heartbeats"].append(line.strip())
 
         # Scoring
         if "scoring" in lower or "scored" in lower:
-            summary["scoring_events"].append(line.strip()[:200])
+            summary["scoring_events"].append(line.strip())
 
         # Search executor stats line
         if "search executor complete" in lower or "search executor stats" in lower:
-            summary["search_executor_stats"]["raw"] = line.strip()[:300]
+            summary["search_executor_stats"]["raw"] = line.strip()
 
         # Query rejection
         if "query rejected" in lower or "queries rejected" in lower:
             if "query_rejections" not in summary:
                 summary["query_rejections"] = []
-            summary["query_rejections"].append(line.strip()[:200])
+            summary["query_rejections"].append(line.strip())
 
         # Academic search failures
         if ("semantic scholar" in lower or "arxiv" in lower or "scite" in lower) and (
@@ -202,13 +202,13 @@ def parse_log_file(log_path: str) -> dict[str, Any]:
         ):
             if "academic_failures" not in summary:
                 summary["academic_failures"] = []
-            summary["academic_failures"].append(line.strip()[:200])
+            summary["academic_failures"].append(line.strip())
 
         # Mandatory scoring gate
         if "mandatory scoring gate" in lower:
             if "mandatory_scoring" not in summary:
                 summary["mandatory_scoring"] = []
-            summary["mandatory_scoring"].append(line.strip()[:200])
+            summary["mandatory_scoring"].append(line.strip())
 
     return summary
 
@@ -534,7 +534,7 @@ def check_academic_search(log: dict[str, Any]) -> CheckResult:
                 "Academic search (Phase C) returned ZERO results — "
                 "all academic APIs failed"
             ),
-            evidence=academic_failures[:5] + circuit_trips[:3],
+            evidence=academic_failures + circuit_trips,
         )
 
     if len(academic_failures) >= 3:
@@ -542,7 +542,7 @@ def check_academic_search(log: dict[str, Any]) -> CheckResult:
             name="academic_search",
             severity=Severity.WARNING,
             message=f"{len(academic_failures)} academic search failures",
-            evidence=academic_failures[:5],
+            evidence=academic_failures,
         )
 
     if circuit_trips:
@@ -550,7 +550,7 @@ def check_academic_search(log: dict[str, Any]) -> CheckResult:
             name="academic_search",
             severity=Severity.WARNING,
             message=f"Circuit breakers tripped: {len(circuit_trips)}",
-            evidence=circuit_trips[:3],
+            evidence=circuit_trips,
         )
 
     return CheckResult(
@@ -569,7 +569,7 @@ def check_pipeline_stall(log: dict[str, Any]) -> CheckResult:
             name="pipeline_stall",
             severity=Severity.CRITICAL,
             message="Pipeline timed out — search executor exceeded deadline",
-            evidence=stall_events[:5],
+            evidence=stall_events,
         )
 
     if stall_events:
@@ -577,7 +577,7 @@ def check_pipeline_stall(log: dict[str, Any]) -> CheckResult:
             name="pipeline_stall",
             severity=Severity.WARNING,
             message=f"{len(stall_events)} stall-related events",
-            evidence=stall_events[:5],
+            evidence=stall_events,
         )
 
     return CheckResult(
@@ -615,7 +615,7 @@ def check_synthesiser_ran(log: dict[str, Any], corpus: dict[str, Any]) -> CheckR
             ),
             evidence=[
                 f"iterations_seen={iterations}",
-                f"phases_completed: {[p[:60] for p in phases]}",
+                f"phases_completed: {phases}",
             ],
         )
 
@@ -661,7 +661,7 @@ def check_query_noise(log: dict[str, Any]) -> CheckResult:
                 f"{len(rejections)} queries rejected as off-topic noise "
                 f"— thinker is producing generic queries"
             ),
-            evidence=rejections[:5],
+            evidence=rejections,
         )
 
     if rejections:
@@ -669,7 +669,7 @@ def check_query_noise(log: dict[str, Any]) -> CheckResult:
             name="query_noise",
             severity=Severity.WARNING,
             message=f"{len(rejections)} queries rejected as noise",
-            evidence=rejections[:3],
+            evidence=rejections,
         )
 
     return CheckResult(
@@ -693,7 +693,7 @@ def check_error_rate(log: dict[str, Any]) -> CheckResult:
                 f"{error_count} errors in {total_lines} log lines "
                 f"({error_rate:.1f}% error rate)"
             ),
-            evidence=log.get("errors", [])[:10],
+            evidence=log.get("errors", []),
         )
 
     if error_count >= 5:
@@ -701,7 +701,7 @@ def check_error_rate(log: dict[str, Any]) -> CheckResult:
             name="error_rate",
             severity=Severity.WARNING,
             message=f"{error_count} errors in log",
-            evidence=log.get("errors", [])[:5],
+            evidence=log.get("errors", []),
         )
 
     return CheckResult(
@@ -723,7 +723,7 @@ def check_mandatory_scoring(log: dict[str, Any]) -> CheckResult:
                 "Mandatory scoring gate fired during cleanup — "
                 "findings were left unscored by the normal pipeline path"
             ),
-            evidence=mandatory[:3],
+            evidence=mandatory,
         )
 
     return CheckResult(
@@ -872,12 +872,12 @@ def generate_llm_analysis(
     for c in critical:
         findings_section += (
             f"\n[CRITICAL] {c.name}: {c.message}\n"
-            f"  Evidence: {'; '.join(c.evidence[:3])}\n"
+            f"  Evidence: {'; '.join(c.evidence)}\n"
         )
     for c in warnings:
         findings_section += (
             f"\n[WARNING] {c.name}: {c.message}\n"
-            f"  Evidence: {'; '.join(c.evidence[:3])}\n"
+            f"  Evidence: {'; '.join(c.evidence)}\n"
         )
 
     corpus_section = (
@@ -957,7 +957,7 @@ def format_report(report: DiagnosticReport) -> str:
             Severity.OK: "[OK]      ",
         }[check.severity]
         lines.append(f"{prefix} {check.name}: {check.message}")
-        for ev in check.evidence[:3]:
+        for ev in check.evidence:
             lines.append(f"           {ev}")
     lines.append("")
 

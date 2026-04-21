@@ -3,29 +3,30 @@
 
 """Bridge between strands-agent and GossipSwarm engine.
 
-Provides async CompleteFn wrappers that call a **localhost-only**
-OpenAI-compatible endpoint (Ollama) and a top-level
-``gossip_synthesize`` function that runs the full gossip pipeline
-on a research corpus.
+Provides async CompleteFn wrappers that call a **localhost-only** Ollama
+endpoint (OpenAI-compatible ``/v1/chat/completions``), and a top-level
+``gossip_synthesize`` function that runs the full gossip pipeline on a
+research corpus.
+
+Security: a guard rejects any non-localhost URL at import time AND at
+call time.  The swarm MUST NOT send prompts to remote APIs.
 
 The strands-agent researcher gathers raw data (TranscriptAPI, web
 search, etc.).  That raw output becomes the corpus for GossipSwarm,
 which adds multi-worker angle analysis, adversarial gossip rounds,
 serendipity cross-connections, and a queen merge — the quality
 mechanisms that make research trustworthy.
-
-Security:
-    A localhost guard (``_assert_localhost``) enforces that all swarm
-    LLM calls stay on the local machine.  Remote API URLs are rejected
-    at startup to prevent accidental data leakage to external services.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING, Awaitable, Callable
+from urllib.parse import urlparse
 
 # Ensure repo root is on sys.path so ``swarm.*`` is importable
 _REPO_ROOT = str(Path(__file__).resolve().parents[2])
@@ -33,83 +34,73 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 import httpx
-from urllib.parse import urlparse
 
 from swarm.config import SwarmConfig
 from swarm.engine import GossipSwarm, SwarmResult
-from swarm.lineage import LineageStore
+
+if TYPE_CHECKING:
+    from swarm.lineage import LineageStore
 
 logger = logging.getLogger(__name__)
 
 # ── Localhost guard ───────────────────────────────────────────────────
 
-_LOCALHOST_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+_ALLOWED_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
 
 
 def _assert_localhost(url: str) -> None:
-    """Reject any URL whose host is not localhost.
+    """Raise if *url* does not point to a localhost address.
 
-    The swarm MUST use local models only.  This guard prevents
-    accidental data leakage to remote APIs.
-
-    Raises:
-        ValueError: If the URL points to a non-localhost host.
+    Called at import time (fail fast) and before every LLM call
+    (defense in depth).
     """
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
-    if host not in _LOCALHOST_HOSTS:
+    if host not in _ALLOWED_HOSTS:
         msg = (
-            f"Swarm completion URL must be localhost, got {url!r} "
-            f"(host={host!r}). Set SWARM_API_BASE to a localhost URL "
-            f"(e.g. http://localhost:11434/v1). Remote APIs are forbidden "
-            f"for swarm workers."
+            f"Swarm guard: URL <{url}> resolves to <{host}> which is "
+            f"NOT localhost.  The gossip swarm only accepts localhost "
+            f"URLs to prevent data leakage to remote APIs.  Set "
+            f"SWARM_API_BASE or OLLAMA_BASE_URL to a localhost address."
         )
-        raise ValueError(msg)
+        raise RuntimeError(msg)
 
 
-# ── Local model completion functions (Ollama, OpenAI-compatible) ──────
+# ── Local model configuration ────────────────────────────────────────
 
-_SWARM_API_BASE = os.environ.get(
-    "SWARM_API_BASE",
-    os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434") + "/v1",
-)
+# Base URL for the local Ollama instance (OpenAI-compatible endpoint).
+_OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+_SWARM_API_BASE = os.environ.get("SWARM_API_BASE", f"{_OLLAMA_BASE}/v1")
 
-# Validate at import time — fail fast if misconfigured
+# Validate at import time — fail fast if someone misconfigures.
 _assert_localhost(_SWARM_API_BASE)
 
 # Per-phase model selection.
-# Workers: Gemma-4-26B abliterated (fast, uncensored, parallel).
-# Queen: Qwen3.5-27B-Claude-Opus abliterated (best writer).
-# Serendipity: same as queen (best cross-domain reasoner).
+# Workers: fast uncensored model (Gemma-4 uncensored via Ollama).
+# Queen: best available writer (Qwen-Claude-Opus or equivalent).
+# Serendipity: best cross-domain reasoner.
 _WORKER_MODEL = os.environ.get("SWARM_WORKER_MODEL", "gemma-4-uncensored")
 _QUEEN_MODEL = os.environ.get("SWARM_QUEEN_MODEL", "qwen-claude-opus")
 _SERENDIPITY_MODEL = os.environ.get("SWARM_SERENDIPITY_MODEL", _QUEEN_MODEL)
 
-logger.info(
-    "swarm_api_base=<%s>, worker_model=<%s>, queen_model=<%s>, "
-    "serendipity_model=<%s> | swarm bridge configured (localhost-only)",
-    _SWARM_API_BASE, _WORKER_MODEL, _QUEEN_MODEL, _SERENDIPITY_MODEL,
-)
+
+# ── Local LLM completion ─────────────────────────────────────────────
 
 
 async def _local_complete(
     prompt: str,
     model: str,
-    max_tokens: int = 4096,
+    max_tokens: int = 16384,
     temperature: float = 0.3,
 ) -> str:
-    """Call localhost OpenAI-compatible chat completions endpoint.
-
-    Works with Ollama (``/v1/chat/completions``), vLLM, llama.cpp server,
-    or any local OpenAI-compatible API.
+    """Call localhost Ollama OpenAI-compatible chat completions endpoint.
 
     Returns the assistant message content, or empty string on failure.
     """
-    # Re-validate at call time in case env was mutated
+    # Defense in depth — re-check at call time.
     _assert_localhost(_SWARM_API_BASE)
 
     url = f"{_SWARM_API_BASE}/chat/completions"
-    headers = {"Content-Type": "application/json"}
     payload = {
         "model": model,
         "messages": [
@@ -122,12 +113,14 @@ async def _local_complete(
 
     async with httpx.AsyncClient(timeout=300.0) as client:
         try:
-            resp = await client.post(url, json=payload, headers=headers)
+            resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
             return data["choices"][0]["message"]["content"]
         except Exception:
-            logger.exception("model=<%s>, url=<%s> | local LLM call failed", model, url)
+            logger.exception(
+                "model=<%s>, url=<%s> | local LLM call failed", model, url,
+            )
             return ""
 
 
@@ -139,7 +132,7 @@ async def worker_complete(prompt: str) -> str:
 async def queen_complete(prompt: str) -> str:
     """CompleteFn for queen merge — Qwen-Claude-Opus (local)."""
     return await _local_complete(
-        prompt, _QUEEN_MODEL, max_tokens=8192, temperature=0.3,
+        prompt, _QUEEN_MODEL, max_tokens=32768, temperature=0.3,
     )
 
 
@@ -158,6 +151,7 @@ async def gossip_synthesize(
     cancel_event: "asyncio.Event | None" = None,
     corpus_delta_fn: "Callable[[], Awaitable[str]] | None" = None,
     lineage_store: "LineageStore | None" = None,
+    prior_corpus: str = "",
 ) -> SwarmResult:
     """Run full gossip swarm pipeline on a research corpus.
 
@@ -177,10 +171,29 @@ async def gossip_synthesize(
             phase outputs.  When provided, every bee's work (synthesis,
             gossip rounds, serendipity, queen merge) is documented in
             the store.
+        prior_corpus: Optional prior research output to prepend to the
+            main corpus.  Use this to incorporate findings from a
+            previous orchestrator run or earlier swarm iteration.
 
     Returns:
         SwarmResult with user_report, knowledge_report, metrics, etc.
     """
+    # Merge prior corpus with current corpus
+    if prior_corpus and prior_corpus.strip():
+        merged_corpus = (
+            f"=== PRIOR RESEARCH FINDINGS ===\n"
+            f"{prior_corpus.strip()}\n\n"
+            f"=== CURRENT CORPUS ===\n"
+            f"{corpus}"
+        )
+        logger.info(
+            "prior_corpus_chars=<%d>, current_corpus_chars=<%d> | "
+            "merging prior research into swarm corpus",
+            len(prior_corpus), len(corpus),
+        )
+    else:
+        merged_corpus = corpus
+
     config = SwarmConfig()
     config.corpus_delta_fn = corpus_delta_fn
     if lineage_store is not None:
@@ -196,11 +209,11 @@ async def gossip_synthesize(
 
     logger.info(
         "corpus_chars=<%d>, workers=<%d>, gossip_rounds=<%d> | starting gossip synthesis",
-        len(corpus), config.max_workers, config.gossip_rounds,
+        len(merged_corpus), config.max_workers, config.gossip_rounds,
     )
 
     result = await swarm.synthesize(
-        corpus=corpus,
+        corpus=merged_corpus,
         query=query,
         on_event=on_event,
         cancel_event=cancel_event,

@@ -186,7 +186,7 @@ async def exa_multi_search(
     if not _EXA_API_KEY:
         return json.dumps({"error": "EXA_API_KEY not set"})
 
-    # Safety bounds
+    # Safety bounds — API cost protection, not data truncation
     queries = queries[:10]
     num_results_per_query = min(num_results_per_query, 8)
     text_max_chars = min(text_max_chars, 10_000)
@@ -222,15 +222,16 @@ async def exa_multi_search(
                     {
                         "title": r.get("title", ""),
                         "url": r.get("url", ""),
-                        "snippet": " ".join(r.get("highlights", []))[:200]
-                        or r.get("text", "")[:200],
+                        "snippet": (" ".join(r.get("highlights", []))
+                        or r.get("text", ""))[:500],
                     }
                     for r in b.get("results", [])[:5]
                 ],
             }
             for b in raw_results
         ],
-        "all_sources": all_sources[:30],  # cap to avoid bloat
+        # Context bound — full data preserved in API response, this caps agent-facing output
+        "all_sources": all_sources[:50],
     }
 
     return json.dumps(output, ensure_ascii=False)

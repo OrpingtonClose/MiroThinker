@@ -90,7 +90,8 @@ def _build_synth_prompt(
         f"refute with THEIR data? State specific, testable claims. "
         f"This section is how cross-domain connections get discovered "
         f"during conversation.\n\n"
-        f"Stay under {max_chars} characters.\n\n"
+        f"Produce a THOROUGH analysis — preserve all reasoning chains, "
+        f"evidence, and implications. Depth over brevity.\n\n"
         f"Produce your reasoned analysis through the {angle} lens:"
     )
 
@@ -191,7 +192,9 @@ def _build_gossip_prompt(
         f"and predictions grounded in your domain. The connections ARE "
         f"the output.\n"
         f"7. Maintain source citations and evidence quality assessments.\n"
-        f"8. Stay under {max_chars} characters.\n\n"
+        f"8. Produce a THOROUGH analysis — do not artificially compress your "
+        f"reasoning. Every evidence chain, prediction, and falsification "
+        f"condition matters. Depth over brevity.\n\n"
         f"Produce your DEEPLY CONNECTED {angle} analysis:"
     )
 

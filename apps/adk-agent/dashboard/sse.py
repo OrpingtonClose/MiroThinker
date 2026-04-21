@@ -141,7 +141,7 @@ def _load_runs() -> list[dict[str, Any]]:
             runs.append({
                 "file": os.path.basename(path),
                 "session_id": data.get("session_id", ""),
-                "query": data.get("query", "")[:100],
+                "query": data.get("query", ""),
                 "elapsed_secs": data.get("elapsed_secs", 0),
                 "started_at": data.get("started_at", 0),
                 "kpi": data.get("kpi", {}),
