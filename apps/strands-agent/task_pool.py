@@ -640,6 +640,14 @@ class AsyncTaskPool:
                     except Exception:
                         logger.warning("gap_text=<%s> | failed to launch gap research", gap[:80])
 
+        # Export prior research (findings + thoughts from earlier iterations)
+        # to feed into the swarm as additional context.
+        try:
+            prior_corpus = self._store.export_prior_research()
+        except Exception:
+            logger.warning("export_prior_research failed, continuing without prior corpus")
+            prior_corpus = ""
+
         # We're in a worker thread — run the coroutine in a fresh loop.
         try:
             result = asyncio.run(
@@ -650,6 +658,7 @@ class AsyncTaskPool:
                     corpus_delta_fn=_corpus_delta_fn,
                     on_event=_on_swarm_event,
                     lineage_store=self._store,  # persist all bee outputs
+                    prior_corpus=prior_corpus,
                 ),
             )
         except Exception as exc:

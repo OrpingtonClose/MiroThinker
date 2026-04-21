@@ -130,7 +130,7 @@ async def queen_merge(
     query: str,
     complete_fn,
     serendipity_insights: str = "",
-    max_summary_chars: int = 6000,
+    max_summary_chars: int = 100000,
 ) -> str:
     """Merge all worker summaries + serendipity insights into final answer.
 
@@ -151,7 +151,7 @@ async def queen_merge(
     for angle, summary in worker_summaries.items():
         summaries_text += (
             f"\n### Worker: {angle}\n"
-            f"{summary[:max_summary_chars]}\n"
+            f"{summary}\n"
         )
 
     if serendipity_insights:

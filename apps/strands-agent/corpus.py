@@ -562,7 +562,7 @@ class ConditionStore:
         self,
         since: str,
         min_confidence: float = 0.0,
-        max_rows: int = 100,
+        max_rows: int = 10000,
     ) -> str:
         """Return findings created after *since* as formatted text.
 
@@ -573,7 +573,7 @@ class ConditionStore:
             since: ISO-8601 timestamp — only findings with
                 ``created_at > since`` are returned.
             min_confidence: Minimum confidence threshold.
-            max_rows: Hard cap on returned findings to avoid prompt bloat.
+            max_rows: Safety cap on returned findings (default 10000).
 
         Returns:
             Formatted text block of new findings, or empty string if none.
@@ -605,6 +605,51 @@ class ConditionStore:
 
         return (
             f"=== {len(rows)} NEW FINDINGS (since last round) ===\n"
+            + "\n".join(lines)
+        )
+
+    def export_prior_research(self) -> str:
+        """Export ALL prior findings and thought entries as corpus text.
+
+        Combines findings, thoughts (worker synthesis, gossip rounds),
+        and insights into a single text block for feeding into a
+        subsequent swarm run.  No row limits — preserves everything.
+
+        Returns:
+            Formatted text block of all prior research, or empty string.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT id, fact, source_url, source_type, confidence,
+                          angle, row_type, iteration
+                   FROM conditions
+                   WHERE consider_for_use = TRUE
+                     AND row_type IN ('finding', 'thought', 'insight')
+                   ORDER BY iteration ASC, id ASC"""
+            ).fetchall()
+
+        if not rows:
+            return ""
+
+        lines: list[str] = []
+        for row in rows:
+            cid, fact, src_url, src_type, conf, angle, rtype, itr = row
+            tags = []
+            if src_type:
+                tags.append(f"[{src_type}]")
+            if rtype != "finding":
+                tags.append(f"[{rtype}]")
+            if angle:
+                tags.append(f"[angle:{angle}]")
+            if conf != 0.5:
+                tags.append(f"[conf={conf:.2f}]")
+            tag_str = " ".join(tags)
+            url_tag = f" ({src_url})" if src_url else ""
+            lines.append(f"[#{cid}] {tag_str} {fact}{url_tag}")
+
+        return (
+            f"=== PRIOR RESEARCH: {len(rows)} entries "
+            f"(findings + thoughts + insights) ===\n"
             + "\n".join(lines)
         )
 
@@ -839,7 +884,7 @@ class ConditionStore:
                      AND row_type = 'finding'
                      AND confidence >= 0.7
                    ORDER BY confidence DESC
-                   LIMIT 100"""
+                   """
             ).fetchall()
             if high_conf:
                 lines.append(f"\n{'='*60}")
