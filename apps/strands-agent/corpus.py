@@ -558,6 +558,56 @@ class ConditionStore:
         header = f"=== CORPUS: {len(rows)} findings ==="
         return header + "\n" + "\n".join(lines)
 
+    def export_delta(
+        self,
+        since: str,
+        min_confidence: float = 0.0,
+        max_rows: int = 100,
+    ) -> str:
+        """Return findings created after *since* as formatted text.
+
+        Used by the swarm engine between gossip rounds to pick up new
+        findings that producers ingested while the swarm was running.
+
+        Args:
+            since: ISO-8601 timestamp — only findings with
+                ``created_at > since`` are returned.
+            min_confidence: Minimum confidence threshold.
+            max_rows: Hard cap on returned findings to avoid prompt bloat.
+
+        Returns:
+            Formatted text block of new findings, or empty string if none.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT id, fact, source_url, source_type, confidence,
+                          angle, iteration, verification_status
+                   FROM conditions
+                   WHERE consider_for_use = TRUE
+                     AND row_type = 'finding'
+                     AND confidence >= ?
+                     AND created_at > ?
+                   ORDER BY created_at ASC
+                   LIMIT ?""",
+                [min_confidence, since, max_rows],
+            ).fetchall()
+
+        if not rows:
+            return ""
+
+        lines: list[str] = []
+        for row in rows:
+            cid, fact, src_url, src_type, conf, angle, itr, vstatus = row
+            source_tag = f"[{src_type}]" if src_type else ""
+            url_tag = f" ({src_url})" if src_url else ""
+            conf_tag = f" [conf={conf:.2f}]" if conf != 0.5 else ""
+            lines.append(f"[#{cid}] {source_tag}{conf_tag} {fact}{url_tag}")
+
+        return (
+            f"=== {len(rows)} NEW FINDINGS (since last round) ===\n"
+            + "\n".join(lines)
+        )
+
     def get_synthesis(self, iteration: int) -> str | None:
         """Get the gossip synthesis report for a specific iteration.
 

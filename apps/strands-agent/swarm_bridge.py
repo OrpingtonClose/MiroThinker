@@ -112,6 +112,7 @@ async def gossip_synthesize(
     query: str,
     on_event: "Callable[[dict], Awaitable[None]] | None" = None,
     cancel_event: "asyncio.Event | None" = None,
+    corpus_delta_fn: "Callable[[], Awaitable[str]] | None" = None,
 ) -> SwarmResult:
     """Run full gossip swarm pipeline on a research corpus.
 
@@ -124,11 +125,15 @@ async def gossip_synthesize(
         cancel_event: Optional asyncio.Event checked between gossip
             rounds.  If set, the swarm stops early and returns a
             partial result.
+        corpus_delta_fn: Optional async callback that returns new findings
+            as formatted text.  Called between gossip rounds to inject
+            external data from producers running in parallel.
 
     Returns:
         SwarmResult with user_report, knowledge_report, metrics, etc.
     """
     config = SwarmConfig()
+    config.corpus_delta_fn = corpus_delta_fn
 
     swarm = GossipSwarm(
         complete=worker_complete,
