@@ -181,6 +181,11 @@ class MultiEndpointRouter:
             ),
         )
 
+        # Validate overrides through the same localhost guard
+        override_urls = [u for u in [queen_ep, seren_ep] if u]
+        if override_urls:
+            _assert_all_localhost(override_urls)
+
         logger.info(
             "endpoints=<%d>, queen=<%s/%s>, serendipity=<%s/%s> | "
             "multi-endpoint router initialized",
