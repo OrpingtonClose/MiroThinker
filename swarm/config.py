@@ -150,6 +150,16 @@ class SwarmConfig:
     corpus_delta_fn: "Callable[[], Awaitable[str]] | None" = None
     max_gossip_rounds: int = int(os.getenv("SWARM_MAX_GOSSIP_ROUNDS", "10"))
 
+    # ── Three-tier topology settings ──────────────────────────────
+    enable_hierarchy: bool = os.getenv("SWARM_HIERARCHY", "1") == "1"
+    max_leaf_size: int = int(os.getenv("SWARM_MAX_LEAF_SIZE", "25"))
+    min_leaf_size: int = int(os.getenv("SWARM_MIN_LEAF_SIZE", "5"))
+    bridge_rounds: int = int(os.getenv("SWARM_BRIDGE_ROUNDS", "3"))
+    serendipity_panel_size: int = int(os.getenv("SWARM_PANEL_SIZE", "5"))
+    coordinator_max_chars: int = int(os.getenv("SWARM_COORD_MAX_CHARS", "4000"))
+    enable_serendipity_panel: bool = os.getenv("SWARM_PANEL", "1") == "1"
+    enable_queen_lucidity_pass: bool = os.getenv("SWARM_LUCIDITY", "1") == "1"
+
     def __post_init__(self) -> None:
         """Resolve defaults that depend on other fields."""
         if self.max_concurrency <= 0:

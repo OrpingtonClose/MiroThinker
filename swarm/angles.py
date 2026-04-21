@@ -118,6 +118,132 @@ def detect_sections(corpus: str) -> list[CorpusSection]:
     ]
 
 
+def _parse_findings(corpus: str) -> list[tuple[str, str]]:
+    """Parse a flat corpus into individual findings.
+
+    Recognises two formats:
+    - ``[#id] ...`` lines (ConditionStore export_for_swarm output)
+    - Newline-separated paragraphs (generic text)
+
+    Returns:
+        List of ``(finding_key, finding_text)`` tuples.  The key is used
+        for assignment tracking; for ``[#id]`` lines it is the id, for
+        paragraphs it is ``"p{index}"``.
+    """
+    # Try [#id] format first (ConditionStore output)
+    id_pattern = re.compile(r'^\[#(\d+)\]\s*', re.MULTILINE)
+    id_matches = list(id_pattern.finditer(corpus))
+
+    if len(id_matches) >= 2:
+        findings: list[tuple[str, str]] = []
+        for i, match in enumerate(id_matches):
+            start = match.start()
+            end = id_matches[i + 1].start() if i + 1 < len(id_matches) else len(corpus)
+            text = corpus[start:end].strip()
+            if text:
+                findings.append((match.group(1), text))
+        return findings
+
+    # Fallback: split by newlines
+    lines = [ln.strip() for ln in corpus.split("\n") if ln.strip() and len(ln.strip()) > 20]
+    # Skip header lines (e.g. "=== CORPUS: 93 findings ===")
+    lines = [ln for ln in lines if not ln.startswith("===")]
+    return [(f"p{i}", ln) for i, ln in enumerate(lines)]
+
+
+async def distribute_findings_to_angles(
+    findings: list[tuple[str, str]],
+    angles: list[str],
+    complete_fn,
+) -> dict[str, list[int]]:
+    """Use LLM to assign each finding to the most relevant angle.
+
+    Each finding goes to exactly ONE angle — this creates information
+    asymmetry between workers, which is the operating principle of the
+    gossip protocol.  Workers only learn about other slices through
+    conversation.
+
+    Args:
+        findings: List of ``(key, text)`` tuples from ``_parse_findings``.
+        angles: Detected research angles.
+        complete_fn: Async LLM completion callable.
+
+    Returns:
+        Dict mapping angle name to list of finding indices.  Every
+        finding appears in exactly one angle's list.
+    """
+    n_findings = len(findings)
+    n_angles = len(angles)
+
+    # Build compact finding previews (truncate for prompt size)
+    finding_previews = []
+    for i, (key, text) in enumerate(findings):
+        preview = text[:200].replace("\n", " ")
+        finding_previews.append(f"F{i}: {preview}")
+
+    angle_list = []
+    for j, a in enumerate(angles):
+        angle_list.append(f"A{j}: {a}")
+
+    prompt = (
+        "You are distributing research findings across specialist workers. "
+        "Each worker covers one ANGLE. Each finding goes to the ONE angle "
+        "where the specialist would extract the MOST value from it.\n\n"
+        "ANGLES:\n" + "\n".join(angle_list) + "\n\n"
+        "FINDINGS:\n" + "\n".join(finding_previews) + "\n\n"
+        f"For each finding F0..F{n_findings - 1}, output the angle number "
+        f"(0..{n_angles - 1}) it belongs to. Format: one line per finding, "
+        "just the angle number.\n"
+        "Example for 5 findings:\n"
+        "2\n0\n1\n0\n2\n\n"
+        "Output ONLY the numbers, one per line:"
+    )
+
+    try:
+        response = await complete_fn(prompt)
+        assignments: list[int] = []
+        for line in response.strip().split("\n"):
+            line = line.strip()
+            # Extract the first number from the line
+            nums = re.findall(r'\d+', line)
+            if nums:
+                idx = int(nums[0])
+                assignments.append(min(idx, n_angles - 1))
+            if len(assignments) >= n_findings:
+                break
+
+        # If LLM didn't return enough assignments, distribute remaining
+        # round-robin
+        while len(assignments) < n_findings:
+            assignments.append(len(assignments) % n_angles)
+
+        # Group by angle
+        result: dict[str, list[int]] = {a: [] for a in angles}
+        for finding_idx, angle_idx in enumerate(assignments):
+            angle_name = angles[min(angle_idx, n_angles - 1)]
+            result[angle_name].append(finding_idx)
+
+        # Ensure every angle gets at least one finding — redistribute
+        # from the largest bucket if any angle is empty
+        empty_angles = [a for a, idxs in result.items() if not idxs]
+        if empty_angles:
+            largest = max(result.keys(), key=lambda a: len(result[a]))
+            for empty_a in empty_angles:
+                if len(result[largest]) > 1:
+                    result[empty_a].append(result[largest].pop())
+
+        return result
+
+    except Exception:
+        logger.warning("finding distribution LLM call failed, using round-robin")
+        # Round-robin fallback
+        result = {a: [] for a in angles}
+        for i in range(n_findings):
+            angle_name = angles[i % n_angles]
+            result[angle_name].append(i)
+        return result
+
+
 async def detect_angles_via_llm(
     corpus: str,
     query: str,
