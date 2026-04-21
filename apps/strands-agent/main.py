@@ -629,7 +629,10 @@ async def _run_job(job: "jobs.JobState") -> None:
         # joined before tearing down the pool/store it depends on.
         cancel_threading.set()
         if orch_thread is not None:
-            await asyncio.to_thread(orch_thread.join, 15.0)
+            try:
+                await asyncio.to_thread(orch_thread.join, 15.0)
+            except RuntimeError:
+                pass  # thread was never started
             if orch_thread.is_alive():
                 logger.warning(
                     "job_id=<%s> | orchestrator thread did not exit within 15s",
