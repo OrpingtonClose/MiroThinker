@@ -492,6 +492,7 @@ async def _run_job(job: "jobs.JobState") -> None:
         finally:
             orch_loop.close()
 
+    orch_thread = None  # declared before try so finally can always join
     try:
         final_content = ""
 
@@ -574,9 +575,6 @@ async def _run_job(job: "jobs.JobState") -> None:
                     "error": data.get("error", ""),
                 })
 
-        # Wait for the orchestrator thread to finish cleanly.
-        orch_thread.join(timeout=10.0)
-
         # ── Job complete ──────────────────────────────────────────
         report = store.build_report(user_query=job.query)
         if not report.strip() or "(No gossip synthesis" in report:
@@ -618,6 +616,11 @@ async def _run_job(job: "jobs.JobState") -> None:
         })
     finally:
         cancel_bridge_task.cancel()
+        # Join the orchestrator thread before closing the store — the
+        # thread may still be running LangGraph operations that access
+        # the store via tool callbacks (query_corpus, launch_research).
+        if orch_thread is not None:
+            await asyncio.to_thread(orch_thread.join, 15.0)
         try:
             # ``pool.shutdown`` performs a blocking drain of up to
             # ``drain_timeout`` seconds followed by

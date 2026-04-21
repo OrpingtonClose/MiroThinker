@@ -140,7 +140,7 @@ async def find_serendipitous_connections(
     worker_summaries: dict[str, str],
     query: str,
     complete_fn,
-) -> str:
+) -> tuple[str, int]:
     """Run the two-pass serendipity bridge across all worker angle summaries.
 
     Pass 1 (parallel-safe): Find convergences, compounding effects, transfers.
@@ -153,11 +153,11 @@ async def find_serendipitous_connections(
         complete_fn: Async LLM completion callable.
 
     Returns:
-        Combined string of cross-angle insights from both passes,
-        or empty string if neither pass found anything.
+        Tuple of (combined insights string, number of successful LLM calls).
+        Insights string is empty if neither pass found anything.
     """
     if len(worker_summaries) < 2:
-        return ""
+        return "", 0
 
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -172,8 +172,10 @@ async def find_serendipitous_connections(
         summaries_text=summaries_text,
     )
 
+    llm_calls = 0
     try:
         convergence_result = await complete_fn(convergence_prompt)
+        llm_calls += 1
     except Exception:
         logger.warning("serendipity pass 1 (convergence) failed")
         convergence_result = ""
@@ -191,6 +193,7 @@ async def find_serendipitous_connections(
 
     try:
         contradiction_result = await complete_fn(contradiction_prompt)
+        llm_calls += 1
     except Exception:
         logger.warning("serendipity pass 2 (contradiction) failed")
         contradiction_result = ""
@@ -219,4 +222,4 @@ async def find_serendipitous_connections(
         len(contradiction_result) if contradiction_result else 0,
     )
 
-    return combined
+    return combined, llm_calls
