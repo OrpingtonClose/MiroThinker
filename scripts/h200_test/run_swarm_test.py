@@ -55,6 +55,7 @@ from corpus import ConditionStore
 from swarm.config import SwarmConfig
 from swarm.engine import GossipSwarm, SwarmResult
 from swarm.lineage import LineageStore
+from swarm_log import init_logging, log_llm_call, log_worker_output
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,11 @@ def _strip_thinking(text: str) -> str:
     return _THINK_RE.sub("", text).strip()
 
 
+# Track which phase the current LLM call belongs to (set by callers)
+_current_phase: str = "unknown"
+_current_worker: str = ""
+
+
 async def _vllm_complete(
     prompt: str,
     model: str,
@@ -100,16 +106,43 @@ async def _vllm_complete(
         "temperature": temperature,
     }
 
+    t0 = time.monotonic()
     async with httpx.AsyncClient(timeout=600.0) as client:
         try:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
             raw = data["choices"][0]["message"]["content"]
-            return _strip_thinking(raw)
-        except Exception:
+            cleaned = _strip_thinking(raw)
+            elapsed = time.monotonic() - t0
+
+            # Log full LLM call to SQLite
+            log_llm_call(
+                phase=_current_phase,
+                prompt=prompt,
+                response=cleaned,
+                worker=_current_worker,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                elapsed_s=elapsed,
+            )
+            return cleaned
+        except Exception as exc:
+            elapsed = time.monotonic() - t0
             logger.exception(
                 "model=<%s>, url=<%s> | vLLM call failed", model, url,
+            )
+            log_llm_call(
+                phase=_current_phase,
+                prompt=prompt,
+                response="",
+                worker=_current_worker,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                elapsed_s=elapsed,
+                error=str(exc),
             )
             return ""
 
@@ -337,10 +370,10 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s | %(message)s",
-    )
+    # Structured SQLite logging — captures everything
+    log_db_path = str(Path(args.output_dir) / "swarm_log.db")
+    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    init_logging(log_db_path)
 
     # Build SwarmConfig
     config = SwarmConfig()
