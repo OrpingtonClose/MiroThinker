@@ -1416,10 +1416,11 @@ def _generate_serendipitous_queries(
 
             proxy_url = get_flock_proxy_url()
             if proxy_url:
+                # Context bound — prevent exceeding Flock proxy model context window
                 prompt = _SERENDIPITY_DISSOLUTION_PROMPT.format(
                     n=n_variants,
-                    user_query=user_query,
-                    queries="\n".join(f"- {q}" for q in queries),
+                    user_query=user_query[:2000],
+                    queries="\n".join(f"- {q}" for q in queries[:8]),
                 )
                 body = _json.dumps({
                     "model": "flock-model",
