@@ -467,13 +467,19 @@ async def _run_job(job: "jobs.JobState") -> None:
         Sets the per-job contextvars so that tool callbacks
         (``launch_research``, ``check_tasks``, etc.) can resolve the
         active ``AsyncTaskPool`` and ``ConditionStore``.
+
+        The entire body is wrapped in try/except to guarantee _SENTINEL
+        reaches the queue even if new_event_loop() or set_event_loop()
+        fail (e.g. file descriptor exhaustion).
         """
         set_current_task_pool(pool)
         set_current_store(store)
 
-        orch_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(orch_loop)
+        orch_loop = None
         try:
+            orch_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(orch_loop)
+
             async def _drain() -> None:
                 try:
                     async for ev in _orchestrator.run(job.query):  # type: ignore[union-attr]
@@ -485,12 +491,13 @@ async def _run_job(job: "jobs.JobState") -> None:
 
             orch_loop.run_until_complete(_drain())
         except Exception as exc:
-            # Catch errors from ``run_until_complete`` itself (e.g. if
-            # ``_drain`` raises before the first yield).
+            # Catch errors from ``run_until_complete`` itself, or from
+            # ``new_event_loop`` / ``set_event_loop``.
             event_bridge.put(exc)
             event_bridge.put(_SENTINEL)
         finally:
-            orch_loop.close()
+            if orch_loop is not None:
+                orch_loop.close()
 
     orch_thread = None  # declared before try so finally can always join
     try:
