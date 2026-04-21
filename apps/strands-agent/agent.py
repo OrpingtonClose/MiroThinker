@@ -36,6 +36,7 @@ from strands.agent.conversation_manager import SlidingWindowConversationManager
 from strands.vended_plugins.skills import AgentSkills
 
 from config import build_model, build_model_with_selection
+from plugins.knowledge import KnowledgePlugin
 from prompts import RESEARCHER_PROMPT, SYSTEM_PROMPT
 from tools import get_all_mcp_clients, get_native_tools
 
@@ -491,6 +492,24 @@ def create_single_agent(tool_list=None, mcp_clients=None, user_query=None):
     if skills_plugin is not None:
         plugins.append(skills_plugin)
 
+    # Knowledge persistence plugin (cross-session learning)
+    knowledge_plugin = KnowledgePlugin()
+    plugins.append(knowledge_plugin)
+
+    # Add knowledge recall tools alongside existing tools
+    from knowledge_recall_tools import (
+        knowledge_stats,
+        recall_entities,
+        recall_knowledge,
+        store_insight as store_insight_tool,
+    )
+    tool_list = list(tool_list) + [
+        recall_knowledge,
+        store_insight_tool,
+        recall_entities,
+        knowledge_stats,
+    ]
+
     agent = Agent(
         model=model,
         system_prompt=SYSTEM_PROMPT,
@@ -534,10 +553,26 @@ def create_researcher_instance(
     else:
         model = build_model()
 
+    # Knowledge persistence for researchers too
+    knowledge_plugin = KnowledgePlugin()
+
+    from knowledge_recall_tools import (
+        knowledge_stats,
+        recall_entities,
+        recall_knowledge,
+        store_insight as store_insight_tool,
+    )
+    researcher_tools = list(tools) + [
+        recall_knowledge,
+        store_insight_tool,
+        recall_entities,
+        knowledge_stats,
+    ]
+
     agent = Agent(
         model=model,
         system_prompt=RESEARCHER_PROMPT,
-        tools=list(tools),
+        tools=researcher_tools,
         conversation_manager=SlidingWindowConversationManager(
             window_size=15,
             should_truncate_results=True,
@@ -545,6 +580,7 @@ def create_researcher_instance(
         callback_handler=_build_callback_handler(
             budget, include_stream_capture=False,
         ),
+        plugins=[knowledge_plugin],
     )
     return agent
 

@@ -307,6 +307,28 @@ async def health():
     }
 
 
+@app.get("/knowledge")
+async def knowledge_overview():
+    """Get knowledge base statistics and recent insights."""
+    from knowledge_store import get_knowledge_store
+    store = get_knowledge_store()
+    stats = store.get_stats()
+    recent = store.get_recent_insights(limit=10)
+    return {
+        "stats": stats,
+        "recent_insights": recent,
+    }
+
+
+@app.get("/knowledge/search")
+async def knowledge_search(q: str, limit: int = 10):
+    """Search the persistent knowledge base."""
+    from knowledge_store import get_knowledge_store
+    store = get_knowledge_store()
+    results = store.search_insights(query=q, limit=limit)
+    return {"query": q, "results": results, "count": len(results)}
+
+
 @app.get("/tools")
 async def list_tools():
     if _single_agent is None:
