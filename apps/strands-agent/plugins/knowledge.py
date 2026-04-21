@@ -89,13 +89,13 @@ class KnowledgePlugin(Plugin):
     def inject_knowledge(self, event: BeforeInvocationEvent) -> None:
         """Retrieve and inject relevant past knowledge before invocation."""
         if event.messages is None:
+            self._current_query = ""
             return
 
         query = self._extract_query(event.messages)
+        self._current_query = query
         if not query:
             return
-
-        self._current_query = query
 
         # Strip any stale knowledge markers from previous turns
         msgs = [
@@ -141,6 +141,11 @@ class KnowledgePlugin(Plugin):
         if not self._current_query:
             return
 
+        # Skip results from our own tools to avoid feedback loops
+        tool_name = event.tool_use.get("name", "") if event.tool_use else ""
+        if tool_name in {"recall_knowledge", "store_insight", "recall_entities", "knowledge_stats"}:
+            return
+
         # Get the text content from the tool result
         result = event.result
         if not result:
@@ -152,7 +157,6 @@ class KnowledgePlugin(Plugin):
 
         # Extract facts from this tool's output
         facts = self._extract_facts(result_text)
-        tool_name = event.tool_use.get("name", "") if event.tool_use else ""
         stored = 0
         for fact_text, source_url in facts:
             if self._store.has_similar_insight(fact_text):
