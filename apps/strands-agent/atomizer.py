@@ -1,4 +1,4 @@
-"""LLM-based text atomisation via local Ollama endpoint.
+"""LLM-based text atomisation via local vLLM endpoint.
 
 Replaces Flock's in-SQL llm_complete for decomposing free text into
 atomic factual claims. Each atom is a dict ready for ConditionStore.admit().
@@ -14,7 +14,7 @@ import re
 
 import httpx
 
-from swarm_bridge import _assert_localhost, _SWARM_API_BASE
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -160,16 +160,31 @@ def _is_junk(text: str) -> bool:
     return any(lower.startswith(p) for p in junk_prefixes)
 
 
+def _get_atomizer_base() -> str:
+    """Resolve the atomizer API base URL, defaulting to localhost vLLM."""
+    return os.environ.get("SWARM_API_BASE", "http://localhost:8000/v1")
+
+
+def _assert_localhost(url: str) -> None:
+    """Guard: only allow localhost URLs for model endpoints."""
+    parsed = urlparse(url)
+    hostname = parsed.hostname or ""
+    if hostname not in ("localhost", "127.0.0.1", "::1"):
+        msg = f"Model endpoint must be localhost, got: {url}"
+        raise RuntimeError(msg)
+
+
 async def _local_complete(
     prompt: str,
     model: str,
     max_tokens: int = 4096,
     temperature: float = 0.1,
 ) -> str:
-    """Call localhost Ollama for atomisation. Low temperature for precision."""
-    _assert_localhost(_SWARM_API_BASE)
+    """Call localhost vLLM for atomisation. Low temperature for precision."""
+    base = _get_atomizer_base()
+    _assert_localhost(base)
 
-    url = f"{_SWARM_API_BASE}/chat/completions"
+    url = f"{base}/chat/completions"
     payload = {
         "model": model,
         "messages": [

@@ -151,7 +151,7 @@ async def queen_merge(
     for angle, summary in worker_summaries.items():
         summaries_text += (
             f"\n### Worker: {angle}\n"
-            f"{summary}\n"
+            f"{summary[:max_summary_chars]}\n"
         )
 
     if serendipity_insights:
@@ -275,7 +275,7 @@ async def build_knowledge_report(
     # Build condensed summaries text for the exec summary prompt
     condensed = ""
     for angle, summary in worker_summaries.items():
-        condensed += f"\n### {angle}\n{summary[:4000]}\n"
+        condensed += f"\n### {angle}\n{summary}\n"
 
     serendipity_block = ""
     if serendipity_insights:
@@ -310,11 +310,8 @@ async def build_knowledge_report(
         logger.warning("knowledge report exec summary failed: %s", exc)
         exec_summary = fallback_summary
 
-    # Derive a clean title from the query (first sentence, capped at 100 chars on word boundary)
+    # Derive a clean title from the query (first sentence)
     title_text = query.split(".")[0].split("?")[0].split("\n")[0].strip()
-    if len(title_text) > 100:
-        # Cut on word boundary
-        title_text = title_text[:100].rsplit(" ", 1)[0] + "..."
 
     # Assemble the full knowledge report
     parts = [

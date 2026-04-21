@@ -379,7 +379,7 @@ class GossipSwarm:
                 "corpus_chars": len(corpus),
                 "section_count": len(sections),
                 "angle_count": len(angles),
-                "query": query[:200],
+                "query": query,
             },
         ))
 
@@ -403,12 +403,12 @@ class GossipSwarm:
                     )
                 except Exception:
                     logger.warning(
-                        "worker_id=<%d>, angle=<%s> | worker synthesis failed, using raw truncation",
+                        "worker_id=<%d>, angle=<%s> | worker synthesis failed, using raw content",
                         assignment.worker_id, assignment.angle,
                     )
-                    assignment.summary = assignment.raw_content
+                    assignment.summary = assignment.raw_content[:config.max_summary_chars]
                     metrics.degradations.append(
-                        f"Worker {assignment.angle} synthesis failed, used raw truncation"
+                        f"Worker {assignment.angle} synthesis failed, used raw content"
                     )
 
         await asyncio.gather(*[_bounded_synthesize(a) for a in assignments])
@@ -629,7 +629,7 @@ class GossipSwarm:
             if gaps_found:
                 await _emit_event({
                     "type": "research_gap",
-                    "gaps": gaps_found[:10],
+                    "gaps": gaps_found,
                     "round": gossip_round,
                 })
                 logger.info(
