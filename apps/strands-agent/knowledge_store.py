@@ -233,7 +233,8 @@ class KnowledgeStore:
             for _, ins in scored[:limit]:
                 ins["access_count"] = ins.get("access_count", 0) + 1
                 results.append(dict(ins))
-            self._flush()
+            if scored:
+                self._flush()
 
         return results
 
