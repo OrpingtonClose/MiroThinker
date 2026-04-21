@@ -4,7 +4,8 @@
 """Strands SDK plugins for the Miro research agent.
 
 Plugins extend agent behavior via the hook system:
-- KnowledgePlugin: cross-session knowledge persistence (Before/AfterInvocationEvent)
+- KnowledgePlugin: cross-conversation knowledge persistence
+  (BeforeInvocation / AfterToolCall / AfterInvocation hooks + @tool methods)
 """
 
 from plugins.knowledge import KnowledgePlugin

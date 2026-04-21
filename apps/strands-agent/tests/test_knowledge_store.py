@@ -1,7 +1,7 @@
 # Copyright (c) 2025 MiroMind
 # This source code is licensed under the Apache 2.0 License.
 
-"""Tests for the persistent KnowledgeStore."""
+"""Tests for the persistent KnowledgeStore (JSON-backed)."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from knowledge_store import (
 @pytest.fixture
 def store():
     """Create an in-memory KnowledgeStore for testing."""
-    s = KnowledgeStore(db_path=":memory:")
+    s = KnowledgeStore(path=":memory:")
     yield s
     s.close()
 
@@ -93,7 +93,7 @@ class TestEntityTracking:
             description="GIP/GLP-1 dual agonist",
         )
         eid = store.store_entity(entity)
-        assert eid > 0
+        assert eid >= 0
         assert store.count_entities() == 1
 
     def test_entity_deduplication(self, store: KnowledgeStore) -> None:
@@ -131,7 +131,6 @@ class TestDeduplication:
         store.store_insight(Insight(
             fact="GLP-1 receptor agonists reduce HbA1c by 1.0-1.5 percent in trials",
         ))
-        # Same core words, minor rephrasing — should be detected as similar
         assert store.has_similar_insight(
             "GLP-1 receptor agonists reduce HbA1c by 1.0-1.5 percent in clinical trials"
         )
@@ -146,10 +145,10 @@ class TestDeduplication:
         )
 
 
-class TestFTSSearch:
-    """Full-text search with BM25 ranking."""
+class TestKeywordSearch:
+    """Keyword-based search."""
 
-    def test_fts_relevance_ranking(self, store: KnowledgeStore) -> None:
+    def test_relevance_ranking(self, store: KnowledgeStore) -> None:
         """More relevant results should rank higher."""
         store.store_insight(Insight(
             fact="BPC-157 promotes angiogenesis in rat tendon healing models",
@@ -191,14 +190,9 @@ class TestFTSSearch:
         """Searching increments the access_count of returned results."""
         store.store_insight(Insight(fact="Unique testable fact about quantum"))
 
-        # First search — access_count update happens after the SELECT,
-        # so the returned row shows the pre-update value (0)
-        results1 = store.search_insights("quantum")
-        assert len(results1) == 1
-
-        # Second search — now the row has been updated by the first search
-        results2 = store.search_insights("quantum")
-        assert results2[0]["access_count"] >= 1
+        store.search_insights("quantum")
+        results = store.search_insights("quantum")
+        assert results[0]["access_count"] >= 2
 
 
 class TestStats:
@@ -250,13 +244,13 @@ class TestLifecycle:
 
     def test_close_and_reopen(self, tmp_path) -> None:
         """Data persists after close and reopen."""
-        db = str(tmp_path / "test.db")
+        db = str(tmp_path / "test.json")
 
-        store1 = KnowledgeStore(db_path=db)
+        store1 = KnowledgeStore(path=db)
         store1.store_insight(Insight(fact="Persistent fact about durability"))
         store1.close()
 
-        store2 = KnowledgeStore(db_path=db)
+        store2 = KnowledgeStore(path=db)
         assert store2.count_insights() == 1
         results = store2.search_insights("durability")
         assert len(results) >= 1

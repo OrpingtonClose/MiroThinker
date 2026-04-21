@@ -492,23 +492,11 @@ def create_single_agent(tool_list=None, mcp_clients=None, user_query=None):
     if skills_plugin is not None:
         plugins.append(skills_plugin)
 
-    # Knowledge persistence plugin (cross-session learning)
+    # Knowledge persistence plugin (cross-conversation learning)
+    # Tools (recall_knowledge, store_insight, etc.) are auto-discovered
+    # from the plugin via the SDK's @tool decorator on Plugin methods.
     knowledge_plugin = KnowledgePlugin()
     plugins.append(knowledge_plugin)
-
-    # Add knowledge recall tools alongside existing tools
-    from knowledge_recall_tools import (
-        knowledge_stats,
-        recall_entities,
-        recall_knowledge,
-        store_insight as store_insight_tool,
-    )
-    tool_list = list(tool_list) + [
-        recall_knowledge,
-        store_insight_tool,
-        recall_entities,
-        knowledge_stats,
-    ]
 
     agent = Agent(
         model=model,
@@ -554,25 +542,13 @@ def create_researcher_instance(
         model = build_model()
 
     # Knowledge persistence for researchers too
+    # Tools auto-discovered from the plugin.
     knowledge_plugin = KnowledgePlugin()
-
-    from knowledge_recall_tools import (
-        knowledge_stats,
-        recall_entities,
-        recall_knowledge,
-        store_insight as store_insight_tool,
-    )
-    researcher_tools = list(tools) + [
-        recall_knowledge,
-        store_insight_tool,
-        recall_entities,
-        knowledge_stats,
-    ]
 
     agent = Agent(
         model=model,
         system_prompt=RESEARCHER_PROMPT,
-        tools=researcher_tools,
+        tools=tools,
         conversation_manager=SlidingWindowConversationManager(
             window_size=15,
             should_truncate_results=True,

@@ -100,7 +100,7 @@ Research mgmt: store_finding, read_findings, knowledge graph tools
 PERSISTENT KNOWLEDGE: You have a persistent knowledge base that remembers \
 facts across conversations. Use it:
 - recall_knowledge: BEFORE searching, check what you already know about this topic
-- store_insight: AFTER finding important facts, store them for future sessions
+- store_insight: AFTER finding important facts, store them for future conversations
 - recall_entities: Look up people, compounds, organizations from past research
 - knowledge_stats: Check what your knowledge base covers
 Start EVERY research task with recall_knowledge to avoid repeating past work. \

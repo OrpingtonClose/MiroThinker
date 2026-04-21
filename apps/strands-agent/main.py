@@ -308,7 +308,7 @@ async def health():
 
 
 @app.get("/knowledge")
-async def knowledge_overview():
+def knowledge_overview():
     """Get knowledge base statistics and recent insights."""
     from knowledge_store import get_knowledge_store
     store = get_knowledge_store()
@@ -321,7 +321,7 @@ async def knowledge_overview():
 
 
 @app.get("/knowledge/search")
-async def knowledge_search(q: str, limit: int = 10):
+def knowledge_search(q: str, limit: int = 10):
     """Search the persistent knowledge base."""
     from knowledge_store import get_knowledge_store
     store = get_knowledge_store()
