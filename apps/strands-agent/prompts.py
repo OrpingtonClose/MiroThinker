@@ -101,6 +101,11 @@ SKILLS: You have access to specialised research skills via the `skills` \
 tool. Activate the relevant skill BEFORE starting your search:
 - YouTube/video/channel research → osint-censored-discovery
 - Censored or hard-to-find information → osint-censored-discovery
+- Academic/scientific literature → academic-research
+- Government databases (FDA, SEC, courts, trials) → government-data
+- Financial/corporate intelligence → financial-research
+- Preprints (bioRxiv, SSRN, ChemRxiv) → preprint-pipeline
+- Forum discussions (MesoRx, Reddit, etc.) → forum-mining
 
 RULES:
 - NEVER answer from memory alone — search first

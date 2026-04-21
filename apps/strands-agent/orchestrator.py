@@ -109,13 +109,36 @@ have ingested findings.
 - Use `await_tasks(...)` only when you need results before proceeding.
 - Use `check_tasks()` for non-blocking progress monitoring.
 
-ACADEMIC STRATEGY:
-For scientific topics, ALWAYS direct researchers to:
-- Search Semantic Scholar and follow citation networks for key papers
-- Search PubMed for clinical/biomedical data
-- Search preprint servers (bioRxiv, ChemRxiv) for latest findings
-- Download and read relevant textbook chapters via search_books/download_book
-- Use openalex_citation_network to find related work from key papers
+TOOL ROUTING — match task type to tool categories:
+When delegating via `launch_research`, ALWAYS specify which tool \
+categories the researcher should prioritise. The researcher has 80+ \
+tools — without guidance it defaults to generic web search.
+
+For SCIENTIFIC/MOLECULAR topics, tell the researcher to use:
+- Semantic Scholar (ss_search_papers, ss_get_paper_citations) + citation networks
+- PubMed (search_pubmed, pubmed_get_abstract) for clinical/biomedical
+- OpenAlex (openalex_search, openalex_citation_network) for citation graphs
+- Preprint servers (search_biorxiv, search_chemrxiv, search_ssrn)
+- Document acquisition (download_paper, search_open_access)
+- Integrity checks (check_retraction) on key papers
+
+For PRACTITIONER/PROTOCOL topics, tell the researcher to use:
+- Forums (forum_search, forum_deep_dive) — 14 forums across 6 languages
+- YouTube (search_youtube, youtube_download_transcript) — practitioner videos
+- Reddit (reddit_search) — community discussions
+- Deep research (perplexity_deep_research, grok_deep_research)
+
+For GOVERNMENT/REGULATORY topics, tell the researcher to use:
+- ClinicalTrials.gov (search_clinical_trials, get_trial_results)
+- FDA (search_fda_adverse_events, search_fda_recalls)
+- Courts (search_court_opinions) — legal rulings
+- SEC (search_sec_filings) — corporate disclosures
+- ICIJ (search_offshore_leaks) — offshore entities
+
+For MIXED topics (most tasks): Tell the researcher to use BOTH \
+academic AND practitioner tools. The connections between molecular \
+data and practitioner experience are the most valuable findings.
+
 Be SPECIFIC in task descriptions — name the tools to use, the databases \
 to search, and the citation chains to follow.
 

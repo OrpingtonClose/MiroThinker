@@ -36,6 +36,8 @@ from strands.agent.conversation_manager import SlidingWindowConversationManager
 from strands.vended_plugins.skills import AgentSkills
 
 from config import build_model, build_model_with_selection
+from plugins.tool_audit import ToolAuditPlugin
+from plugins.tool_router import ToolRouterPlugin
 from prompts import RESEARCHER_PROMPT, SYSTEM_PROMPT
 from tools import get_all_mcp_clients, get_native_tools
 
@@ -491,13 +493,18 @@ def create_single_agent(tool_list=None, mcp_clients=None, user_query=None):
     if skills_plugin is not None:
         plugins.append(skills_plugin)
 
+    # Tool routing + audit plugins (query-aware tool selection)
+    tool_router = ToolRouterPlugin()
+    tool_audit = ToolAuditPlugin(router=tool_router)
+    plugins.extend([tool_router, tool_audit])
+
     agent = Agent(
         model=model,
         system_prompt=SYSTEM_PROMPT,
         tools=tool_list,
         conversation_manager=conversation_manager,
         callback_handler=_build_callback_handler(),
-        plugins=plugins or None,
+        plugins=plugins,
     )
     return agent, mcp_clients or []
 
@@ -534,6 +541,10 @@ def create_researcher_instance(
     else:
         model = build_model()
 
+    # Tool routing + audit plugins for the researcher too
+    tool_router = ToolRouterPlugin()
+    tool_audit = ToolAuditPlugin(router=tool_router)
+
     agent = Agent(
         model=model,
         system_prompt=RESEARCHER_PROMPT,
@@ -545,6 +556,7 @@ def create_researcher_instance(
         callback_handler=_build_callback_handler(
             budget, include_stream_capture=False,
         ),
+        plugins=[tool_router, tool_audit],
     )
     return agent
 
