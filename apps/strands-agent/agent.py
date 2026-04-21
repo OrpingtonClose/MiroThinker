@@ -548,7 +548,7 @@ def create_researcher_instance(
     agent = Agent(
         model=model,
         system_prompt=RESEARCHER_PROMPT,
-        tools=tools,
+        tools=list(tools),
         conversation_manager=SlidingWindowConversationManager(
             window_size=15,
             should_truncate_results=True,
