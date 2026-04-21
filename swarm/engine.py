@@ -247,42 +247,67 @@ class GossipSwarm:
         if not angles:
             angles = [s.title for s in sections[:config.max_workers]]
 
-        # Semantic assignment: score section-angle pairs via LLM
-        score_matrix = None
-        if config.enable_semantic_assignment and angles and len(sections) >= 2:
-            prepared = _prepare_sections(
-                list(sections), config.max_workers, config.max_section_chars,
+        # ── Angle-first worker creation ───────────────────────────
+        #
+        # Workers are driven by ANGLES, not sections.  Each angle
+        # gets its own worker instance.  When the corpus has fewer
+        # structural sections than detected angles (common for flat
+        # text from ConditionStore.export_for_swarm()), every worker
+        # receives the FULL corpus and analyses it through its
+        # specific angle.  When enough sections exist, the semantic
+        # or keyword assignment distributes sections to angles.
+        if len(sections) < len(angles):
+            # Fewer sections than angles — give every worker the
+            # full corpus, differentiated only by angle.
+            logger.info(
+                "sections=<%d>, angles=<%d> | fewer sections than angles, "
+                "assigning full corpus to each angle worker",
+                len(sections), len(angles),
             )
-            if prepared and len(prepared) >= 2:
-                try:
-                    score_matrix = await score_section_angle_pairs(
-                        prepared, angles, self.complete,
-                    )
-                    metrics.total_llm_calls += 1
-                    if score_matrix is not None:
-                        logger.info(
-                            "sections=<%d>, angles=<%d> | semantic scoring complete",
-                            len(prepared), len(angles),
+            assignments = [
+                WorkerAssignment(
+                    worker_id=i,
+                    angle=angle,
+                    raw_content=corpus,
+                )
+                for i, angle in enumerate(angles)
+            ]
+        else:
+            # Enough sections — use semantic or keyword assignment
+            score_matrix = None
+            if config.enable_semantic_assignment and angles and len(sections) >= 2:
+                prepared = _prepare_sections(
+                    list(sections), config.max_workers, config.max_section_chars,
+                )
+                if prepared and len(prepared) >= 2:
+                    try:
+                        score_matrix = await score_section_angle_pairs(
+                            prepared, angles, self.complete,
                         )
-                    else:
-                        logger.info(
-                            "sections=<%d>, angles=<%d> | semantic scoring "
-                            "returned None, using keyword fallback",
-                            len(prepared), len(angles),
+                        metrics.total_llm_calls += 1
+                        if score_matrix is not None:
+                            logger.info(
+                                "sections=<%d>, angles=<%d> | semantic scoring complete",
+                                len(prepared), len(angles),
+                            )
+                        else:
+                            logger.info(
+                                "sections=<%d>, angles=<%d> | semantic scoring "
+                                "returned None, using keyword fallback",
+                                len(prepared), len(angles),
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "error=<%s> | semantic scoring failed, falling back to keyword",
+                            exc,
                         )
-                except Exception as exc:
-                    logger.warning(
-                        "error=<%s> | semantic scoring failed, falling back to keyword",
-                        exc,
-                    )
 
-        # Assign workers
-        assignments = assign_workers(
-            sections, angles,
-            max_workers=config.max_workers,
-            max_section_chars=config.max_section_chars,
-            score_matrix=score_matrix,
-        )
+            assignments = assign_workers(
+                sections, angles,
+                max_workers=config.max_workers,
+                max_section_chars=config.max_section_chars,
+                score_matrix=score_matrix,
+            )
 
         if not assignments:
             return SwarmResult(
