@@ -260,7 +260,7 @@ class GossipSwarm:
             required_angles = await extract_required_angles(
                 query, self.complete,
             )
-            metrics.total_llm_calls += 1 if required_angles else 0
+            metrics.total_llm_calls += 1
 
         if required_angles:
             logger.info(

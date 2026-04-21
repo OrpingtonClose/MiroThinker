@@ -609,14 +609,16 @@ class ConditionStore:
         )
 
     def export_prior_research(self) -> str:
-        """Export ALL prior findings and thought entries as corpus text.
+        """Export prior thoughts and insights as corpus text.
 
-        Combines findings, thoughts (worker synthesis, gossip rounds),
-        and insights into a single text block for feeding into a
-        subsequent swarm run.  No row limits — preserves everything.
+        Returns worker synthesis outputs, gossip round outputs, and
+        cross-domain insights — the reasoning artifacts that
+        ``export_for_swarm`` does NOT include (it only exports raw
+        findings).  This avoids duplicating findings in the swarm
+        input when both methods are used together.
 
         Returns:
-            Formatted text block of all prior research, or empty string.
+            Formatted text block of prior thoughts/insights, or empty string.
         """
         with self._lock:
             rows = self.conn.execute(
@@ -624,7 +626,7 @@ class ConditionStore:
                           angle, row_type, iteration
                    FROM conditions
                    WHERE consider_for_use = TRUE
-                     AND row_type IN ('finding', 'thought', 'insight')
+                     AND row_type IN ('thought', 'insight')
                    ORDER BY iteration ASC, id ASC"""
             ).fetchall()
 
@@ -649,7 +651,7 @@ class ConditionStore:
 
         return (
             f"=== PRIOR RESEARCH: {len(rows)} entries "
-            f"(findings + thoughts + insights) ===\n"
+            f"(thoughts + insights) ===\n"
             + "\n".join(lines)
         )
 
