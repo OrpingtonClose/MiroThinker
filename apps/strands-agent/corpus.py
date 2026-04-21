@@ -1139,6 +1139,569 @@ class ConditionStore:
         return chain
 
     # ------------------------------------------------------------------
+    # Universal event logging — every swarm event as a graph node
+    # ------------------------------------------------------------------
+    # These methods extend the ConditionStore to be the UNIVERSAL event
+    # sink.  Every LLM call, enrichment result, gossip exchange, worker
+    # assignment, and hive memory hit becomes a condition row with:
+    #   row_type   — event category (llm_call, enrichment, etc.)
+    #   fact       — human-readable summary
+    #   strategy   — JSON blob with full event details
+    #   phase      — swarm phase that produced the event
+    #   angle      — worker angle (if applicable)
+    #   parent_ids — JSON array linking to parent events (DAG edges)
+    #   source_ref — unique event ID for cross-referencing
+    #
+    # The existing get_lineage_chain(), get_by_phase(), get_by_angle()
+    # all work on these rows automatically.  The full execution graph
+    # is queryable:
+    #   SELECT * FROM conditions WHERE row_type = 'llm_call'
+    #   SELECT * FROM conditions WHERE phase = 'gossip_round_2'
+
+    def emit_llm_call(
+        self,
+        phase: str,
+        prompt: str,
+        response: str,
+        *,
+        model: str = "",
+        worker: str = "",
+        angle: str = "",
+        max_tokens: int = 0,
+        temperature: float = 0.0,
+        elapsed_s: float = 0.0,
+        error: str = "",
+        parent_ids: list[str] | None = None,
+    ) -> int | None:
+        """Log a full LLM call as a graph node.
+
+        Stores the response summary as ``fact`` and the complete
+        prompt + response in the ``strategy`` JSON blob.
+
+        Args:
+            phase: Swarm phase (e.g. 'gossip_round_2', 'queen_merge').
+            prompt: Full prompt text sent to the model.
+            response: Full response text from the model.
+            model: Model identifier.
+            worker: Worker name/ID.
+            angle: Worker angle.
+            max_tokens: Max tokens parameter.
+            temperature: Temperature parameter.
+            elapsed_s: Wall-clock time for the call.
+            error: Error message if the call failed.
+            parent_ids: IDs of parent events in the DAG.
+
+        Returns:
+            Condition ID of the new row, or None.
+        """
+        summary = response[:300] if response else f"[LLM call failed: {error[:100]}]"
+        metadata = json.dumps({
+            "model": model,
+            "input_chars": len(prompt),
+            "output_chars": len(response),
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "elapsed_s": round(elapsed_s, 3),
+            "error": error,
+            "prompt": prompt,
+            "response": response,
+        })
+        parent_ids_json = json.dumps(parent_ids or [])
+        now = datetime.now(timezone.utc).isoformat()
+
+        with self._lock:
+            cid = self._next_id
+            self._next_id += 1
+            self.conn.execute(
+                """INSERT INTO conditions
+                   (id, fact, source_type, source_ref, row_type,
+                    consider_for_use, angle, strategy,
+                    created_at, phase, parent_ids)
+                   VALUES (?, ?, 'swarm_llm', ?, 'llm_call',
+                           FALSE, ?, ?, ?, ?, ?)""",
+                [
+                    cid, summary, f"llm-{cid}", angle, metadata,
+                    now, phase, parent_ids_json,
+                ],
+            )
+        logger.debug(
+            "emit_llm_call #%d: phase=%s model=%s chars=%d elapsed=%.1fs",
+            cid, phase, model, len(response), elapsed_s,
+        )
+        return cid
+
+    def emit_enrichment(
+        self,
+        angle: str,
+        query: str,
+        *,
+        backend: str = "",
+        title: str = "",
+        url: str = "",
+        snippet: str = "",
+        admitted: bool = True,
+        reject_reason: str = "",
+        parent_ids: list[str] | None = None,
+    ) -> int | None:
+        """Log an enrichment search result as a graph node.
+
+        Args:
+            angle: Research angle that triggered the search.
+            query: Search query string.
+            backend: Search backend (ddg, pubmed, brave, etc.).
+            title: Result title.
+            url: Result URL.
+            snippet: Result snippet/abstract.
+            admitted: Whether the result was admitted to the corpus.
+            reject_reason: Why it was rejected (empty if admitted).
+            parent_ids: IDs of parent events in the DAG.
+
+        Returns:
+            Condition ID of the new row, or None.
+        """
+        status = "admitted" if admitted else f"rejected: {reject_reason}"
+        summary = f"[{backend}] {title[:200]} — {status}"
+        metadata = json.dumps({
+            "backend": backend,
+            "query": query,
+            "title": title,
+            "url": url,
+            "snippet": snippet,
+            "admitted": admitted,
+            "reject_reason": reject_reason,
+        })
+        parent_ids_json = json.dumps(parent_ids or [])
+        now = datetime.now(timezone.utc).isoformat()
+
+        with self._lock:
+            cid = self._next_id
+            self._next_id += 1
+            self.conn.execute(
+                """INSERT INTO conditions
+                   (id, fact, source_url, source_type, source_ref,
+                    row_type, consider_for_use, angle, strategy,
+                    created_at, phase, parent_ids)
+                   VALUES (?, ?, ?, 'enrichment', ?, 'enrichment',
+                           FALSE, ?, ?, ?, 'enrichment', ?)""",
+                [
+                    cid, summary, url, f"enrich-{cid}", angle, metadata,
+                    now, parent_ids_json,
+                ],
+            )
+        logger.debug(
+            "emit_enrichment #%d: angle=%s backend=%s admitted=%s",
+            cid, angle, backend, admitted,
+        )
+        return cid
+
+    def emit_worker_assignment(
+        self,
+        worker_id: str,
+        angle: str,
+        *,
+        corpus_chars: int = 0,
+        misassigned: bool = False,
+        parent_ids: list[str] | None = None,
+    ) -> int | None:
+        """Log a worker assignment as a graph node.
+
+        Args:
+            worker_id: Worker identifier.
+            angle: Assigned angle.
+            corpus_chars: Size of corpus slice assigned.
+            misassigned: Whether this is a deliberate misassignment.
+            parent_ids: IDs of parent events in the DAG.
+
+        Returns:
+            Condition ID of the new row, or None.
+        """
+        summary = (
+            f"Worker {worker_id} assigned to '{angle}' "
+            f"({corpus_chars} chars, misassigned={misassigned})"
+        )
+        metadata = json.dumps({
+            "worker_id": worker_id,
+            "corpus_chars": corpus_chars,
+            "misassigned": misassigned,
+        })
+        parent_ids_json = json.dumps(parent_ids or [])
+        now = datetime.now(timezone.utc).isoformat()
+
+        with self._lock:
+            cid = self._next_id
+            self._next_id += 1
+            self.conn.execute(
+                """INSERT INTO conditions
+                   (id, fact, source_type, source_ref, row_type,
+                    consider_for_use, angle, strategy,
+                    created_at, phase, parent_ids)
+                   VALUES (?, ?, 'swarm', ?, 'worker_assignment',
+                           FALSE, ?, ?, ?, 'worker_assignment', ?)""",
+                [
+                    cid, summary, f"assign-{cid}", angle, metadata,
+                    now, parent_ids_json,
+                ],
+            )
+        return cid
+
+    def emit_gossip_exchange(
+        self,
+        worker_id: str,
+        angle: str,
+        round_num: int,
+        *,
+        output: str = "",
+        peer_ids: list[str] | None = None,
+        hive_hits: int = 0,
+        info_gain: float = 0.0,
+        parent_ids: list[str] | None = None,
+    ) -> int | None:
+        """Log a gossip exchange as a graph node.
+
+        Args:
+            worker_id: Worker performing the exchange.
+            angle: Worker's angle.
+            round_num: Gossip round number.
+            output: Worker's refined output after the exchange.
+            peer_ids: IDs of peer workers consulted.
+            hive_hits: Number of hive memory retrievals.
+            info_gain: Information gain metric for this round.
+            parent_ids: IDs of parent events in the DAG.
+
+        Returns:
+            Condition ID of the new row, or None.
+        """
+        summary = output[:300] if output else f"[gossip round {round_num} — no output]"
+        metadata = json.dumps({
+            "worker_id": worker_id,
+            "round": round_num,
+            "output_chars": len(output),
+            "peer_ids": peer_ids or [],
+            "hive_hits": hive_hits,
+            "info_gain": round(info_gain, 4),
+            "full_output": output,
+        })
+        parent_ids_json = json.dumps(parent_ids or [])
+        now = datetime.now(timezone.utc).isoformat()
+
+        with self._lock:
+            cid = self._next_id
+            self._next_id += 1
+            self.conn.execute(
+                """INSERT INTO conditions
+                   (id, fact, source_type, source_ref, row_type,
+                    consider_for_use, angle, strategy,
+                    created_at, phase, parent_ids)
+                   VALUES (?, ?, 'swarm', ?, 'gossip_exchange',
+                           FALSE, ?, ?, ?, ?, ?)""",
+                [
+                    cid, summary, f"gossip-{cid}", angle, metadata,
+                    now, f"gossip_round_{round_num}", parent_ids_json,
+                ],
+            )
+        logger.debug(
+            "emit_gossip #%d: worker=%s angle=%s round=%d info_gain=%.3f",
+            cid, worker_id, angle, round_num, info_gain,
+        )
+        return cid
+
+    def emit_hive_memory_hit(
+        self,
+        worker_id: str,
+        angle: str,
+        round_num: int,
+        *,
+        query_snippet: str = "",
+        retrieved_text: str = "",
+        source_phase: str = "",
+        parent_ids: list[str] | None = None,
+    ) -> int | None:
+        """Log a hive memory RAG retrieval as a graph node.
+
+        Args:
+            worker_id: Worker that triggered the retrieval.
+            angle: Worker's angle.
+            round_num: Gossip round during which retrieval occurred.
+            query_snippet: What the worker searched for.
+            retrieved_text: What was retrieved from hive memory.
+            source_phase: Phase of the retrieved content's origin.
+            parent_ids: IDs of parent events in the DAG.
+
+        Returns:
+            Condition ID of the new row, or None.
+        """
+        summary = f"Hive hit for {worker_id}: {query_snippet[:100]}"
+        metadata = json.dumps({
+            "worker_id": worker_id,
+            "round": round_num,
+            "query_snippet": query_snippet,
+            "retrieved_chars": len(retrieved_text),
+            "source_phase": source_phase,
+        })
+        parent_ids_json = json.dumps(parent_ids or [])
+        now = datetime.now(timezone.utc).isoformat()
+
+        with self._lock:
+            cid = self._next_id
+            self._next_id += 1
+            self.conn.execute(
+                """INSERT INTO conditions
+                   (id, fact, source_type, source_ref, row_type,
+                    consider_for_use, angle, strategy,
+                    created_at, phase, parent_ids)
+                   VALUES (?, ?, 'hive_memory', ?, 'hive_memory_hit',
+                           FALSE, ?, ?, ?, ?, ?)""",
+                [
+                    cid, summary, f"hive-{cid}", angle, metadata,
+                    now, f"gossip_round_{round_num}", parent_ids_json,
+                ],
+            )
+        return cid
+
+    # ------------------------------------------------------------------
+    # Graph export (Mermaid / DOT / stats)
+    # ------------------------------------------------------------------
+
+    def graph_stats(self) -> str:
+        """Return summary statistics of the execution graph.
+
+        Returns:
+            Human-readable string of graph statistics.
+        """
+        with self._lock:
+            stats: list[str] = ["=== EXECUTION GRAPH STATS ==="]
+            total = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions"
+            ).fetchone()[0]
+            stats.append(f"  Total nodes: {total}")
+
+            by_type = self.conn.execute(
+                "SELECT row_type, COUNT(*) FROM conditions "
+                "GROUP BY row_type ORDER BY COUNT(*) DESC"
+            ).fetchall()
+            stats.append("  By row_type:")
+            for rtype, cnt in by_type:
+                stats.append(f"    {rtype}: {cnt}")
+
+            by_phase = self.conn.execute(
+                "SELECT phase, COUNT(*) FROM conditions "
+                "WHERE phase != '' "
+                "GROUP BY phase ORDER BY COUNT(*) DESC"
+            ).fetchall()
+            if by_phase:
+                stats.append("  By phase:")
+                for phase, cnt in by_phase:
+                    stats.append(f"    {phase}: {cnt}")
+
+            angles = self.conn.execute(
+                "SELECT angle, COUNT(*) FROM conditions "
+                "WHERE angle != '' "
+                "GROUP BY angle ORDER BY COUNT(*) DESC"
+            ).fetchall()
+            if angles:
+                stats.append(f"  Unique angles: {len(angles)}")
+
+            # Count edges (rows with non-empty parent_ids or parent_id)
+            edge_count = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions "
+                "WHERE (parent_ids != '' AND parent_ids != '[]') "
+                "   OR parent_id IS NOT NULL"
+            ).fetchone()[0]
+            stats.append(f"  Nodes with parent edges: {edge_count}")
+
+        return "\n".join(stats)
+
+    def export_mermaid(
+        self,
+        include_types: list[str] | None = None,
+        exclude_types: list[str] | None = None,
+    ) -> str:
+        """Export the execution graph as a Mermaid flowchart.
+
+        Args:
+            include_types: Only include these row_types (None = all).
+            exclude_types: Exclude these row_types (None = none).
+
+        Returns:
+            Mermaid flowchart string.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT id, row_type, phase, angle, source_ref,
+                          parent_id, parent_ids,
+                          LEFT(fact, 60) as summary
+                   FROM conditions
+                   ORDER BY id ASC"""
+            ).fetchall()
+
+        # Filter
+        if include_types:
+            rows = [r for r in rows if r[1] in include_types]
+        if exclude_types:
+            rows = [r for r in rows if r[1] not in exclude_types]
+
+        # Build node set and source_ref → id map
+        node_ids = {r[0] for r in rows}
+        ref_to_id: dict[str, int] = {}
+        for r in rows:
+            if r[4]:  # source_ref
+                ref_to_id[r[4]] = r[0]
+
+        # Style classes by row_type
+        style_map = {
+            "finding": "fill:#4a9eff,stroke:#333,color:#fff",
+            "thought": "fill:#a78bfa,stroke:#333,color:#fff",
+            "synthesis": "fill:#f59e0b,stroke:#333,color:#000",
+            "llm_call": "fill:#ff6b6b,stroke:#333,color:#fff",
+            "enrichment": "fill:#51cf66,stroke:#333,color:#fff",
+            "gossip_exchange": "fill:#ffd43b,stroke:#333,color:#000",
+            "worker_assignment": "fill:#38bdf8,stroke:#333,color:#000",
+            "hive_memory_hit": "fill:#c084fc,stroke:#333,color:#fff",
+            "raw": "fill:#94a3b8,stroke:#333,color:#fff",
+            "insight": "fill:#fb923c,stroke:#333,color:#000",
+        }
+
+        lines = ["graph TD"]
+        for rtype, style in style_map.items():
+            lines.append(f"  classDef {rtype} {style}")
+
+        # Nodes
+        for r in rows:
+            cid, rtype, phase, angle, sref, pid, pids_json, summary = r
+            label_parts = []
+            if phase:
+                label_parts.append(phase)
+            if angle:
+                label_parts.append(angle[:25])
+            if summary:
+                # Escape quotes for Mermaid
+                clean = summary.replace('"', "'").replace('\n', ' ')
+                label_parts.append(clean[:40])
+            label = " | ".join(p for p in label_parts if p) or rtype
+
+            node_class = rtype if rtype in style_map else ""
+            class_suffix = f":::{node_class}" if node_class else ""
+
+            if rtype == "llm_call":
+                lines.append(f'  n{cid}("{label}"){class_suffix}')
+            elif rtype == "enrichment":
+                lines.append(f'  n{cid}[/"{label}"/]{class_suffix}')
+            elif rtype == "gossip_exchange":
+                lines.append(f'  n{cid}{{{{"{label}"}}}}{class_suffix}')
+            elif rtype == "synthesis":
+                lines.append(f'  n{cid}[["{label}"]]{class_suffix}')
+            else:
+                lines.append(f'  n{cid}["{label}"]{class_suffix}')
+
+        # Edges from parent_id (single FK)
+        for r in rows:
+            cid, _, _, _, _, pid, pids_json, _ = r
+            if pid is not None and pid in node_ids:
+                lines.append(f"  n{pid} --> n{cid}")
+
+            # Edges from parent_ids (JSON array)
+            if pids_json:
+                try:
+                    parent_list = json.loads(pids_json)
+                except (TypeError, ValueError):
+                    parent_list = []
+                for p in parent_list:
+                    if isinstance(p, int) and p in node_ids:
+                        lines.append(f"  n{p} --> n{cid}")
+                    elif isinstance(p, str) and p in ref_to_id:
+                        resolved = ref_to_id[p]
+                        if resolved in node_ids:
+                            lines.append(f"  n{resolved} --> n{cid}")
+
+        return "\n".join(lines)
+
+    def export_dot(
+        self,
+        include_types: list[str] | None = None,
+        exclude_types: list[str] | None = None,
+    ) -> str:
+        """Export the execution graph as a Graphviz DOT file.
+
+        Args:
+            include_types: Only include these row_types (None = all).
+            exclude_types: Exclude these row_types (None = none).
+
+        Returns:
+            DOT format string.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT id, row_type, phase, angle, source_ref,
+                          parent_id, parent_ids,
+                          LEFT(fact, 60) as summary
+                   FROM conditions
+                   ORDER BY id ASC"""
+            ).fetchall()
+
+        if include_types:
+            rows = [r for r in rows if r[1] in include_types]
+        if exclude_types:
+            rows = [r for r in rows if r[1] not in exclude_types]
+
+        node_ids = {r[0] for r in rows}
+        ref_to_id: dict[str, int] = {}
+        for r in rows:
+            if r[4]:
+                ref_to_id[r[4]] = r[0]
+
+        colors = {
+            "finding": "#4a9eff",
+            "thought": "#a78bfa",
+            "synthesis": "#f59e0b",
+            "llm_call": "#ff6b6b",
+            "enrichment": "#51cf66",
+            "gossip_exchange": "#ffd43b",
+            "worker_assignment": "#38bdf8",
+            "hive_memory_hit": "#c084fc",
+            "raw": "#94a3b8",
+            "insight": "#fb923c",
+        }
+
+        lines = [
+            "digraph SwarmExecution {",
+            '  rankdir=TB;',
+            '  node [fontname="Arial", fontsize=10];',
+        ]
+
+        for r in rows:
+            cid, rtype, phase, angle, _, _, _, summary = r
+            color = colors.get(rtype, "#cccccc")
+            label_parts = [rtype]
+            if phase:
+                label_parts.append(phase)
+            if angle:
+                label_parts.append(angle[:25])
+            label = "\\n".join(label_parts)
+            lines.append(
+                f'  n{cid} [label="{label}", style=filled, fillcolor="{color}"];'
+            )
+
+        for r in rows:
+            cid, rtype, _, _, _, pid, pids_json, _ = r
+            if pid is not None and pid in node_ids:
+                lines.append(f"  n{pid} -> n{cid};")
+            if pids_json:
+                try:
+                    parent_list = json.loads(pids_json)
+                except (TypeError, ValueError):
+                    parent_list = []
+                for p in parent_list:
+                    if isinstance(p, int) and p in node_ids:
+                        lines.append(f"  n{p} -> n{cid};")
+                    elif isinstance(p, str) and p in ref_to_id:
+                        resolved = ref_to_id[p]
+                        if resolved in node_ids:
+                            lines.append(f"  n{resolved} -> n{cid};")
+
+        lines.append("}")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
 

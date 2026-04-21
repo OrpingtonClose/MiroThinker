@@ -55,7 +55,7 @@ from corpus import ConditionStore
 from swarm.config import SwarmConfig
 from swarm.engine import GossipSwarm, SwarmResult
 from swarm.lineage import LineageStore
-from swarm_log import init_logging, log_llm_call, log_worker_output
+from swarm_log import init_logging, log_llm_call, log_worker_output, export_mermaid, print_graph_stats, get_store
 
 logger = logging.getLogger(__name__)
 
@@ -307,6 +307,17 @@ async def run_swarm_test(
         with open(seren_path, "w") as f:
             f.write(result.serendipity_insights)
 
+    # Execution graph exports (Mermaid + stats from ConditionStore)
+    mermaid_text = export_mermaid()
+    mermaid_path = output_path / f"execution_graph_{timestamp}.mmd"
+    with open(mermaid_path, "w") as f:
+        f.write(mermaid_text)
+
+    stats = print_graph_stats()
+    stats_path = output_path / f"graph_stats_{timestamp}.txt"
+    with open(stats_path, "w") as f:
+        f.write(stats)
+
     logger.info(
         "elapsed_s=<%.1f>, llm_calls=<%d>, user_report_chars=<%d>, "
         "knowledge_report_chars=<%d> | swarm test complete",
@@ -330,6 +341,9 @@ async def run_swarm_test(
     print(f"  User report:        {user_report_path.name}")
     print(f"  Knowledge report:   {knowledge_report_path.name}")
     print(f"  Metrics:            {metrics_path.name}")
+    print(f"  Execution graph:    {mermaid_path.name}")
+    print(f"  Graph DB:           corpus.duckdb")
+    print(f"\n{stats}")
     print(f"{'═' * 60}\n")
 
     return result
@@ -370,13 +384,15 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Structured SQLite logging — captures everything
-    log_db_path = str(Path(args.output_dir) / "swarm_log.db")
+    # ConditionStore as the universal event sink — captures EVERYTHING
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    init_logging(log_db_path)
+    db_path = args.db or str(Path(args.output_dir) / "corpus.duckdb")
+    store = ConditionStore(db_path=db_path)
+    init_logging(store)
 
-    # Build SwarmConfig
+    # Build SwarmConfig — the store IS the lineage store
     config = SwarmConfig()
+    config.lineage_store = store
     config.required_angles = list(REQUIRED_ANGLE_LABELS)
     config.enable_serendipity = True
     config.enable_full_corpus_gossip = True
@@ -401,20 +417,17 @@ def main() -> None:
     if args.gossip_rounds > 0:
         config.gossip_rounds = args.gossip_rounds
 
-    # Load corpus
+    # Load corpus — the store is already created above as the universal sink
     corpus = ""
-    store = None
 
-    if args.enrich or args.db:
-        db_path = args.db or "enriched_corpus.duckdb"
-        store = ConditionStore(db_path=db_path)
+    if args.enrich:
+        from enrich_corpus import enrich_all
+        logger.info("running enrichment pipeline...")
+        enrich_all(store, max_per_query=10)
 
-        if args.enrich:
-            from enrich_corpus import enrich_all
-            logger.info("running enrichment pipeline...")
-            enrich_all(store, max_per_query=10)
-
-        corpus = load_corpus_from_store(store)
+    # Try loading from the store (enrichment results live there)
+    corpus = load_corpus_from_store(store)
+    if corpus:
         logger.info("corpus_chars=<%d> | loaded from store", len(corpus))
 
     if args.corpus:
@@ -428,10 +441,6 @@ def main() -> None:
     if not corpus:
         logger.error("no corpus provided — use --corpus, --db, or --enrich")
         sys.exit(1)
-
-    # Use LineageStore backed by ConditionStore if available
-    if store is not None:
-        config.lineage_store = store
 
     query = args.query or get_swarm_query()
 

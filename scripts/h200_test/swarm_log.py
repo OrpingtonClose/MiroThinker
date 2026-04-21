@@ -2,165 +2,84 @@
 # Copyright (c) 2025 MiroMind
 # This source code is licensed under the Apache 2.0 License.
 
-"""Structured SQLite logging for the swarm pipeline.
+"""Thin logging wrapper around ConditionStore — the universal event sink.
 
-Captures EVERYTHING to a queryable SQLite database:
-  - All Python logging events (every logger.info/debug/warning/error call)
-  - Full LLM call traces (prompt, response, model, tokens, timing)
-  - Enrichment results (title, URL, snippet, angle, admitted/rejected)
+Instead of a separate SQLite database, every swarm event (LLM calls,
+enrichment results, gossip exchanges, worker assignments, hive memory
+hits) goes through the ConditionStore as AtomicCondition rows.  The
+existing lineage DAG (parent_ids, source_ref) gives you the execution
+graph for free.
 
-Usage:
-    from swarm_log import init_logging, log_llm_call, log_enrichment_result
+This module provides:
 
-    # At startup — replaces logging.basicConfig()
-    init_logging("swarm_log.db")
+1. ``init_logging(store)`` — configure Python's logging to also capture
+   console output, and return the store for use as the lineage store.
 
-    # Existing logger.info() calls automatically land in SQLite.
-    # No changes needed to existing code.
+2. ``log_llm_call`` / ``log_enrichment_result`` / ``log_worker_output``
+   — convenience functions that delegate to the module-level store's
+   ``emit_llm_call`` / ``emit_enrichment`` / ``emit_gossip_exchange``.
 
-    # For structured LLM tracking:
-    log_llm_call(db, phase="map", worker="tren", prompt=..., response=..., ...)
+3. ``export_mermaid`` / ``print_graph_stats`` — graph export helpers
+   that delegate to the store.
 
-    # For enrichment tracking:
-    log_enrichment_result(db, angle="tren", query="...", title="...", ...)
+Query examples (DuckDB SQL via the ConditionStore):
+    -- All LLM calls for gossip round 2
+    SELECT * FROM conditions WHERE row_type = 'llm_call'
+      AND phase = 'gossip_round_2';
 
-Query examples:
-    SELECT * FROM log_events WHERE logger = 'swarm.engine' ORDER BY timestamp;
-    SELECT phase, worker, input_chars, output_chars, elapsed_s FROM llm_calls;
-    SELECT angle, query, title, admitted FROM enrichment_results WHERE admitted = 0;
-    SELECT * FROM llm_calls WHERE phase = 'queen_merge';
+    -- Enrichment results rejected by relevance gate
+    SELECT * FROM conditions WHERE row_type = 'enrichment'
+      AND strategy::JSON->>'admitted' = 'false';
+
+    -- Full lineage chain for the queen merge
+    SELECT * FROM conditions WHERE phase = 'queen_merge';
+    -- then use store.get_lineage_chain(id) to walk parents
+
+    -- Export as Mermaid
+    python -c "from swarm_log import export_mermaid; print(export_mermaid())"
 """
 
 from __future__ import annotations
 
 import logging
-import sqlite3
-import threading
-import time
+import sys
 from pathlib import Path
 
+# Ensure repo root + strands-agent are importable
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+_STRANDS_AGENT = str(Path(__file__).resolve().parents[2] / "apps" / "strands-agent")
+if _STRANDS_AGENT not in sys.path:
+    sys.path.insert(0, _STRANDS_AGENT)
 
-# ── SQLite logging handler ────────────────────────────────────────────
-# Hooks into Python's standard logging module. Every logger.*() call
-# in the process lands here automatically.
-
-class SQLiteHandler(logging.Handler):
-    """Logging handler that writes all log records to a SQLite database."""
-
-    def __init__(self, db_path: str) -> None:
-        super().__init__()
-        self._db_path = db_path
-        self._local = threading.local()
-        # Create table on init (using a one-off connection)
-        conn = sqlite3.connect(db_path)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS log_events (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp REAL    NOT NULL,
-                level     TEXT    NOT NULL,
-                logger    TEXT    NOT NULL,
-                message   TEXT    NOT NULL,
-                pathname  TEXT,
-                lineno    INTEGER,
-                func_name TEXT,
-                thread    TEXT
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS llm_calls (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp    REAL    NOT NULL,
-                phase        TEXT    NOT NULL,
-                worker       TEXT,
-                model        TEXT,
-                prompt       TEXT    NOT NULL,
-                response     TEXT    NOT NULL,
-                input_chars  INTEGER,
-                output_chars INTEGER,
-                max_tokens   INTEGER,
-                temperature  REAL,
-                elapsed_s    REAL,
-                error        TEXT
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS enrichment_results (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp   REAL    NOT NULL,
-                angle       TEXT    NOT NULL,
-                query       TEXT    NOT NULL,
-                backend     TEXT,
-                title       TEXT,
-                url         TEXT,
-                snippet     TEXT,
-                admitted    INTEGER NOT NULL DEFAULT 1,
-                reject_reason TEXT
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS worker_outputs (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp   REAL    NOT NULL,
-                phase       TEXT    NOT NULL,
-                worker      TEXT    NOT NULL,
-                angle       TEXT,
-                round       INTEGER,
-                output      TEXT    NOT NULL,
-                output_chars INTEGER,
-                info_gain   REAL
-            )
-        """)
-        conn.commit()
-        conn.close()
-
-    def _get_conn(self) -> sqlite3.Connection:
-        """Thread-local connection — SQLite connections aren't thread-safe."""
-        if not hasattr(self._local, "conn") or self._local.conn is None:
-            self._local.conn = sqlite3.connect(self._db_path)
-        return self._local.conn
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            conn = self._get_conn()
-            conn.execute(
-                """INSERT INTO log_events
-                   (timestamp, level, logger, message, pathname, lineno, func_name, thread)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    record.created,
-                    record.levelname,
-                    record.name,
-                    self.format(record),
-                    record.pathname,
-                    record.lineno,
-                    record.funcName,
-                    record.threadName,
-                ),
-            )
-            conn.commit()
-        except Exception:
-            self.handleError(record)
+from corpus import ConditionStore
 
 
-# ── Initialization ────────────────────────────────────────────────────
+# ── Module state ──────────────────────────────────────────────────────
 
-_db_path: str = ""
-_handler: SQLiteHandler | None = None
+_store: ConditionStore | None = None
 
 
 def init_logging(
-    db_path: str = "swarm_log.db",
+    store: ConditionStore,
     console_level: int = logging.INFO,
-    sqlite_level: int = logging.DEBUG,
-) -> str:
-    """Initialize logging to both console and SQLite.
+) -> ConditionStore:
+    """Initialize logging with a ConditionStore as the universal event sink.
 
-    Replaces logging.basicConfig(). Call once at startup.
-    Returns the SQLite database path.
+    Sets up console logging and returns the store.  The store should be
+    passed to ``SwarmConfig(lineage_store=...)`` so the engine's
+    ``LineageEntry`` emissions also land in the same store.
+
+    Args:
+        store: The ConditionStore to use as the universal event sink.
+        console_level: Console logging level.
+
+    Returns:
+        The same store (for convenience in assignment).
     """
-    global _db_path, _handler
-
-    _db_path = str(Path(db_path).resolve())
+    global _store
+    _store = store
 
     # Console handler
     console = logging.StreamHandler()
@@ -169,36 +88,26 @@ def init_logging(
         "%(asctime)s %(levelname)s %(name)s | %(message)s",
     ))
 
-    # SQLite handler — captures everything including DEBUG
-    _handler = SQLiteHandler(_db_path)
-    _handler.setLevel(sqlite_level)
-    _handler.setFormatter(logging.Formatter("%(message)s"))
-
     # Configure root logger
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
+    # Remove existing handlers to avoid duplicates
+    root.handlers.clear()
     root.addHandler(console)
-    root.addHandler(_handler)
 
     logging.getLogger(__name__).info(
-        "db_path=<%s> | structured SQLite logging initialized", _db_path,
+        "store=<%s> | ConditionStore logging initialized (universal event sink)",
+        type(store).__name__,
     )
-    return _db_path
+    return store
 
 
-def get_db_path() -> str:
-    """Return the current SQLite log database path."""
-    return _db_path
+def get_store() -> ConditionStore | None:
+    """Return the current module-level ConditionStore."""
+    return _store
 
 
-# ── Structured logging helpers ────────────────────────────────────────
-# These write to dedicated tables for easy querying.
-# They use the same SQLite database as the logging handler.
-
-def _get_conn() -> sqlite3.Connection:
-    """Get a connection to the log database."""
-    return sqlite3.connect(_db_path)
-
+# ── Convenience functions (delegate to store) ─────────────────────────
 
 def log_llm_call(
     phase: str,
@@ -211,29 +120,23 @@ def log_llm_call(
     temperature: float = 0.0,
     elapsed_s: float = 0.0,
     error: str = "",
-) -> None:
-    """Log a full LLM call with prompt and response text."""
-    if not _db_path:
-        return
-    try:
-        conn = _get_conn()
-        conn.execute(
-            """INSERT INTO llm_calls
-               (timestamp, phase, worker, model, prompt, response,
-                input_chars, output_chars, max_tokens, temperature, elapsed_s, error)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                time.time(), phase, worker, model, prompt, response,
-                len(prompt), len(response), max_tokens, temperature,
-                elapsed_s, error,
-            ),
-        )
-        conn.commit()
-        conn.close()
-    except Exception as exc:
-        logging.getLogger(__name__).debug(
-            "error=<%s> | failed to log LLM call", exc,
-        )
+    parent_ids: list[str] | None = None,
+) -> int | None:
+    """Log a full LLM call to the ConditionStore.  Returns condition ID."""
+    if _store is None:
+        return None
+    return _store.emit_llm_call(
+        phase=phase,
+        prompt=prompt,
+        response=response,
+        worker=worker,
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        elapsed_s=elapsed_s,
+        error=error,
+        parent_ids=parent_ids,
+    )
 
 
 def log_enrichment_result(
@@ -246,27 +149,22 @@ def log_enrichment_result(
     snippet: str = "",
     admitted: bool = True,
     reject_reason: str = "",
-) -> None:
-    """Log an enrichment search result (admitted or rejected)."""
-    if not _db_path:
-        return
-    try:
-        conn = _get_conn()
-        conn.execute(
-            """INSERT INTO enrichment_results
-               (timestamp, angle, query, backend, title, url, snippet, admitted, reject_reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                time.time(), angle, query, backend, title, url, snippet,
-                1 if admitted else 0, reject_reason,
-            ),
-        )
-        conn.commit()
-        conn.close()
-    except Exception as exc:
-        logging.getLogger(__name__).debug(
-            "error=<%s> | failed to log enrichment result", exc,
-        )
+    parent_ids: list[str] | None = None,
+) -> int | None:
+    """Log an enrichment search result to the ConditionStore.  Returns condition ID."""
+    if _store is None:
+        return None
+    return _store.emit_enrichment(
+        angle=angle,
+        query=query,
+        backend=backend,
+        title=title,
+        url=url,
+        snippet=snippet,
+        admitted=admitted,
+        reject_reason=reject_reason,
+        parent_ids=parent_ids,
+    )
 
 
 def log_worker_output(
@@ -277,24 +175,38 @@ def log_worker_output(
     angle: str = "",
     round_num: int = 0,
     info_gain: float = 0.0,
-) -> None:
-    """Log a worker's output for a given phase/round."""
-    if not _db_path:
-        return
-    try:
-        conn = _get_conn()
-        conn.execute(
-            """INSERT INTO worker_outputs
-               (timestamp, phase, worker, angle, round, output, output_chars, info_gain)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                time.time(), phase, worker, angle, round_num,
-                output, len(output), info_gain,
-            ),
-        )
-        conn.commit()
-        conn.close()
-    except Exception as exc:
-        logging.getLogger(__name__).debug(
-            "error=<%s> | failed to log worker output", exc,
-        )
+    parent_ids: list[str] | None = None,
+) -> int | None:
+    """Log a worker output to the ConditionStore.  Returns condition ID."""
+    if _store is None:
+        return None
+    return _store.emit_gossip_exchange(
+        worker_id=worker,
+        angle=angle,
+        round_num=round_num,
+        output=output,
+        info_gain=info_gain,
+        parent_ids=parent_ids,
+    )
+
+
+# ── Graph export (delegate to store) ─────────────────────────────────
+
+def export_mermaid(
+    include_types: list[str] | None = None,
+    exclude_types: list[str] | None = None,
+) -> str:
+    """Export the execution graph as a Mermaid flowchart."""
+    if _store is None:
+        return "graph TD\n  no_data[No store configured]"
+    return _store.export_mermaid(
+        include_types=include_types,
+        exclude_types=exclude_types,
+    )
+
+
+def print_graph_stats() -> str:
+    """Return summary statistics of the execution graph."""
+    if _store is None:
+        return "No store configured"
+    return _store.graph_stats()
