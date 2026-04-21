@@ -1176,9 +1176,10 @@ def _dissolve_via_llm(
     if not proxy_url:
         return []
 
+    # Context bound — prevent exceeding Flock proxy model context window
     prompt = _DISSOLUTION_PROMPT.format(
-        user_query=user_query,
-        strategy=strategy_text,
+        user_query=user_query[:2000],
+        strategy=strategy_text[:3000],
     )
 
     body = _json.dumps({
