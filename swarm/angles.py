@@ -528,17 +528,23 @@ def apply_misassignment(
         for i in range(n):
             distant_map[i] = (i + n // 2) % n
 
+    # Snapshot original content before mutation to prevent cascading injection
+    original_contents: dict[int, str] = {
+        i: a.raw_content for i, a in enumerate(assignments)
+    }
+
     # Inject off-angle content
     for i, assignment in enumerate(assignments):
         distant_idx = distant_map[i]
         distant_worker = assignments[distant_idx]
+        distant_content = original_contents[distant_idx]
 
         # Calculate how much off-angle content to inject
-        inject_chars = int(len(distant_worker.raw_content) * ratio)
+        inject_chars = int(len(distant_content) * ratio)
         if inject_chars < 100:
             continue  # too little to be useful
 
-        off_angle_content = distant_worker.raw_content[:inject_chars]
+        off_angle_content = distant_content[:inject_chars]
 
         assignment.raw_content = (
             f"{assignment.raw_content}\n\n"
@@ -548,7 +554,7 @@ def apply_misassignment(
         )
         assignment.char_count = len(assignment.raw_content)
 
-    injected = sum(1 for i in range(n) if distant_map.get(i) is not None)
+    injected = sum(1 for i in range(n) if "OFF-ANGLE DATA" in assignments[i].raw_content)
     logger.info(
         "misassignment workers=<%d>, ratio=<%.2f> | "
         "off-angle data injected into %d workers",
