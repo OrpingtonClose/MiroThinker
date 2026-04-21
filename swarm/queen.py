@@ -275,7 +275,7 @@ async def build_knowledge_report(
     # Build condensed summaries text for the exec summary prompt
     condensed = ""
     for angle, summary in worker_summaries.items():
-        condensed += f"\n### {angle}\n{summary}\n"
+        condensed += f"\n### {angle}\n{summary[:4000]}\n"
 
     serendipity_block = ""
     if serendipity_insights:
