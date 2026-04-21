@@ -61,6 +61,7 @@ class ToolRouterPlugin(Plugin):
         super().__init__()
         self.last_match: DomainMatch | None = None
         self._agent: Agent | None = None
+        self._is_resuming: bool = False
 
     def init_agent(self, agent: "Agent") -> None:
         """Store agent reference for skill activation."""
@@ -77,6 +78,14 @@ class ToolRouterPlugin(Plugin):
         last_match stays current for the ToolAuditPlugin.
         """
         if event.messages is None:
+            return
+
+        # During a resume cycle the last user message is the audit nudge,
+        # not the original query. Skip reclassification to preserve
+        # last_match and avoid injecting wrong-domain guidance.
+        if self._is_resuming:
+            self._is_resuming = False
+            logger.debug("skipping routing during resume cycle")
             return
 
         query = self._extract_query(event.messages)

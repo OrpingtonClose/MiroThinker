@@ -152,6 +152,10 @@ class ToolAuditPlugin(Plugin):
         )
         self._resume_count += 1
         self._is_resuming = True
+        # Signal the router to skip reclassification on the resume cycle
+        # so it doesn't overwrite last_match with nudge-text classification.
+        if self._router is not None:
+            self._router._is_resuming = True
         event.resume = nudge
 
     def _get_recommended_tools(self) -> set[str]:
@@ -186,28 +190,32 @@ class ToolAuditPlugin(Plugin):
         categories: dict[str, list[str]] = {}
         for tool_name in sorted(missed_tools):
             # Extract category from tool name prefix
-            if tool_name.startswith(("openalex_", "ss_")):
+            if tool_name.startswith(("openalex_", "ss_", "semantic_scholar_")):
                 cat = "Academic databases (OpenAlex, Semantic Scholar)"
+            elif tool_name.startswith(("arxiv_", "search_google_scholar")):
+                cat = "Academic literature (arXiv, Google Scholar)"
             elif tool_name.startswith(("search_pubmed", "pubmed_")):
                 cat = "PubMed"
             elif tool_name.startswith("forum_"):
                 cat = "Forum search"
-            elif tool_name.startswith(("youtube_", "search_youtube", "search_channel")):
+            elif tool_name.startswith(("youtube_", "search_youtube", "search_channel", "get_channel", "list_channel")):
                 cat = "YouTube/video"
             elif tool_name.startswith("reddit_"):
                 cat = "Reddit"
-            elif tool_name.startswith(("search_clinical", "get_trial", "search_fda")):
+            elif tool_name.startswith(("search_clinical", "get_trial", "search_fda", "search_court")):
                 cat = "Government databases"
-            elif tool_name.startswith("search_sec"):
-                cat = "SEC filings"
+            elif tool_name.startswith(("search_sec", "search_offshore")):
+                cat = "SEC filings & corporate intelligence"
             elif tool_name.startswith(("search_biorxiv", "search_chemrxiv", "search_ssrn", "search_osf")):
                 cat = "Preprint servers"
             elif tool_name.startswith(("wayback_", "archive_", "ipfs_", "search_common")):
                 cat = "Web archives & OSINT"
             elif tool_name.startswith(("check_retraction", "batch_check", "search_retraction")):
                 cat = "Research integrity"
-            elif tool_name.startswith(("download_paper", "search_open_access")):
+            elif tool_name.startswith(("download_paper", "search_open_access", "resolve_doi", "search_core", "search_springer", "search_zenodo")):
                 cat = "Document acquisition"
+            elif tool_name.startswith("wikidata_"):
+                cat = "Entity disambiguation (Wikidata)"
             else:
                 cat = "Other specialized tools"
 

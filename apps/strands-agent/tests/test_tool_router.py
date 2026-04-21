@@ -144,6 +144,34 @@ class TestToolRouterPlugin:
         # General domain still has guidance
         assert len(event.messages) == 2
 
+    def test_route_tools_skips_reclassification_during_resume(self) -> None:
+        """During resume, route_tools should skip to preserve last_match."""
+        from unittest.mock import MagicMock
+        from plugins.domains import classify_query
+
+        # First invocation: academic query
+        event1 = MagicMock()
+        event1.messages = [
+            {"role": "user", "content": [{"text": "find papers on GLP-1 pharmacokinetics"}]},
+        ]
+        self.plugin.route_tools(event1)
+        assert ACADEMIC in self.plugin.last_match.domains
+
+        # Audit sets _is_resuming on router before resume fires
+        self.plugin._is_resuming = True
+
+        # Resume: last user message is the nudge (mentions "Forum", "YouTube" etc)
+        event2 = MagicMock()
+        event2.messages = list(event1.messages) + [
+            {"role": "user", "content": [{"text": "You have NOT used specialized tools like Forum search, YouTube..."}]},
+        ]
+        self.plugin.route_tools(event2)
+
+        # last_match should still be academic, NOT reclassified to forum
+        assert ACADEMIC in self.plugin.last_match.domains
+        # Flag consumed
+        assert self.plugin._is_resuming is False
+
     def test_route_tools_replaces_stale_guidance_on_resume(self) -> None:
         """On resume, old guidance is stripped and fresh guidance is injected."""
         from unittest.mock import MagicMock

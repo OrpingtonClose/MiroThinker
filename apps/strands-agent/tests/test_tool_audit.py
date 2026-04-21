@@ -93,8 +93,9 @@ class TestToolAuditPlugin:
         # Should set resume with nudge message
         assert event.resume is not None
         assert "specialized tools" in event.resume.lower() or "recommended" in event.resume.lower()
-        # _is_resuming flag should be set
+        # _is_resuming flags should be set on both audit and router
         assert self.audit._is_resuming is True
+        assert self.router._is_resuming is True
 
     def test_audit_respects_max_resumes(self) -> None:
         """No resume after max_resumes reached."""
