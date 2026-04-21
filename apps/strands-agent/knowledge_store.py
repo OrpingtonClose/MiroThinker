@@ -299,8 +299,8 @@ class KnowledgeStore:
     def get_stats(self) -> dict[str, Any]:
         """Return summary statistics about accumulated knowledge."""
         with self._lock:
-            insights = self._insights
-            entities = self._entities
+            insights = list(self._insights)
+            entities = list(self._entities)
 
             # Topic counts
             topic_counts: dict[str, int] = {}
