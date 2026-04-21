@@ -379,11 +379,11 @@ def main() -> None:
             json.dump(
                 [
                     {
-                        "id": row[0],
-                        "fact": row[1],
-                        "source_url": row[2] if len(row) > 2 else "",
-                        "angle": row[3] if len(row) > 3 else "",
-                        "confidence": row[4] if len(row) > 4 else 0.5,
+                        "id": row["id"],
+                        "fact": row["fact"],
+                        "source_url": row.get("source_url", ""),
+                        "angle": row.get("angle", ""),
+                        "confidence": row.get("confidence", 0.5),
                     }
                     for row in findings
                 ],

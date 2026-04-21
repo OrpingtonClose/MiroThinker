@@ -65,5 +65,4 @@ exec vllm serve "${MODEL}" \
     --trust-remote-code \
     --enable-chunked-prefill \
     --max-num-seqs 32 \
-    --api-key "local-test" \
     --served-model-name "${MODEL}"

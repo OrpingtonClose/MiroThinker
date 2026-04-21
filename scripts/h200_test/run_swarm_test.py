@@ -138,10 +138,9 @@ def load_corpus_from_store(store: ConditionStore) -> str:
 
     sections: dict[str, list[str]] = {}
     for row in findings:
-        # row format depends on store.get_findings return
-        if hasattr(row, "__getitem__"):
-            fact = row[1] if len(row) > 1 else str(row)
-            angle = row[3] if len(row) > 3 else "general"
+        if isinstance(row, dict):
+            fact = row.get("fact", str(row))
+            angle = row.get("angle", "general")
         else:
             fact = str(row)
             angle = "general"
