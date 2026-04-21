@@ -67,6 +67,7 @@ from dataclasses import dataclass, field
 
 from swarm.angles import (
     WorkerAssignment,
+    apply_misassignment,
     assign_workers,
     detect_angles_via_llm,
     detect_sections,
@@ -78,6 +79,7 @@ from swarm.convergence import check_convergence, information_gain, select_divers
 from swarm.lineage import LineageEntry
 from swarm.quality_manifest import SwarmQualityManifest
 from swarm.queen import build_knowledge_report, queen_merge
+from swarm.rag import extract_concepts, query_hive
 from swarm.serendipity import find_serendipitous_connections
 from swarm.worker import worker_gossip_refine, worker_synthesize
 
@@ -179,9 +181,16 @@ class GossipSwarm:
         self.queen_complete = queen_complete or complete
         self.serendipity_complete = serendipity_complete or complete
         self.config = config or SwarmConfig()
+        # Local lineage entry cache for swarm-internal RAG (hive memory).
+        # Reset at the start of each synthesize() call.
+        self._lineage_entries: list[LineageEntry] = []
 
     def _emit(self, entry: LineageEntry) -> None:
-        """Emit a lineage entry if a store is configured."""
+        """Emit a lineage entry if a store is configured.
+
+        Also tracks entries locally for swarm-internal RAG (hive memory).
+        """
+        self._lineage_entries.append(entry)
         store = self.config.lineage_store
         if store is not None:
             store.emit(entry)
@@ -216,6 +225,9 @@ class GossipSwarm:
         metrics = SwarmMetrics()
         metrics.gossip_rounds_configured = self.config.gossip_rounds
         config = self.config
+
+        # Reset local lineage cache for this run
+        self._lineage_entries = []
 
         async def _emit_event(event: dict) -> None:
             """Emit a progress event if a callback is configured."""
@@ -290,6 +302,25 @@ class GossipSwarm:
                 metrics=metrics,
             )
 
+        # ── Deliberate Misassignment ─────────────────────────────────
+        # Inject off-angle raw data into each bee's slice.  The off-angle
+        # portion (20-30%) is where thread discovery happens: the bee's
+        # worldview activates on foreign data that other specialists
+        # would have overlooked.
+        misassignment_applied = False
+        if config.enable_misassignment and len(assignments) >= 2:
+            apply_misassignment(
+                assignments,
+                score_matrix=score_matrix,
+                ratio=config.misassignment_ratio,
+            )
+            misassignment_applied = True
+            logger.info(
+                "misassignment_ratio=<%.2f>, workers=<%d> | "
+                "off-angle data injected for thread discovery",
+                config.misassignment_ratio, len(assignments),
+            )
+
         metrics.total_workers = len(assignments)
         metrics.worker_input_chars = [a.char_count for a in assignments]
         metrics.phase_times["corpus_analysis"] = time.monotonic() - phase_start
@@ -331,6 +362,8 @@ class GossipSwarm:
         sem = asyncio.Semaphore(config.max_concurrency)
         worker_entry_ids: dict[int, str] = {}
 
+        _has_off_angle = misassignment_applied
+
         async def _bounded_synthesize(assignment: WorkerAssignment) -> None:
             async with sem:
                 try:
@@ -340,6 +373,7 @@ class GossipSwarm:
                         query=query,
                         max_chars=config.max_summary_chars,
                         complete_fn=self.worker_complete,
+                        has_off_angle_data=_has_off_angle,
                     )
                 except Exception:
                     logger.warning(
@@ -412,10 +446,43 @@ class GossipSwarm:
             # Capture delta_text for this round (closure-safe)
             _round_delta = delta_text
 
+            # ── Hive Memory RAG ──────────────────────────────────────
+            # Starting from round 2, query accumulated lineage entries
+            # for findings relevant to each bee's current analysis.
+            # Round 1 has no prior output to query against.
+            hive_memory_map: dict[int, str] = {}
+            if (
+                config.enable_hive_memory
+                and gossip_round >= 2
+                and self._lineage_entries
+            ):
+                for a in assignments:
+                    if not a.summary:
+                        continue
+                    concepts = extract_concepts(a.summary, top_k=15)
+                    if not concepts:
+                        continue
+                    hive_results = query_hive(
+                        entries=self._lineage_entries,
+                        concepts=concepts,
+                        exclude_angle=a.angle,
+                        top_k=config.hive_memory_top_k,
+                    )
+                    if hive_results:
+                        hive_memory_map[a.worker_id] = "\n\n".join(hive_results)
+                if hive_memory_map:
+                    logger.info(
+                        "gossip_round=<%d>, hive_hits=<%d> | "
+                        "hive memory injected for %d workers",
+                        gossip_round, len(hive_memory_map),
+                        len(hive_memory_map),
+                    )
+
             async def _bounded_gossip(
                 assignment: WorkerAssignment,
                 _round_prompt: str = round_prompt,
                 _delta: str = _round_delta,
+                _hive_map: dict[int, str] = hive_memory_map,
             ) -> None:
                 nonlocal gossip_failures
                 async with sem:
@@ -435,6 +502,9 @@ class GossipSwarm:
                     # Full-corpus gossip: pass raw section content
                     raw = assignment.raw_content if config.enable_full_corpus_gossip else None
 
+                    # Hive memory for this worker (from RAG query above)
+                    hive_mem = _hive_map.get(assignment.worker_id, "")
+
                     try:
                         assignment.summary = await worker_gossip_refine(
                             angle=assignment.angle,
@@ -446,6 +516,7 @@ class GossipSwarm:
                             complete_fn=self.worker_complete,
                             round_prompt=_round_prompt,
                             delta_text=_delta,
+                            hive_memory=hive_mem,
                         )
                     except Exception:
                         gossip_failures += 1

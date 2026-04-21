@@ -55,6 +55,7 @@ class WorkerAssignment:
     char_count: int = 0
     summary: str = ""
     prev_summary: str = ""  # previous round's summary (for convergence detection)
+    angle_idx: int = -1  # index into the original angles list (-1 = unknown)
 
     def __post_init__(self) -> None:
         self.char_count = len(self.raw_content)
@@ -460,6 +461,109 @@ def assign_workers(
             worker_id=i,
             angle=unique_angle,
             raw_content=section.content,
+            angle_idx=angle_idx,
         ))
+
+    return assignments
+
+
+def apply_misassignment(
+    assignments: list[WorkerAssignment],
+    score_matrix: list[list[float]] | None = None,
+    ratio: float = 0.25,
+) -> list[WorkerAssignment]:
+    """Inject off-angle raw data into each worker's slice.
+
+    Each worker receives its full on-angle content PLUS a portion of the
+    most distant angle's raw content.  The off-angle data is where thread
+    discovery happens: the molecular bee reads practitioner data and its
+    worldview activates on details the practitioner overlooked.
+
+    Distance heuristic:
+    - If a score matrix is available, the most distant angle for worker i
+      is the one whose section scored LOWEST for worker i's assigned angle.
+    - Without a score matrix, use maximum positional distance (worker 0
+      pairs with worker N//2, etc.).
+
+    Args:
+        assignments: Worker assignments from ``assign_workers()``.
+        score_matrix: Optional NxM score matrix from
+            ``score_section_angle_pairs()``.  Used to determine angle distance.
+        ratio: Fraction of the distant worker's raw content to inject
+            as off-angle data.  Default 0.25 (25%).
+
+    Returns:
+        The same assignments list, mutated in-place with off-angle data
+        appended to ``raw_content``.
+    """
+    n = len(assignments)
+    if n < 2 or ratio <= 0:
+        return assignments
+
+    # Determine the most distant worker for each worker
+    distant_map: dict[int, int] = {}
+
+    if score_matrix is not None and len(score_matrix) >= n:
+        # Use score matrix: for worker i, find the worker whose assigned
+        # angle scored LOWEST for worker i's section (= most semantically
+        # distant).  score_matrix is sections x angles, so we must look up
+        # each worker's actual angle_idx, not assume worker j = angle j.
+        for i in range(n):
+            if i >= len(score_matrix):
+                distant_map[i] = (i + n // 2) % n
+                continue
+            row = score_matrix[i]
+            min_score = float("inf")
+            min_worker = (i + n // 2) % n  # default fallback
+            for j in range(n):
+                if j == i:
+                    continue
+                # Look up worker j's actual angle column in the score matrix
+                j_angle_idx = assignments[j].angle_idx
+                if j_angle_idx < 0 or j_angle_idx >= len(row):
+                    angle_score = 5.0  # neutral fallback
+                else:
+                    angle_score = row[j_angle_idx]
+                if angle_score < min_score:
+                    min_score = angle_score
+                    min_worker = j
+            distant_map[i] = min_worker
+    else:
+        # Positional distance: pair workers maximally apart
+        for i in range(n):
+            distant_map[i] = (i + n // 2) % n
+
+    # Snapshot original content before mutation to prevent cascading injection
+    original_contents: dict[int, str] = {
+        i: a.raw_content for i, a in enumerate(assignments)
+    }
+
+    # Inject off-angle content
+    for i, assignment in enumerate(assignments):
+        distant_idx = distant_map[i]
+        distant_worker = assignments[distant_idx]
+        distant_content = original_contents[distant_idx]
+
+        # Calculate how much off-angle content to inject
+        inject_chars = int(len(distant_content) * ratio)
+        if inject_chars < 100:
+            continue  # too little to be useful
+
+        off_angle_content = distant_content[:inject_chars]
+
+        assignment.raw_content = (
+            f"{assignment.raw_content}\n\n"
+            f"═══ OFF-ANGLE DATA (from {distant_worker.angle} specialist's "
+            f"raw findings — interpret through YOUR domain) ═══\n"
+            f"{off_angle_content}"
+        )
+        assignment.char_count = len(assignment.raw_content)
+
+    injected = sum(1 for i in range(n) if "OFF-ANGLE DATA" in assignments[i].raw_content)
+    logger.info(
+        "misassignment workers=<%d>, ratio=<%.2f> | "
+        "off-angle data injected into %d workers",
+        n, ratio, injected,
+    )
 
     return assignments
