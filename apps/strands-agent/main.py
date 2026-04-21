@@ -584,6 +584,17 @@ async def _run_job(job: "jobs.JobState") -> None:
                     "error": data.get("error", ""),
                 })
 
+        # ── Check if the loop exited due to cancellation ─────────
+        # The orchestrator thread may have observed ``cancel_threading``
+        # and sent ``_SENTINEL`` before the main loop could see a
+        # regular event and check ``job.cancel_event``.  Re-check here
+        # so we don't incorrectly mark a cancelled job as complete.
+        if job.cancel_event.is_set() or cancel_threading.is_set():
+            job.status = "cancelled"
+            job.finished_at = time.time()
+            job.emit({"type": "job_cancelled", "reason": "user_requested"})
+            return
+
         # ── Job complete ──────────────────────────────────────────
         report = store.build_report(user_query=job.query)
         if not report.strip() or "(No gossip synthesis" in report:
