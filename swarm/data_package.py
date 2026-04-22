@@ -591,7 +591,7 @@ def _get_fresh_evidence(
     try:
         with store._lock:
             rows = store.conn.execute(
-                """SELECT fact, confidence, user_query, source_ref
+                """SELECT fact, confidence, strategy, source_ref
                    FROM conditions
                    WHERE source_type = 'clone_research'
                      AND angle = ?
