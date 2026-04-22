@@ -30,6 +30,52 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Markers that indicate web scraping garbage, forum UI elements, or
+# non-informative content that should never be stored as findings.
+_GARBAGE_MARKERS = [
+    "Logged", "getbig.com", "Getbig", "star.gif", "star01.gif",
+    "blocked by an extension", "Competitors II", "ip.gif",
+    "post/xx.gif", "Themes/default", ".gif)", ".png)",
+    "shopify.com/s/files", "cdn.shopify.com",
+]
+
+
+def _is_garbage_finding(fact: str) -> bool:
+    """Check if a finding is web scraping garbage or too low quality.
+
+    Filters out HTML/markdown artifacts, forum UI elements, separators,
+    and overly short or non-alphabetic content.
+
+    Args:
+        fact: The finding text to evaluate.
+
+    Returns:
+        True if the finding should be rejected.
+    """
+    stripped = fact.strip()
+
+    if len(stripped) < 30:
+        return True
+
+    # Markdown image syntax (scraped web artifacts)
+    if "![" in stripped:
+        return True
+
+    lower = stripped.lower()
+    if any(marker.lower() in lower for marker in _GARBAGE_MARKERS):
+        return True
+
+    # Pure separators
+    if stripped in ("---", "* * *", "***", "===", "—", "–"):
+        return True
+
+    # Mostly non-alphabetic (raw URLs, markdown, encoded content)
+    alpha_chars = sum(1 for c in stripped if c.isalpha())
+    if len(stripped) > 0 and alpha_chars / len(stripped) < 0.3:
+        return True
+
+    return False
+
 
 @dataclass
 class ExtractedFinding:
@@ -231,8 +277,14 @@ def store_extracted_findings(
         Number of findings successfully stored.
     """
     stored = 0
+    skipped_garbage = 0
 
     for f in findings:
+        # Filter garbage at ingestion — HTML artifacts, forum UI, separators
+        if _is_garbage_finding(f.fact):
+            skipped_garbage += 1
+            continue
+
         try:
             store.admit(
                 fact=f.fact,
@@ -250,6 +302,12 @@ def store_extracted_findings(
                 "angle=<%s>, error=<%s> | failed to store finding",
                 f.angle, exc,
             )
+
+    if skipped_garbage:
+        logger.info(
+            "skipped_garbage=<%d> | filtered garbage findings at ingestion",
+            skipped_garbage,
+        )
 
     logger.info(
         "stored=<%d>, total=<%d>, source_run=<%s> | findings stored in ConditionStore",

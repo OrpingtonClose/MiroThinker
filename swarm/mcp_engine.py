@@ -883,6 +883,51 @@ class MCPSwarmEngine:
             len(assignments), run_number,
         )
 
+    @staticmethod
+    def _is_garbage_finding(fact: str) -> bool:
+        """Check if a finding is web scraping garbage or too low quality.
+
+        Filters out HTML/markdown artifacts, forum UI elements, separators,
+        and overly short or generic content that would degrade report quality.
+
+        Args:
+            fact: The finding text to evaluate.
+
+        Returns:
+            True if the finding should be excluded from reports.
+        """
+        stripped = fact.strip()
+
+        # Too short to be informative
+        if len(stripped) < 30:
+            return True
+
+        # Markdown image syntax (web scraping artifacts)
+        if "![" in stripped:
+            return True
+
+        # HTML/forum UI garbage
+        garbage_markers = [
+            "Logged", "getbig.com", "Getbig", "star.gif", "star01.gif",
+            "blocked by an extension", "Competitors II", "ip.gif",
+            "post/xx.gif", "Themes/default", ".gif)", ".png)",
+            "shopify.com/s/files", "cdn.shopify.com",
+        ]
+        lower = stripped.lower()
+        if any(marker.lower() in lower for marker in garbage_markers):
+            return True
+
+        # Pure separators or whitespace patterns
+        if stripped in ("---", "* * *", "***", "===", "—", "–"):
+            return True
+
+        # Mostly non-alphanumeric (URLs, markdown, etc.)
+        alpha_chars = sum(1 for c in stripped if c.isalpha())
+        if len(stripped) > 0 and alpha_chars / len(stripped) < 0.3:
+            return True
+
+        return False
+
     async def _generate_report(
         self,
         query: str,
@@ -890,11 +935,14 @@ class MCPSwarmEngine:
     ) -> str:
         """Generate a report from the store's accumulated findings.
 
-        Retrieves top findings per angle and asks the LLM to compose a
-        comprehensive practitioner-grade report.
+        Retrieves top findings per angle, filters garbage (HTML artifacts,
+        forum UI, separators), deduplicates across angles, and asks the LLM
+        to compose a comprehensive practitioner-grade report.
         """
-        # Gather top findings per angle, preferring worker analysis
-        sections = []
+        # Gather top findings per angle with quality filtering
+        sections: list[str] = []
+        all_seen_facts: set[str] = set()
+
         for a in assignments:
             with self.store._lock:
                 rows = self.store.conn.execute(
@@ -903,25 +951,40 @@ class MCPSwarmEngine:
                        WHERE consider_for_use = TRUE
                          AND angle = ?
                          AND row_type IN ('finding', 'thought', 'insight')
+                         AND length(fact) >= 30
                        ORDER BY
                          CASE WHEN source_type = 'worker_analysis' THEN 0 ELSE 1 END,
                          confidence DESC
-                       LIMIT 30""",
+                       LIMIT 60""",
                     [a.angle],
                 ).fetchall()
 
-            if rows:
-                findings = []
-                for fact, conf, src_url, src_type in rows:
-                    src = f" ({src_url})" if src_url else ""
-                    tag = " [worker]" if src_type == "worker_analysis" else ""
-                    line = f"  [conf={conf:.2f}]{tag} {fact}{src}"
-                    findings.append(line)
+            if not rows:
+                continue
 
-                if findings:
-                    header = f"=== {a.angle.upper()} ({len(findings)} findings) ===\n"
-                    section = header + "\n".join(findings)
-                    sections.append(section)
+            findings: list[str] = []
+            for fact, conf, src_url, src_type in rows:
+                # Skip garbage
+                if self._is_garbage_finding(fact):
+                    continue
+
+                # Cross-angle dedup: skip if we already have this exact fact
+                fact_key = fact.strip().lower()
+                if fact_key in all_seen_facts:
+                    continue
+                all_seen_facts.add(fact_key)
+
+                src = f" ({src_url})" if src_url else ""
+                line = f"- [{conf:.1f}] {fact}{src}"
+                findings.append(line)
+
+                if len(findings) >= 25:
+                    break
+
+            if findings:
+                header = f"### {a.angle} ({len(findings)} findings)\n"
+                section = header + "\n".join(findings)
+                sections.append(section)
 
         # Get cross-domain findings
         with self.store._lock:
@@ -931,44 +994,70 @@ class MCPSwarmEngine:
                    WHERE consider_for_use = TRUE
                      AND angle = 'cross-domain connections'
                      AND row_type IN ('finding', 'thought', 'insight')
+                     AND length(fact) >= 30
                    ORDER BY confidence DESC
                    LIMIT 20""",
             ).fetchall()
 
         if cross_rows:
-            cross_findings = []
+            cross_findings: list[str] = []
             for fact, conf, angle in cross_rows:
-                line = f"  [conf={conf:.2f}] {fact}"
-                cross_findings.append(line)
+                if self._is_garbage_finding(fact):
+                    continue
+                fact_key = fact.strip().lower()
+                if fact_key in all_seen_facts:
+                    continue
+                all_seen_facts.add(fact_key)
+                cross_findings.append(f"- [{conf:.1f}] {fact}")
 
             if cross_findings:
                 sections.append(
-                    f"=== CROSS-DOMAIN CONNECTIONS ({len(cross_findings)} findings) ===\n"
+                    f"### Cross-Domain Connections ({len(cross_findings)} findings)\n"
                     + "\n".join(cross_findings)
                 )
 
         if not sections:
             return "(no findings to report — store is empty)"
 
-        stats = self.store.get_store_stats()
         store_text = "\n\n".join(sections)
 
         prompt = (
-            f"You are writing a comprehensive research report.\n\n"
+            f"You are an expert practitioner writing an exhaustive research "
+            f"report. You write for an audience of advanced practitioners who "
+            f"want SPECIFIC protocols, dosages, timing, and mechanisms — not "
+            f"generic overviews.\n\n"
             f"RESEARCH QUERY: {query}\n\n"
-            f"Store contains {stats['total_rows']} total entries across "
-            f"{len(stats.get('by_angle', {}))} angles. "
-            f"Below are the highest-confidence findings from "
-            f"{len(assignments)} specialist researchers.\n\n"
+            f"Below are deduplicated, quality-filtered findings from "
+            f"{len(assignments)} specialist researchers. Each finding has a "
+            f"confidence score [0-1].\n\n"
             f"{store_text}\n\n"
-            f"Write a comprehensive, practitioner-grade report that:\n"
-            f"1. Synthesizes these findings into a coherent narrative\n"
-            f"2. Highlights cross-domain connections and compound interactions\n"
-            f"3. Preserves exact numbers, dosages, and citations\n"
-            f"4. Organizes by practical phases (conservative → radical)\n"
-            f"5. Explains mechanisms, not just protocols\n"
-            f"6. No disclaimers or safety warnings\n\n"
-            f"Write the full report:"
+            f"INSTRUCTIONS:\n"
+            f"Write an exhaustive practitioner-grade report. Requirements:\n\n"
+            f"1. SPECIFIC PROTOCOLS: Include exact dosages (IU, mg, g), exact "
+            f"timing (minutes pre/post workout), exact compounds (Humalog vs "
+            f"Lantus, not just 'insulin'). If the findings contain numbers, "
+            f"the report MUST contain those same numbers.\n\n"
+            f"2. MECHANISMS: For every protocol step, explain WHY it works at "
+            f"the molecular level (receptor binding, signaling cascades, "
+            f"nutrient partitioning pathways). Connect insulin → GLUT4, "
+            f"HGH → IGF-1 → mTOR, trenbolone → androgen receptor → nitrogen "
+            f"retention.\n\n"
+            f"3. COMPOUND INTERACTIONS: Explicitly map how insulin + HGH + "
+            f"trenbolone interact. Where do they synergize? Where do they "
+            f"conflict? What timing separates synergy from danger?\n\n"
+            f"4. NUTRITION MATRIX: For each meal window around injections, "
+            f"specify exact macros (protein g, carb g, fat g), specific food "
+            f"sources, and supplement stack with doses.\n\n"
+            f"5. PHASE PROGRESSION: Organize from beginner protocol (lowest "
+            f"effective dose) → intermediate → advanced (Milos-level). Each "
+            f"phase should have complete protocol tables.\n\n"
+            f"6. NO REPETITION: Each fact appears ONCE. Do not restate the "
+            f"same point in different sections. If insulin timing is covered "
+            f"in the protocol section, reference it — don't repeat it in "
+            f"mechanisms.\n\n"
+            f"7. NO DISCLAIMERS: No safety warnings, no 'consult your doctor', "
+            f"no moral commentary. Pure practitioner information.\n\n"
+            f"Write the full report now:"
         )
 
         return await self.complete(prompt)
