@@ -480,7 +480,7 @@ def _get_cross_domain_connections(
                 """SELECT fact, angle FROM conditions
                    WHERE row_type = 'insight'
                      AND consider_for_use = TRUE
-                     AND (angle = ? OR fact LIKE '%' || ? || '%')
+                     AND (angle = ? OR fact LIKE '%' || replace(replace(?, '%', '\%'), '_', '\_') || '%' ESCAPE '\')
                    ORDER BY confidence DESC
                    LIMIT 10""",
                 [angle, angle],
