@@ -309,6 +309,7 @@ def build_worker_tools(
             verification_status="speculative",
             source_model=source_model,
             source_run=source_run,
+            phase=phase,
         )
 
         if cid is None:

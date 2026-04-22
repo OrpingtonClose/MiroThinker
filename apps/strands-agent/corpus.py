@@ -229,6 +229,7 @@ class ConditionStore:
         consider_for_use: bool = True,
         source_model: str = "",
         source_run: str = "",
+        phase: str = "",
     ) -> int | None:
         """Insert a single condition row.
 
@@ -237,6 +238,7 @@ class ConditionStore:
         Args:
             source_model: Model that produced this finding (#192 provenance).
             source_run: Run identifier for cross-run comparison (#192).
+            phase: Swarm phase (e.g. 'wave_1', 'serendipity') for lineage.
         """
         fact = fact.strip()
         if not fact:
@@ -253,15 +255,15 @@ class ConditionStore:
                     confidence, verification_status, angle,
                     parent_id, strategy,
                     expansion_depth, created_at, iteration,
-                    source_model, source_run)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    source_model, source_run, phase)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     cid, fact, source_url, source_type, source_ref,
                     row_type, related_id, consider_for_use,
                     confidence, verification_status, angle,
                     parent_id, strategy,
                     expansion_depth, now, iteration,
-                    source_model, source_run,
+                    source_model, source_run, phase,
                 ],
             )
         logger.debug("admitted condition #%d: %.80s", cid, fact)
