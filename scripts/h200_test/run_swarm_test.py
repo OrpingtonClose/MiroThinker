@@ -105,14 +105,19 @@ async def _vllm_complete(
 
 
 def make_complete_fn(
-    model_env: str,
-    default_model: str,
+    model: str,
+    api_base: str,
     max_tokens: int = 16384,
     temperature: float = 0.3,
 ):
-    """Create a CompleteFn bound to a specific model and endpoint."""
-    api_base = _get_api_base()
-    model = _get_model(model_env, default_model)
+    """Create a CompleteFn bound to a specific model and endpoint.
+
+    Args:
+        model: Resolved model identifier.
+        api_base: Resolved API base URL.
+        max_tokens: Max tokens per response.
+        temperature: Sampling temperature.
+    """
 
     async def _complete(prompt: str) -> str:
         return await _vllm_complete(
@@ -170,18 +175,23 @@ async def run_swarm_test(
     # Default model name — user sets SWARM_WORKER_MODEL to match what vLLM serves
     default_model = "huihui-ai/Qwen3.5-32B-abliterated"
 
+    api_base = _get_api_base()
+    worker_model = _get_model("SWARM_WORKER_MODEL", default_model)
+    queen_model = _get_model("SWARM_QUEEN_MODEL", default_model)
+    serendipity_model = _get_model("SWARM_SERENDIPITY_MODEL", default_model)
+
     worker_fn = make_complete_fn(
-        "SWARM_WORKER_MODEL", default_model,
+        worker_model, api_base,
         max_tokens=config.worker_max_tokens,
         temperature=config.worker_temperature,
     )
     queen_fn = make_complete_fn(
-        "SWARM_QUEEN_MODEL", default_model,
+        queen_model, api_base,
         max_tokens=config.queen_max_tokens,
         temperature=config.queen_temperature,
     )
     serendipity_fn = make_complete_fn(
-        "SWARM_SERENDIPITY_MODEL", default_model,
+        serendipity_model, api_base,
         max_tokens=config.worker_max_tokens,
         temperature=0.5,  # Slightly higher for serendipity creativity
     )
@@ -447,7 +457,7 @@ def main() -> None:
         # The MCP engine needs a simple completion function for
         # angle detection and report generation (non-agent calls)
         complete_fn = make_complete_fn(
-            "SWARM_WORKER_MODEL", default_model,
+            default_model, api_base,
             max_tokens=args.max_tokens,
             temperature=args.temperature,
         )
