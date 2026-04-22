@@ -588,6 +588,7 @@ def build_worker_tools(
         chunk_chars = 0
         done = False
         total_chars_estimate = 0
+        scanned_rows = 0
 
         for page in range(0, row_count, page_size):
             if done:
@@ -602,6 +603,7 @@ def build_worker_tools(
                 ).fetchall()
 
             for (fact_text,) in rows:
+                scanned_rows += 1
                 fact_len = len(fact_text) + 2  # +2 for "\n\n" separator
                 total_chars_estimate += fact_len
 
@@ -622,9 +624,9 @@ def build_worker_tools(
                     chunk_parts.append(fact_text)
                     chunk_chars += fact_len
 
-        # If we didn't scan all rows, estimate remaining
-        if not done and page + page_size < row_count:
-            avg_row_chars = total_chars_estimate / max(1, (page + page_size))
+        # Extrapolate total size when only a subset of rows was scanned
+        if scanned_rows > 0 and scanned_rows < row_count:
+            avg_row_chars = total_chars_estimate / scanned_rows
             total_chars_estimate = int(avg_row_chars * row_count)
 
         chunk = "\n\n".join(chunk_parts)
