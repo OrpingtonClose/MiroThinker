@@ -174,11 +174,40 @@ class ConditionStore:
 
                 -- Swarm lineage (unified with LineageStore)
                 phase TEXT DEFAULT '',
-                parent_ids TEXT DEFAULT ''
+                parent_ids TEXT DEFAULT '',
+
+                -- Source provenance (24h continuous operation)
+                source_model TEXT DEFAULT '',
+                source_run TEXT DEFAULT ''
             )
         """)
+
+        # Corpus fingerprint tracking — prevents re-ingestion
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS corpus_fingerprints (
+                fingerprint TEXT PRIMARY KEY,
+                source TEXT DEFAULT '',
+                ingested_at TEXT DEFAULT '',
+                char_count INTEGER DEFAULT 0,
+                paragraph_count INTEGER DEFAULT 0
+            )
+        """)
+
+        # Store-level summaries for rolling knowledge briefings
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS knowledge_summaries (
+                id INTEGER PRIMARY KEY,
+                angle TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                finding_count INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT '',
+                run_number INTEGER DEFAULT 0
+            )
+        """)
+
         # Ensure lineage columns exist on older databases (idempotent).
         self._ensure_lineage_columns()
+        self._ensure_provenance_columns()
         # Seed next_id from existing rows
         result = self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM conditions").fetchone()
         if result:
@@ -203,6 +232,213 @@ class ConditionStore:
                 # Older DuckDB versions without IF NOT EXISTS support will
                 # error on a duplicate column; swallow and continue.
                 pass
+
+    def _ensure_provenance_columns(self) -> None:
+        """Backfill source_model/source_run columns on pre-existing databases."""
+        for col, typedef in (
+            ("source_model", "TEXT DEFAULT ''"),
+            ("source_run", "TEXT DEFAULT ''"),
+        ):
+            try:
+                self.conn.execute(
+                    f"ALTER TABLE conditions ADD COLUMN IF NOT EXISTS "
+                    f"{col} {typedef}"
+                )
+            except Exception:
+                pass
+
+        # Ensure metadata tables exist on older databases
+        try:
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS corpus_fingerprints (
+                    fingerprint TEXT PRIMARY KEY,
+                    source TEXT DEFAULT '',
+                    ingested_at TEXT DEFAULT '',
+                    char_count INTEGER DEFAULT 0,
+                    paragraph_count INTEGER DEFAULT 0
+                )
+            """)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS knowledge_summaries (
+                    id INTEGER PRIMARY KEY,
+                    angle TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    finding_count INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT '',
+                    run_number INTEGER DEFAULT 0
+                )
+            """)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Corpus fingerprinting — prevents re-ingestion across runs
+    # ------------------------------------------------------------------
+
+    def has_corpus_fingerprint(self, fingerprint: str) -> bool:
+        """Check if a corpus with this fingerprint has already been ingested."""
+        with self._lock:
+            result = self.conn.execute(
+                "SELECT COUNT(*) FROM corpus_fingerprints WHERE fingerprint = ?",
+                [fingerprint],
+            ).fetchone()
+        return bool(result and result[0] > 0)
+
+    def register_corpus_fingerprint(
+        self,
+        fingerprint: str,
+        source: str = "",
+        char_count: int = 0,
+        paragraph_count: int = 0,
+    ) -> None:
+        """Register that a corpus has been ingested."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self.conn.execute(
+                """INSERT OR REPLACE INTO corpus_fingerprints
+                   (fingerprint, source, ingested_at, char_count, paragraph_count)
+                   VALUES (?, ?, ?, ?, ?)""",
+                [fingerprint, source, now, char_count, paragraph_count],
+            )
+
+    # ------------------------------------------------------------------
+    # Store compaction — deduplicate and archive stale findings
+    # ------------------------------------------------------------------
+
+    def compact(self, similarity_threshold: int = 50) -> dict[str, int]:
+        """Deduplicate findings by marking near-identical entries as obsolete.
+
+        Uses a simple length + prefix check: if two findings share the
+        same first N characters and are within 20% length of each other,
+        the lower-confidence one is marked obsolete.
+
+        Args:
+            similarity_threshold: Minimum prefix length for dedup matching.
+
+        Returns:
+            Dict with compaction statistics.
+        """
+        with self._lock:
+            # Find duplicate groups by prefix
+            rows = self.conn.execute(
+                """SELECT id, fact, confidence, angle
+                   FROM conditions
+                   WHERE consider_for_use = TRUE
+                     AND row_type = 'finding'
+                   ORDER BY angle, confidence DESC""",
+            ).fetchall()
+
+        if not rows:
+            return {"duplicates_removed": 0, "total_checked": 0}
+
+        # Group by angle, then dedup within angle
+        by_angle: dict[str, list[tuple]] = {}
+        for row in rows:
+            angle = row[3] or "general"
+            by_angle.setdefault(angle, []).append(row)
+
+        obsolete_ids: list[int] = []
+        for angle, group in by_angle.items():
+            seen_prefixes: dict[str, int] = {}
+            for cid, fact, conf, _ in group:
+                prefix = fact[:similarity_threshold].lower().strip()
+                if prefix in seen_prefixes:
+                    # This is a duplicate — the first one we saw had higher
+                    # confidence (sorted DESC), so mark this one obsolete
+                    obsolete_ids.append(cid)
+                else:
+                    seen_prefixes[prefix] = cid
+
+        if obsolete_ids:
+            with self._lock:
+                # Batch update in chunks of 500
+                for i in range(0, len(obsolete_ids), 500):
+                    chunk = obsolete_ids[i:i + 500]
+                    placeholders = ",".join("?" for _ in chunk)
+                    self.conn.execute(
+                        f"UPDATE conditions SET consider_for_use = FALSE, "
+                        f"obsolete_reason = 'compacted_duplicate' "
+                        f"WHERE id IN ({placeholders})",
+                        chunk,
+                    )
+
+        logger.info(
+            "compaction complete: %d duplicates removed from %d findings",
+            len(obsolete_ids), len(rows),
+        )
+        return {
+            "duplicates_removed": len(obsolete_ids),
+            "total_checked": len(rows),
+        }
+
+    # ------------------------------------------------------------------
+    # Knowledge summaries — rolling briefings for workers
+    # ------------------------------------------------------------------
+
+    def get_latest_summary(self, angle: str) -> str:
+        """Get the most recent knowledge summary for an angle.
+
+        Returns empty string if no summary exists.
+        """
+        with self._lock:
+            result = self.conn.execute(
+                """SELECT summary FROM knowledge_summaries
+                   WHERE angle = ?
+                   ORDER BY id DESC LIMIT 1""",
+                [angle],
+            ).fetchone()
+        return result[0] if result else ""
+
+    def store_summary(
+        self,
+        angle: str,
+        summary: str,
+        finding_count: int = 0,
+        run_number: int = 0,
+    ) -> None:
+        """Store a knowledge summary for an angle."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            sid = self.conn.execute(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM knowledge_summaries"
+            ).fetchone()[0]
+            self.conn.execute(
+                """INSERT INTO knowledge_summaries
+                   (id, angle, summary, finding_count, created_at, run_number)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                [sid, angle, summary, finding_count, now, run_number],
+            )
+
+    def get_store_stats(self) -> dict[str, Any]:
+        """Get aggregate statistics about the store for diagnostics."""
+        with self._lock:
+            total = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions"
+            ).fetchone()[0]
+            active = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions WHERE consider_for_use = TRUE"
+            ).fetchone()[0]
+            by_type = self.conn.execute(
+                """SELECT row_type, COUNT(*) FROM conditions
+                   WHERE consider_for_use = TRUE
+                   GROUP BY row_type"""
+            ).fetchall()
+            by_angle = self.conn.execute(
+                """SELECT angle, COUNT(*) FROM conditions
+                   WHERE consider_for_use = TRUE AND row_type = 'finding'
+                   GROUP BY angle ORDER BY COUNT(*) DESC"""
+            ).fetchall()
+            models = self.conn.execute(
+                """SELECT DISTINCT source_model FROM conditions
+                   WHERE source_model != '' AND source_model IS NOT NULL"""
+            ).fetchall()
+        return {
+            "total_rows": total,
+            "active_rows": active,
+            "by_type": dict(by_type),
+            "by_angle": dict(by_angle),
+            "models_seen": [r[0] for r in models],
+        }
 
     # ------------------------------------------------------------------
     # Core write methods
