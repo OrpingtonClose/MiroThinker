@@ -1,44 +1,47 @@
 # Copyright (c) 2025 MiroMind
 # This source code is licensed under the Apache 2.0 License.
 
-"""MCP-driven swarm engine — workers are agents with ConditionStore tools.
+"""MCP swarm engine — tool-free workers with structured data packages.
 
-Replaces the single-shot prompt-stuffing architecture with agent-workers
-that explore the corpus via tool calls.  Each worker is a Strands Agent
-with tools to search, discover peer findings, and store its analysis.
+The orchestrator builds a 7-section data package per worker per wave,
+dispatches tool-free workers (simple LLM calls), extracts findings
+from their reasoning output, and stores everything in the ConditionStore.
+
+Workers never touch the store directly.  The orchestrator is the sole
+writer.  Workers are pure reasoning agents — they receive material and
+produce text.
 
 24-hour continuous operation:
     - Corpus fingerprinting: skip re-ingestion if corpus already in store
-    - Token budgets: every tool call return is capped to prevent overflow
     - Source provenance: every finding tagged with model + run number
     - Store compaction: periodic deduplication to prevent unbounded growth
     - Rolling summarization: knowledge briefings compress prior runs
-    - Report generation with token budget: prompt capped regardless of
-      store size
+    - Worker transcripts: full audit trail for clone reconstruction
+    - Per-worker model assignment: different models per angle
 
 Architecture:
 
     ┌─────────────────────────────────────────────────┐
-    │              MCPSwarmEngine                       │
+    │              MCPSwarmEngine                      │
     │  0. Check corpus fingerprint (skip if seen)     │
-    │  1. Ingest corpus into ConditionStore            │
-    │  2. Create N agent-workers (one per angle)       │
-    │  3. Run workers in parallel waves                │
-    │  4. Check convergence (store growth rate)        │
-    │  5. Compact store (periodic dedup)               │
-    │  6. Generate rolling summaries                   │
-    │  7. Generate report from store                   │
+    │  1. Ingest corpus into ConditionStore           │
+    │  2. Detect angles from query + corpus           │
+    │  3. Build data packages (§1-§7)                 │
+    │  4. Dispatch tool-free workers in parallel       │
+    │  5. Extract findings from worker output          │
+    │  6. Store transcripts + findings                 │
+    │  7. Check convergence                           │
+    │  8. Compact store (periodic dedup)              │
+    │  9. Generate rolling summaries                  │
+    │ 10. Generate report from store                  │
     └──────────────┬──────────────────────────────────┘
                    │
         ┌──────────┼──────────┐
         ▼          ▼          ▼
     Worker A    Worker B    Worker C   ...
-    (Agent)     (Agent)     (Agent)
-        │          │          │
-        └──────────┼──────────┘
-                   ▼
-           ConditionStore (DuckDB)
-           Shared research database
+    (tool-free) (tool-free) (tool-free)
+    No store    No store    No store
+    access      access      access
 """
 
 from __future__ import annotations
@@ -51,7 +54,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
-from swarm.agent_worker import create_worker_agent, run_worker_agent
+from swarm.agent_worker import run_tool_free_worker
 from swarm.angles import (
     WorkerAssignment,
     assign_workers,
@@ -59,6 +62,12 @@ from swarm.angles import (
     detect_sections,
     extract_required_angles,
     merge_angles,
+)
+from swarm.data_package import build_data_packages
+from swarm.finding_extractor import (
+    extract_findings_llm,
+    store_extracted_findings,
+    store_worker_transcript,
 )
 
 if TYPE_CHECKING:
@@ -100,7 +109,10 @@ class MCPSwarmConfig:
         max_waves: Maximum worker waves before stopping.
         convergence_threshold: Stop if new findings per wave drops below this.
         api_base: vLLM or OpenAI-compatible API endpoint.
-        model: Model identifier for the endpoint.
+        model: Default model identifier for the endpoint.
+        model_map: Per-angle model assignment. Maps angle name to model
+            identifier.  Workers whose angle is not in the map use the
+            default ``model``.
         api_key: API key (usually not needed for local vLLM).
         max_tokens: Max tokens per worker LLM response.
         temperature: Sampling temperature for workers.
@@ -109,10 +121,8 @@ class MCPSwarmConfig:
         enable_serendipity_wave: Run a final cross-domain discovery wave.
         source_model: Model name for provenance tracking.
         source_run: Run identifier (e.g. "run_042") for provenance.
-        max_return_chars: Hard ceiling on characters any tool call returns.
         compact_every_n_waves: Run store compaction after this many waves.
         enable_rolling_summaries: Generate knowledge briefings after waves.
-        report_max_chars: Max prompt chars for report generation.
         worker_timeout_s: Per-worker timeout in seconds (default 600).
             Workers that exceed this are cancelled so the wave can proceed.
     """
@@ -122,29 +132,38 @@ class MCPSwarmConfig:
     convergence_threshold: int = 5
     api_base: str = "http://localhost:8000/v1"
     model: str = "default"
+    model_map: dict[str, str] = field(default_factory=dict)
     api_key: str = "not-needed"
-    max_tokens: int = 4096
+    max_tokens: int = 8192
     temperature: float = 0.3
     required_angles: list[str] = field(default_factory=list)
     report_max_tokens: int = 8192
     enable_serendipity_wave: bool = True
     source_model: str = ""
     source_run: str = ""
-    max_return_chars: int = 6000
     compact_every_n_waves: int = 3
     enable_rolling_summaries: bool = True
-    report_max_chars: int = 24000
     worker_timeout_s: float = 600.0
 
 
 class MCPSwarmEngine:
-    """Swarm engine where workers are Strands Agents with ConditionStore tools.
+    """Swarm engine with tool-free workers and structured data packages.
+
+    Workers receive curated data packages and produce reasoning text.
+    The orchestrator extracts findings from the text and stores them.
+    No tools, no store access for workers.
 
     Usage:
         engine = MCPSwarmEngine(
             store=my_condition_store,
             complete=my_llm_fn,
-            config=MCPSwarmConfig(max_workers=7),
+            config=MCPSwarmConfig(
+                max_workers=7,
+                model_map={
+                    "insulin_timing": "kimi-linear-48b",
+                    "hematology": "glm-5.1",
+                },
+            ),
         )
         result = await engine.synthesize(corpus="...", query="...")
         print(result.report)
@@ -166,15 +185,20 @@ class MCPSwarmEngine:
         query: str,
         on_event: Callable[[dict], Awaitable[None]] | None = None,
     ) -> MCPSwarmResult:
-        """Run the MCP swarm pipeline.
+        """Run the MCP swarm pipeline with tool-free workers.
 
         0. Check corpus fingerprint (skip re-ingestion if already seen)
         1. Ingest corpus into ConditionStore (only if new)
         2. Detect angles and assign sections
-        3. Run agent-workers in parallel waves
-        4. Check convergence between waves
-        5. Compact store periodically
-        6. Generate rolling summaries
+        3. For each wave:
+           a. Build data packages (§1-§7) per worker
+           b. Dispatch tool-free workers in parallel
+           c. Extract findings from worker output
+           d. Store transcripts + findings
+           e. Check convergence
+        4. Compact store periodically
+        5. Generate rolling summaries
+        6. Run serendipity wave (tool-free)
         7. Generate report from store
 
         Args:
@@ -200,7 +224,6 @@ class MCPSwarmEngine:
         # ── Phase 0: Corpus ingestion (with fingerprint check) ───────
         phase_start = time.monotonic()
 
-        # Compute corpus fingerprint to prevent re-ingestion
         corpus_hash = hashlib.sha256(corpus.encode()).hexdigest()[:16]
         corpus_already_ingested = self.store.has_corpus_hash(corpus_hash)
 
@@ -211,8 +234,6 @@ class MCPSwarmEngine:
         )
 
         # Detect angles (always needed for worker assignment)
-        # Wrapped defensively — if LLM-based angle detection fails,
-        # fall back to section titles so the run continues.
         required_angles = list(config.required_angles)
         try:
             if not required_angles:
@@ -257,7 +278,6 @@ class MCPSwarmEngine:
                     iteration=0,
                     user_query=query,
                 )
-            # Register fingerprint so future runs skip ingestion
             paragraph_count = sum(
                 len(a.raw_content.split("\n\n")) for a in assignments
             )
@@ -289,19 +309,18 @@ class MCPSwarmEngine:
         })
 
         logger.info(
-            "workers=<%d>, angles=<%s> | starting agent waves",
+            "workers=<%d>, angles=<%s> | starting tool-free worker waves",
             len(assignments), [a.angle for a in assignments],
         )
 
-        # ── Phase 1-N: Worker waves ──────────────────────────────────
+        # ── Phase 1-N: Worker waves (tool-free) ─────────────────────
         wave = 0
+        prior_outputs: dict[str, str] = {}
+
         for wave in range(1, config.max_waves + 1):
             phase_start = time.monotonic()
-            phase = f"wave_{wave}"
 
-            # Count worker-generated findings before this wave (#191)
-            # Excludes raw ingestion rows — only counts findings/thoughts/insights
-            # produced by worker agents, not corpus ingestion.
+            # Count findings before this wave
             with self.store._lock:
                 findings_before = self.store.conn.execute(
                     "SELECT COUNT(*) FROM conditions "
@@ -316,48 +335,39 @@ class MCPSwarmEngine:
                 "wave": wave,
             })
 
-            # Create and run agent-workers in parallel
-            agents = []
-            for a in assignments:
-                agent = create_worker_agent(
-                    store=self.store,
-                    angle=a.angle,
-                    worker_id=f"worker_{a.worker_id}_wave_{wave}",
-                    query=query,
-                    api_base=config.api_base,
-                    model=config.model,
-                    api_key=config.api_key,
-                    max_tokens=config.max_tokens,
-                    temperature=config.temperature,
-                    phase=phase,
-                    max_return_chars=config.max_return_chars,
-                    source_model=config.source_model or config.model,
-                    source_run=config.source_run or run_id,
-                )
-                agents.append((agent, a))
+            # ── Phase A: Build data packages ─────────────────────
+            pkg_start = time.monotonic()
+            packages = build_data_packages(
+                store=self.store,
+                assignments=assignments,
+                wave=wave,
+                query=query,
+                prior_outputs=prior_outputs,
+                model_map=config.model_map,
+            )
+            metrics.phase_times[f"wave_{wave}_pkg"] = time.monotonic() - pkg_start
 
-            # Run all workers in parallel with timeout protection.
-            # A hung worker (e.g. dead LLM connection) must not block the
-            # entire wave.  asyncio.wait_for raises TimeoutError which
-            # asyncio.gather captures via return_exceptions=True.
+            # ── Phase B: Dispatch tool-free workers in parallel ──
             timeout = config.worker_timeout_s
             tasks = [
                 asyncio.wait_for(
-                    run_worker_agent(
-                        agent=agent,
-                        angle=a.angle,
-                        worker_id=f"worker_{a.worker_id}_wave_{wave}",
+                    run_tool_free_worker(
+                        package=pkg,
                         query=query,
+                        api_base=config.api_base,
+                        model=config.model_map.get(pkg.angle, config.model),
+                        api_key=config.api_key,
+                        max_tokens=config.max_tokens,
+                        temperature=config.temperature,
                     ),
                     timeout=timeout,
                 )
-                for agent, a in agents
+                for pkg in packages
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Collect results — exceptions (including TimeoutError) are
-            # logged and skipped so the wave continues with partial data.
-            wave_tool_calls = 0
+            # ── Phase C: Process results ─────────────────────────
+            wave_findings_count = 0
             for idx, r in enumerate(results):
                 if isinstance(r, asyncio.TimeoutError):
                     worker_angle = assignments[idx].angle if idx < len(assignments) else "unknown"
@@ -369,25 +379,63 @@ class MCPSwarmEngine:
                 if isinstance(r, Exception):
                     logger.warning("wave=<%d> | worker failed: %s", wave, r)
                     continue
-                if isinstance(r, dict):
-                    metrics.worker_results.append(r)
-                    wave_tool_calls += r.get("tool_calls", 0)
+                if not isinstance(r, dict):
+                    continue
 
-            metrics.total_tool_calls += wave_tool_calls
+                metrics.worker_results.append(r)
+                angle = r.get("angle", "")
+                worker_id = r.get("worker_id", "")
+                response = r.get("response", "")
+                model_used = r.get("model", config.model)
 
-            # Count worker-generated findings after this wave (#191)
-            with self.store._lock:
-                findings_after = self.store.conn.execute(
-                    "SELECT COUNT(*) FROM conditions "
-                    "WHERE consider_for_use = TRUE "
-                    "AND row_type IN ('finding', 'thought', 'insight', 'synthesis') "
-                    "AND source_type != 'corpus_section'"
-                ).fetchone()[0]
+                if not response or r.get("status") != "success":
+                    continue
 
-            new_findings = findings_after - findings_before
-            metrics.findings_per_wave.append(new_findings)
+                # Save worker output for next wave's §7
+                prior_outputs[angle] = response
 
-            # Track total active findings (all types)
+                # ── Phase D: Store transcript ────────────────────
+                try:
+                    store_worker_transcript(
+                        store=self.store,
+                        worker_id=worker_id,
+                        angle=angle,
+                        transcript=response,
+                        source_model=model_used,
+                        source_run=config.source_run or run_id,
+                        iteration=wave,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "worker_id=<%s>, error=<%s> | transcript storage failed",
+                        worker_id, exc,
+                    )
+
+                # ── Phase E: Extract findings from reasoning ─────
+                try:
+                    findings = await extract_findings_llm(
+                        worker_output=response,
+                        angle=angle,
+                        query=query,
+                        complete=self.complete,
+                    )
+                    stored = store_extracted_findings(
+                        store=self.store,
+                        findings=findings,
+                        source_model=model_used,
+                        source_run=config.source_run or run_id,
+                        iteration=wave,
+                    )
+                    wave_findings_count += stored
+                except Exception as exc:
+                    logger.warning(
+                        "worker_id=<%s>, error=<%s> | finding extraction failed",
+                        worker_id, exc,
+                    )
+
+            metrics.findings_per_wave.append(wave_findings_count)
+
+            # Track total active findings
             with self.store._lock:
                 total_active = self.store.conn.execute(
                     "SELECT COUNT(*) FROM conditions WHERE consider_for_use = TRUE"
@@ -401,17 +449,17 @@ class MCPSwarmEngine:
                 "type": "swarm_phase",
                 "phase": f"wave_{wave}_complete",
                 "wave": wave,
-                "new_findings": new_findings,
+                "new_findings": wave_findings_count,
                 "total_findings": total_active,
                 "elapsed_s": round(wave_time, 1),
             })
 
             logger.info(
                 "wave=<%d>, new_findings=<%d>, total=<%d>, elapsed_s=<%.1f> | wave complete",
-                wave, new_findings, total_active, wave_time,
+                wave, wave_findings_count, total_active, wave_time,
             )
 
-            # Periodic compaction to prevent unbounded store growth
+            # Periodic compaction
             if (config.compact_every_n_waves > 0
                     and wave % config.compact_every_n_waves == 0):
                 compact_start = time.monotonic()
@@ -424,10 +472,6 @@ class MCPSwarmEngine:
                     )
                     stats = {"exact_duplicates_removed": 0, "semantic_duplicates_removed": 0}
                 compact_time = time.monotonic() - compact_start
-                total_removed = (
-                    stats.get("exact_duplicates_removed", 0)
-                    + stats.get("semantic_duplicates_removed", 0)
-                )
                 logger.info(
                     "wave=<%d>, exact_dupes=<%d>, semantic_dupes=<%d>, compact_time=<%.1f>s | compaction complete",
                     wave,
@@ -438,53 +482,67 @@ class MCPSwarmEngine:
                 metrics.phase_times[f"compact_wave_{wave}"] = compact_time
 
             # ── Emit wave metric ─────────────────────────────────
-            self.store.emit_metric(
-                "wave_metric",
-                {
-                    "findings_new": new_findings,
-                    "findings_total": total_active,
-                    "tool_calls": wave_tool_calls,
-                    "elapsed_s": round(wave_time, 1),
-                    "workers": len(assignments),
-                    "worker_results": [
-                        r for r in results
-                        if isinstance(r, dict)
-                    ],
-                },
-                source_model=config.model,
-                source_run=run_id,
-                iteration=wave,
-            )
+            try:
+                self.store.emit_metric(
+                    "wave_metric",
+                    {
+                        "findings_new": wave_findings_count,
+                        "findings_total": total_active,
+                        "tool_calls": 0,
+                        "elapsed_s": round(wave_time, 1),
+                        "workers": len(assignments),
+                        "worker_results": [
+                            r for r in results
+                            if isinstance(r, dict)
+                        ],
+                    },
+                    source_model=config.model,
+                    source_run=run_id,
+                    iteration=wave,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "wave=<%d>, error=<%s> | wave metric emission failed",
+                    wave, exc,
+                )
 
             # ── Emit per-worker metrics ──────────────────────────
             for r in results:
                 if not isinstance(r, dict):
                     continue
-                self.store.emit_metric(
-                    "worker_metric",
-                    {
-                        "worker_id": r.get("worker_id", ""),
-                        "angle": r.get("angle", ""),
-                        "tool_calls": r.get("tool_calls", 0),
-                        "findings_stored": r.get("findings_stored", 0),
-                        "output_chars": r.get("output_chars", 0),
-                        "error": str(r.get("error", "")),
-                    },
-                    angle=r.get("angle", "unknown"),
-                    source_model=config.model,
-                    source_run=run_id,
-                    iteration=wave,
-                )
+                try:
+                    self.store.emit_metric(
+                        "worker_metric",
+                        {
+                            "worker_id": r.get("worker_id", ""),
+                            "angle": r.get("angle", ""),
+                            "tool_calls": 0,
+                            "input_chars": r.get("input_chars", 0),
+                            "output_chars": r.get("output_chars", 0),
+                            "model": r.get("model", ""),
+                            "elapsed_s": r.get("elapsed_s", 0),
+                            "error": str(r.get("error", "")),
+                        },
+                        angle=r.get("angle", "unknown"),
+                        source_model=r.get("model", config.model),
+                        source_run=run_id,
+                        iteration=wave,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "wave=<%d>, error=<%s> | worker metric emission failed",
+                        wave, exc,
+                    )
 
-            # Convergence check: stop if too few new findings
-            if new_findings < config.convergence_threshold:
+            # Convergence check
+            if wave_findings_count < config.convergence_threshold:
                 metrics.convergence_reason = (
-                    f"converged at wave {wave}: {new_findings} new findings "
+                    f"converged at wave {wave}: {wave_findings_count} new findings "
                     f"< threshold {config.convergence_threshold}"
                 )
                 logger.info(
                     "wave=<%d>, new_findings=<%d>, threshold=<%d> | convergence detected",
-                    wave, new_findings, config.convergence_threshold,
+                    wave, wave_findings_count, config.convergence_threshold,
                 )
                 break
         else:
@@ -492,52 +550,17 @@ class MCPSwarmEngine:
 
         metrics.total_waves = wave if config.max_waves > 0 else 0
 
-        # ── Serendipity wave (optional) ──────────────────────────────
-        # Wrapped defensively — serendipity is a bonus phase.  A crash
-        # here must not abort the run or prevent report generation.
+        # ── Serendipity wave (tool-free) ─────────────────────────────
         if config.enable_serendipity_wave and len(assignments) >= 2:
             phase_start = time.monotonic()
             try:
-                # Build angle list for targeted cross-domain search
-                angle_list = ", ".join(a.angle for a in assignments)
-
-                serendipity_agent = create_worker_agent(
-                    store=self.store,
-                    angle="cross-domain connections",
-                    worker_id="serendipity",
+                await self._run_serendipity_wave(
+                    assignments=assignments,
                     query=query,
-                    api_base=config.api_base,
-                    model=config.model,
-                    api_key=config.api_key,
-                    max_tokens=config.max_tokens,
-                    temperature=0.5,  # slightly higher for creativity
-                    phase="serendipity",
-                    max_return_chars=config.max_return_chars,
-                    source_model=config.source_model or config.model,
-                    source_run=config.source_run or run_id,
+                    run_id=run_id,
+                    metrics=metrics,
+                    prior_outputs=prior_outputs,
                 )
-
-                serendipity_result = await asyncio.wait_for(
-                    run_worker_agent(
-                        agent=serendipity_agent,
-                        angle="cross-domain connections",
-                        worker_id="serendipity",
-                        query=(
-                            f"Your job is to find CROSS-DOMAIN CONNECTIONS that no single "
-                            f"specialist would see. The research angles are: {angle_list}. "
-                            f"Use find_connections to discover interactions between angle pairs. "
-                            f"Use get_peer_insights and search_corpus to find where different "
-                            f"specialists' findings interact, compound, or contradict in "
-                            f"unexpected ways. Look for: compound interactions (e.g. iron + "
-                            f"trenbolone hematocrit), nutrient-drug interactions, timing "
-                            f"dependencies, dose-response relationships that span multiple "
-                            f"domains. Store every cross-domain connection as a finding with "
-                            f"store_finding. Research query: {query}"
-                        ),
-                    ),
-                    timeout=config.worker_timeout_s,
-                )
-                metrics.worker_results.append(serendipity_result)
             except Exception as exc:
                 logger.warning(
                     "error=<%s> | serendipity wave failed, continuing to report",
@@ -551,8 +574,7 @@ class MCPSwarmEngine:
                 "elapsed_s": round(metrics.phase_times["serendipity"], 1),
             })
 
-        # ── Rolling summaries (optional) ─────────────────────────────
-        # Summaries are nice-to-have.  A failure must not block report.
+        # ── Rolling summaries ────────────────────────────────────────
         if config.enable_rolling_summaries:
             phase_start = time.monotonic()
             try:
@@ -565,9 +587,6 @@ class MCPSwarmEngine:
             metrics.phase_times["summaries"] = time.monotonic() - phase_start
 
         # ── Report generation ────────────────────────────────────────
-        # Report generation is critical but should not crash the entire
-        # run — return a partial report on failure so metrics and store
-        # data are still available.
         phase_start = time.monotonic()
         try:
             report = await self._generate_report(query, assignments)
@@ -592,7 +611,6 @@ class MCPSwarmEngine:
         })
 
         # ── Run-level observability ──────────────────────────────────
-        # Observability is best-effort — never let it crash the return.
         try:
             self.store.store_health_snapshot(
                 source_run=run_id,
@@ -605,13 +623,14 @@ class MCPSwarmEngine:
                     "total_workers": metrics.total_workers,
                     "total_waves": metrics.total_waves,
                     "total_findings_stored": metrics.total_findings_stored,
-                    "total_tool_calls": metrics.total_tool_calls,
+                    "total_tool_calls": 0,
                     "findings_per_wave": metrics.findings_per_wave,
                     "phase_times": metrics.phase_times,
                     "total_elapsed_s": round(metrics.total_elapsed_s, 1),
                     "convergence_reason": metrics.convergence_reason,
                     "angles": [a.angle for a in assignments],
                     "corpus_chars": len(corpus),
+                    "model_map": config.model_map,
                 },
                 source_model=config.model,
                 source_run=run_id,
@@ -633,6 +652,103 @@ class MCPSwarmEngine:
             angles_detected=[a.angle for a in assignments],
         )
 
+    async def _run_serendipity_wave(
+        self,
+        assignments: list[WorkerAssignment],
+        query: str,
+        run_id: str,
+        metrics: MCPSwarmMetrics,
+        prior_outputs: dict[str, str],
+    ) -> None:
+        """Run a tool-free serendipity wave for cross-domain discovery.
+
+        Gathers top findings from all angles and asks a cross-domain
+        specialist to find connections that no single specialist would see.
+
+        Args:
+            assignments: Worker assignments (for angle list).
+            query: The user's research query.
+            run_id: Current run identifier.
+            metrics: Metrics object to update.
+            prior_outputs: Map of angle → latest worker output.
+        """
+        config = self.config
+        angle_list = ", ".join(a.angle for a in assignments)
+
+        # Build a cross-domain data package from all angle summaries
+        from swarm.data_package import DataPackage
+
+        summaries: list[str] = []
+        for a in assignments:
+            output = prior_outputs.get(a.angle, "")
+            if output:
+                # Take first ~2000 chars of each angle's latest output
+                summaries.append(
+                    f"=== {a.angle.upper()} ===\n{output[:2000]}"
+                )
+
+        if not summaries:
+            logger.info("no worker outputs available for serendipity wave")
+            return
+
+        serendipity_pkg = DataPackage(
+            angle="cross-domain connections",
+            wave=0,
+            worker_id="serendipity",
+            model=config.model_map.get("cross-domain connections", config.model),
+            corpus_material="\n\n".join(summaries),
+        )
+
+        serendipity_result = await asyncio.wait_for(
+            run_tool_free_worker(
+                package=serendipity_pkg,
+                query=(
+                    f"Find CROSS-DOMAIN CONNECTIONS that no single specialist "
+                    f"would see. The research angles are: {angle_list}. "
+                    f"Look for: compound interactions, nutrient-drug interactions, "
+                    f"timing dependencies, dose-response relationships that span "
+                    f"multiple domains, mechanistic convergences, framework "
+                    f"transfers. Research query: {query}"
+                ),
+                api_base=config.api_base,
+                model=config.model_map.get("cross-domain connections", config.model),
+                api_key=config.api_key,
+                max_tokens=config.max_tokens,
+                temperature=0.5,
+            ),
+            timeout=config.worker_timeout_s,
+        )
+
+        metrics.worker_results.append(serendipity_result)
+
+        if serendipity_result.get("status") == "success":
+            response = serendipity_result.get("response", "")
+            if response:
+                # Store transcript
+                store_worker_transcript(
+                    store=self.store,
+                    worker_id="serendipity",
+                    angle="cross-domain connections",
+                    transcript=response,
+                    source_model=serendipity_result.get("model", config.model),
+                    source_run=config.source_run or run_id,
+                    iteration=0,
+                )
+
+                # Extract findings
+                findings = await extract_findings_llm(
+                    worker_output=response,
+                    angle="cross-domain connections",
+                    query=query,
+                    complete=self.complete,
+                )
+                store_extracted_findings(
+                    store=self.store,
+                    findings=findings,
+                    source_model=serendipity_result.get("model", config.model),
+                    source_run=config.source_run or run_id,
+                )
+
     async def _generate_rolling_summaries(
         self,
         assignments: list[WorkerAssignment],
@@ -641,11 +757,9 @@ class MCPSwarmEngine:
 
         Compresses the current angle-level findings into a short summary
         and stores it in the knowledge_summaries table.  Workers in
-        subsequent runs can call get_knowledge_briefing() to see a
-        condensed view of all accumulated knowledge without reading
-        every individual finding.
+        subsequent waves can see this via §1 (KNOWLEDGE STATE) in their
+        data package.
         """
-        # Get current run number from store stats
         stats = self.store.get_store_stats()
         run_number = len(stats.get("models_seen", [])) or 1
 
@@ -662,7 +776,6 @@ class MCPSwarmEngine:
             if count == 0:
                 continue
 
-            # Get top findings for this angle (highest confidence)
             with self.store._lock:
                 rows = self.store.conn.execute(
                     """SELECT fact, confidence
@@ -678,7 +791,6 @@ class MCPSwarmEngine:
             if not rows:
                 continue
 
-            # Build a condensed summary from top findings
             summary_parts = [f"[{a.angle}] {count} total findings. Top claims:"]
             for fact, conf in rows:
                 summary_parts.append(f"- (conf={conf:.2f}) {fact[:200]}")
@@ -702,27 +814,14 @@ class MCPSwarmEngine:
         query: str,
         assignments: list[WorkerAssignment],
     ) -> str:
-        """Generate a report by querying the store, not by queen merge.
+        """Generate a report from the store's accumulated findings.
 
-        Retrieves top findings per angle from the store and asks the LLM
-        to compose a narrative from structured data.  The prompt is capped
-        at report_max_chars to prevent context overflow even with 600K+
-        findings in the store.
-
-        Prioritizes worker-generated insights over raw corpus paragraphs.
+        Retrieves top findings per angle and asks the LLM to compose a
+        comprehensive practitioner-grade report.
         """
-        max_chars = self.config.report_max_chars
-        # Reserve space for the prompt framing
-        framing_budget = 800
-        findings_budget = max_chars - framing_budget
-
         # Gather top findings per angle, preferring worker analysis
         sections = []
-        chars_used = 0
         for a in assignments:
-            if chars_used >= findings_budget:
-                break
-
             with self.store._lock:
                 rows = self.store.conn.execute(
                     """SELECT fact, confidence, source_url, source_type
@@ -739,56 +838,45 @@ class MCPSwarmEngine:
 
             if rows:
                 findings = []
-                section_chars = 0
                 for fact, conf, src_url, src_type in rows:
                     src = f" ({src_url})" if src_url else ""
                     tag = " [worker]" if src_type == "worker_analysis" else ""
                     line = f"  [conf={conf:.2f}]{tag} {fact}{src}"
-                    if chars_used + section_chars + len(line) > findings_budget:
-                        break
                     findings.append(line)
-                    section_chars += len(line) + 1
 
                 if findings:
                     header = f"=== {a.angle.upper()} ({len(findings)} findings) ===\n"
                     section = header + "\n".join(findings)
                     sections.append(section)
-                    chars_used += len(section) + 2
 
         # Get cross-domain findings
-        if chars_used < findings_budget:
-            with self.store._lock:
-                cross_rows = self.store.conn.execute(
-                    """SELECT fact, confidence, angle
-                       FROM conditions
-                       WHERE consider_for_use = TRUE
-                         AND angle = 'cross-domain connections'
-                         AND row_type IN ('finding', 'thought', 'insight')
-                       ORDER BY confidence DESC
-                       LIMIT 20""",
-                ).fetchall()
+        with self.store._lock:
+            cross_rows = self.store.conn.execute(
+                """SELECT fact, confidence, angle
+                   FROM conditions
+                   WHERE consider_for_use = TRUE
+                     AND angle = 'cross-domain connections'
+                     AND row_type IN ('finding', 'thought', 'insight')
+                   ORDER BY confidence DESC
+                   LIMIT 20""",
+            ).fetchall()
 
-            if cross_rows:
-                cross_findings = []
-                for fact, conf, angle in cross_rows:
-                    line = f"  [conf={conf:.2f}] {fact}"
-                    if chars_used + len(line) > findings_budget:
-                        break
-                    cross_findings.append(line)
-                    chars_used += len(line) + 1
+        if cross_rows:
+            cross_findings = []
+            for fact, conf, angle in cross_rows:
+                line = f"  [conf={conf:.2f}] {fact}"
+                cross_findings.append(line)
 
-                if cross_findings:
-                    sections.append(
-                        f"=== CROSS-DOMAIN CONNECTIONS ({len(cross_findings)} findings) ===\n"
-                        + "\n".join(cross_findings)
-                    )
+            if cross_findings:
+                sections.append(
+                    f"=== CROSS-DOMAIN CONNECTIONS ({len(cross_findings)} findings) ===\n"
+                    + "\n".join(cross_findings)
+                )
 
         if not sections:
             return "(no findings to report — store is empty)"
 
-        # Get store stats for context
         stats = self.store.get_store_stats()
-
         store_text = "\n\n".join(sections)
 
         prompt = (
