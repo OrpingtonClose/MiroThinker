@@ -278,8 +278,8 @@ class ConditionStore:
     # Corpus fingerprinting — prevents re-ingestion across runs
     # ------------------------------------------------------------------
 
-    def has_corpus_fingerprint(self, fingerprint: str) -> bool:
-        """Check if a corpus with this fingerprint has already been ingested."""
+    def has_corpus_hash(self, fingerprint: str) -> bool:
+        """Check if a corpus with this hash has already been ingested."""
         with self._lock:
             result = self.conn.execute(
                 "SELECT COUNT(*) FROM corpus_fingerprints WHERE fingerprint = ?",
@@ -287,7 +287,7 @@ class ConditionStore:
             ).fetchone()
         return bool(result and result[0] > 0)
 
-    def register_corpus_fingerprint(
+    def register_corpus_hash(
         self,
         fingerprint: str,
         source: str = "",

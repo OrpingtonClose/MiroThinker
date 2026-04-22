@@ -199,7 +199,7 @@ class MCPSwarmEngine:
 
         # Compute corpus fingerprint to prevent re-ingestion
         corpus_hash = hashlib.sha256(corpus.encode()).hexdigest()[:16]
-        corpus_already_ingested = self.store.has_corpus_fingerprint(corpus_hash)
+        corpus_already_ingested = self.store.has_corpus_hash(corpus_hash)
 
         sections = detect_sections(corpus)
         logger.info(
@@ -249,7 +249,7 @@ class MCPSwarmEngine:
             paragraph_count = sum(
                 len(a.raw_content.split("\n\n")) for a in assignments
             )
-            self.store.register_corpus_fingerprint(
+            self.store.register_corpus_hash(
                 fingerprint=corpus_hash,
                 source=f"corpus_{len(corpus)}_chars",
                 char_count=len(corpus),
