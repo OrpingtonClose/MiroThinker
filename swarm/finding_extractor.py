@@ -115,7 +115,7 @@ async def extract_findings_llm(
             "angle=<%s>, error=<%s> | LLM finding extraction failed, falling back to heuristic",
             angle, exc,
         )
-        return extract_findings_heuristic(worker_output, angle)
+        return extract_findings_heuristic(worker_output, angle, max_findings=max_findings)
 
 
 def extract_findings_heuristic(
@@ -287,6 +287,7 @@ def store_worker_transcript(
             iteration=iteration,
             source_model=source_model,
             source_run=source_run,
+            consider_for_use=False,
         )
 
         logger.info(

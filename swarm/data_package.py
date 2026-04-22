@@ -378,6 +378,7 @@ def _get_hive_findings_from_store(
                    WHERE consider_for_use = TRUE
                      AND angle != ?
                      AND row_type IN ('finding', 'thought', 'insight')
+                     AND source_type != 'corpus_section'
                    ORDER BY confidence DESC
                    LIMIT 15""",
                 [angle],
