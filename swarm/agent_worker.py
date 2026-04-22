@@ -121,7 +121,7 @@ def create_worker_agent(
         phase: Current swarm phase for event attribution.
         max_return_chars: Hard ceiling on chars any tool call returns.
         source_model: Model name for provenance tracking.
-        source_run: Run identifier for provenance tracking.
+        source_run: Run identifier for provenance tracking (#192).
 
     Returns:
         Configured Strands Agent ready to run.
@@ -132,7 +132,7 @@ def create_worker_agent(
         worker_id=worker_id,
         phase=phase,
         max_return_chars=max_return_chars,
-        source_model=source_model,
+        source_model=source_model or model,
         source_run=source_run,
     )
 

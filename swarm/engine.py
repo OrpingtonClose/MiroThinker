@@ -64,6 +64,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from swarm.angles import (
     WorkerAssignment,
@@ -869,6 +870,48 @@ class GossipSwarm:
             [f"{g:.3f}" for g in metrics.gossip_info_gain],
             len(metrics.degradations),
         )
+
+        # ── Observability: persist metrics to lineage store ──────────
+        store = self.config.lineage_store
+        if store is not None and hasattr(store, "emit_metric"):
+            run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+            store.emit_metric(
+                "run_metric",
+                {
+                    "total_llm_calls": metrics.total_llm_calls,
+                    "total_workers": metrics.total_workers,
+                    "gossip_rounds_executed": metrics.gossip_rounds_executed,
+                    "gossip_rounds_configured": metrics.gossip_rounds_configured,
+                    "gossip_converged_early": metrics.gossip_converged_early,
+                    "serendipity_produced": metrics.serendipity_produced,
+                    "phase_times": dict(metrics.phase_times),
+                    "total_elapsed_s": round(metrics.total_elapsed_s, 1),
+                    "worker_input_chars": list(metrics.worker_input_chars),
+                    "worker_output_chars": list(metrics.worker_output_chars),
+                    "gossip_info_gain": [
+                        round(g, 4) for g in metrics.gossip_info_gain
+                    ],
+                    "degradations": list(metrics.degradations),
+                    "corpus_chars": len(corpus),
+                    "angles": [a.angle for a in assignments],
+                },
+                source_run=run_id,
+            )
+            # Per-worker metrics
+            for a in assignments:
+                store.emit_metric(
+                    "worker_metric",
+                    {
+                        "angle": a.angle,
+                        "input_chars": a.char_count,
+                        "output_chars": len(a.summary),
+                    },
+                    angle=a.angle,
+                    source_run=run_id,
+                )
+            # Store health snapshot
+            if hasattr(store, "store_health_snapshot"):
+                store.store_health_snapshot(source_run=run_id)
 
         return SwarmResult(
             synthesis=user_report,
