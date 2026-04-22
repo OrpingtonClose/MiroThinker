@@ -489,7 +489,7 @@ def generate_summary_report(all_results: list[dict], output_dir: Path) -> str:
         m = r["metrics"]
         lines.append(
             f"| {r['experiment']} | {m['total_elapsed_s']} | {m['total_waves']} | "
-            f"{m['total_findings_stored']} | {m['total_tool_calls_store']} | "
+            f"{r['store_analysis']['total_findings']} | {m['total_tool_calls_store']} | "
             f"{r['report_chars']:,} | {m['convergence_reason'][:40]} |"
         )
 
@@ -553,13 +553,13 @@ def generate_summary_report(all_results: list[dict], output_dir: Path) -> str:
     # Find best/worst by findings
     valid = [r for r in all_results if "metrics" in r]
     if valid:
-        best_findings = max(valid, key=lambda r: r["metrics"]["total_findings_stored"])
-        worst_findings = min(valid, key=lambda r: r["metrics"]["total_findings_stored"])
+        best_findings = max(valid, key=lambda r: r["store_analysis"]["total_findings"])
+        worst_findings = min(valid, key=lambda r: r["store_analysis"]["total_findings"])
         fastest = min(valid, key=lambda r: r["metrics"]["total_elapsed_s"])
         slowest = max(valid, key=lambda r: r["metrics"]["total_elapsed_s"])
 
-        lines.append(f"- **Most findings:** {best_findings['experiment']} ({best_findings['metrics']['total_findings_stored']} findings)")
-        lines.append(f"- **Fewest findings:** {worst_findings['experiment']} ({worst_findings['metrics']['total_findings_stored']} findings)")
+        lines.append(f"- **Most findings:** {best_findings['experiment']} ({best_findings['store_analysis']['total_findings']} findings)")
+        lines.append(f"- **Fewest findings:** {worst_findings['experiment']} ({worst_findings['store_analysis']['total_findings']} findings)")
         lines.append(f"- **Fastest:** {fastest['experiment']} ({fastest['metrics']['total_elapsed_s']}s)")
         lines.append(f"- **Slowest:** {slowest['experiment']} ({slowest['metrics']['total_elapsed_s']}s)")
 
