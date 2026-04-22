@@ -39,6 +39,7 @@ import asyncio
 import json
 import logging
 import re
+import string
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -54,6 +55,29 @@ if TYPE_CHECKING:
     from corpus import ConditionStore
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_substitute(template: str, **kwargs: str) -> str:
+    """Single-pass template substitution immune to cross-contamination.
+
+    Unlike sequential ``.replace()`` calls, this uses
+    ``string.Template.safe_substitute`` so a replacement value that
+    happens to contain a later placeholder token (e.g. ``{articles}``)
+    is NOT re-processed.
+
+    Placeholders use ``$name`` syntax internally; the caller's
+    ``{name}`` braces are converted automatically.
+
+    Args:
+        template: The prompt template with ``{name}`` placeholders.
+        **kwargs: Name→value mapping for substitution.
+
+    Returns:
+        The populated prompt string.
+    """
+    # Convert {name} placeholders to $name for string.Template
+    converted = re.sub(r"\{(\w+)\}", r"$\1", template)
+    return string.Template(converted).safe_substitute(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -203,8 +227,11 @@ async def extract_doubts(
     Returns:
         List of ResearchNeed objects, sorted by priority.
     """
-    prompt = _DOUBT_EXTRACTION_PROMPT.replace("{angle}", angle)
-    prompt = prompt.replace("{transcript}", transcript[:15000])
+    prompt = _safe_substitute(
+        _DOUBT_EXTRACTION_PROMPT,
+        angle=angle,
+        transcript=transcript[:15000],
+    )
 
     try:
         content = await complete(prompt)
@@ -326,9 +353,12 @@ async def _generate_clone_queries(
     Returns:
         List of search query strings.
     """
-    prompt = _CLONE_SEARCH_PROMPT.replace("{angle}", need.angle)
-    prompt = prompt.replace("{doubt}", need.doubt)
-    prompt = prompt.replace("{data_needed}", need.data_needed)
+    prompt = _safe_substitute(
+        _CLONE_SEARCH_PROMPT,
+        angle=need.angle,
+        doubt=need.doubt,
+        data_needed=need.data_needed,
+    )
 
     try:
         content = await complete(prompt)
@@ -506,11 +536,14 @@ async def _synthesize_clone_findings(
     Returns:
         List of finding dicts with fact, source, confidence.
     """
-    prompt = _SYNTHESIS_PROMPT.replace("{angle}", need.angle)
-    prompt = prompt.replace("{doubt}", need.doubt)
-    prompt = prompt.replace("{data_needed}", need.data_needed)
-    prompt = prompt.replace("{articles}", full_articles[:20000] if full_articles else "(none)")
-    prompt = prompt.replace("{snippets}", snippets[:5000] if snippets else "(none)")
+    prompt = _safe_substitute(
+        _SYNTHESIS_PROMPT,
+        angle=need.angle,
+        doubt=need.doubt,
+        data_needed=need.data_needed,
+        articles=full_articles[:20000] if full_articles else "(none)",
+        snippets=snippets[:5000] if snippets else "(none)",
+    )
 
     try:
         content = await complete(prompt)

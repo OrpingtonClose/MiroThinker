@@ -174,7 +174,9 @@ async def proxy_chat_completion(request_body: dict[str, Any]) -> dict[str, Any]:
         forwarded = {**request_body, "model": backend_model, "messages": combined}
         forwarded.pop("_backend_model", None)
     else:
-        forwarded = request_body
+        # Strip internal fields (prefixed with '_') so strict OpenAI-compatible
+        # backends don't reject unknown keys.
+        forwarded = {k: v for k, v in request_body.items() if not k.startswith("_")}
 
     # Forward to backend
     async with httpx.AsyncClient(timeout=120) as client:
