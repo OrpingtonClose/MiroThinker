@@ -80,6 +80,8 @@ def build_worker_tools(
     worker_angle: str,
     worker_id: str,
     phase: str = "worker",
+    source_model: str = "",
+    source_run: str = "",
 ) -> list[Any]:
     """Build a set of @tool-decorated functions bound to a specific worker.
 
@@ -91,6 +93,8 @@ def build_worker_tools(
         worker_angle: This worker's assigned research angle.
         worker_id: Unique identifier for this worker.
         phase: Current swarm phase (for event logging).
+        source_model: Model name for provenance tracking (#192).
+        source_run: Run identifier for cross-run comparison (#192).
 
     Returns:
         List of tool-decorated callables ready for a Strands Agent.
@@ -294,24 +298,22 @@ def build_worker_tools(
             "reasoning": reasoning,
         }) if reasoning else ""
 
-        with store._lock:
-            cid = store._next_id
-            store._next_id += 1
-            from datetime import datetime, timezone
-            now = datetime.now(timezone.utc).isoformat()
-            store.conn.execute(
-                """INSERT INTO conditions
-                   (id, fact, source_url, source_type, row_type,
-                    consider_for_use, confidence, angle, strategy,
-                    created_at, phase, verification_status)
-                   VALUES (?, ?, ?, 'worker_analysis', 'finding',
-                           TRUE, ?, ?, ?, ?, ?, 'speculative')""",
-                [
-                    cid, fact.strip(), evidence_source,
-                    confidence, worker_angle, metadata,
-                    now, phase,
-                ],
-            )
+        cid = store.admit(
+            fact=fact.strip(),
+            source_url=evidence_source,
+            source_type="worker_analysis",
+            row_type="finding",
+            confidence=confidence,
+            angle=worker_angle,
+            strategy=metadata,
+            verification_status="speculative",
+            source_model=source_model,
+            source_run=source_run,
+            phase=phase,
+        )
+
+        if cid is None:
+            return {"status": "error", "content": [{"text": "Finding could not be stored"}]}
 
         with _lock:
             _finding_count["n"] += 1

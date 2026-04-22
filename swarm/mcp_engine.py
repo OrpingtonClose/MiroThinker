@@ -48,6 +48,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from swarm.agent_worker import create_worker_agent, run_worker_agent
@@ -169,6 +170,7 @@ class MCPSwarmEngine:
         t0 = time.monotonic()
         metrics = MCPSwarmMetrics()
         config = self.config
+        run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
 
         async def _emit(event: dict) -> None:
             if on_event is not None:
@@ -245,10 +247,15 @@ class MCPSwarmEngine:
             phase_start = time.monotonic()
             phase = f"wave_{wave}"
 
-            # Count findings before this wave
+            # Count worker-generated findings before this wave (#191)
+            # Excludes raw ingestion rows — only counts findings/thoughts/insights
+            # produced by worker agents, not corpus ingestion.
             with self.store._lock:
                 findings_before = self.store.conn.execute(
-                    "SELECT COUNT(*) FROM conditions WHERE consider_for_use = TRUE"
+                    "SELECT COUNT(*) FROM conditions "
+                    "WHERE consider_for_use = TRUE "
+                    "AND row_type IN ('finding', 'thought', 'insight', 'synthesis') "
+                    "AND source_type != 'corpus_section'"
                 ).fetchone()[0]
 
             await _emit({
@@ -271,6 +278,7 @@ class MCPSwarmEngine:
                     max_tokens=config.max_tokens,
                     temperature=config.temperature,
                     phase=phase,
+                    source_run=run_id,
                 )
                 agents.append((agent, a))
 
@@ -298,10 +306,13 @@ class MCPSwarmEngine:
 
             metrics.total_tool_calls += wave_tool_calls
 
-            # Count findings after this wave
+            # Count worker-generated findings after this wave (#191)
             with self.store._lock:
                 findings_after = self.store.conn.execute(
-                    "SELECT COUNT(*) FROM conditions WHERE consider_for_use = TRUE"
+                    "SELECT COUNT(*) FROM conditions "
+                    "WHERE consider_for_use = TRUE "
+                    "AND row_type IN ('finding', 'thought', 'insight', 'synthesis') "
+                    "AND source_type != 'corpus_section'"
                 ).fetchone()[0]
 
             new_findings = findings_after - findings_before
@@ -324,6 +335,45 @@ class MCPSwarmEngine:
                 "wave=<%d>, new_findings=<%d>, total=<%d>, elapsed_s=<%.1f> | wave complete",
                 wave, new_findings, findings_after, wave_time,
             )
+
+            # ── Emit wave metric ─────────────────────────────────
+            self.store.emit_metric(
+                "wave_metric",
+                {
+                    "findings_new": new_findings,
+                    "findings_total": findings_after,
+                    "tool_calls": wave_tool_calls,
+                    "elapsed_s": round(wave_time, 1),
+                    "workers": len(assignments),
+                    "worker_results": [
+                        r for r in results
+                        if isinstance(r, dict)
+                    ],
+                },
+                source_model=config.model,
+                source_run=run_id,
+                iteration=wave,
+            )
+
+            # ── Emit per-worker metrics ──────────────────────────
+            for r in results:
+                if not isinstance(r, dict):
+                    continue
+                self.store.emit_metric(
+                    "worker_metric",
+                    {
+                        "worker_id": r.get("worker_id", ""),
+                        "angle": r.get("angle", ""),
+                        "tool_calls": r.get("tool_calls", 0),
+                        "findings_stored": r.get("findings_stored", 0),
+                        "output_chars": r.get("output_chars", 0),
+                        "error": str(r.get("error", "")),
+                    },
+                    angle=r.get("angle", "unknown"),
+                    source_model=config.model,
+                    source_run=run_id,
+                    iteration=wave,
+                )
 
             # Convergence check: stop if too few new findings
             if new_findings < config.convergence_threshold:
@@ -356,6 +406,7 @@ class MCPSwarmEngine:
                 max_tokens=config.max_tokens,
                 temperature=0.5,  # slightly higher for creativity
                 phase="serendipity",
+                source_run=run_id,
             )
 
             serendipity_result = await run_worker_agent(
@@ -393,6 +444,37 @@ class MCPSwarmEngine:
             "total_elapsed_s": round(metrics.total_elapsed_s, 1),
             "total_findings": metrics.total_findings_stored,
         })
+
+        # ── Run-level observability ──────────────────────────────────
+        # Store health snapshot (rows by type/angle)
+        self.store.store_health_snapshot(
+            source_run=run_id,
+            iteration=metrics.total_waves,
+        )
+
+        # Emit run-level summary metric
+        self.store.emit_metric(
+            "run_metric",
+            {
+                "total_workers": metrics.total_workers,
+                "total_waves": metrics.total_waves,
+                "total_findings_stored": metrics.total_findings_stored,
+                "total_tool_calls": metrics.total_tool_calls,
+                "findings_per_wave": metrics.findings_per_wave,
+                "phase_times": metrics.phase_times,
+                "total_elapsed_s": round(metrics.total_elapsed_s, 1),
+                "convergence_reason": metrics.convergence_reason,
+                "angles": [a.angle for a in assignments],
+                "corpus_chars": len(corpus),
+            },
+            source_model=config.model,
+            source_run=run_id,
+        )
+
+        logger.info(
+            "run_id=<%s>, total_elapsed_s=<%.1f> | observability metrics persisted",
+            run_id, metrics.total_elapsed_s,
+        )
 
         return MCPSwarmResult(
             report=report,
