@@ -305,76 +305,251 @@ class ConditionStore:
     # Store compaction — deduplicate and archive stale findings
     # ------------------------------------------------------------------
 
-    def compact(self, similarity_threshold: int = 50) -> dict[str, int]:
-        """Deduplicate findings by marking near-identical entries as obsolete.
+    def compact(
+        self,
+        complete: Any = None,
+        max_cluster_size: int = 8,
+    ) -> dict[str, int]:
+        """Deduplicate findings using exact-match and LLM semantic judgment.
 
-        Uses a simple length + prefix check: if two findings share the
-        same first N characters and are within 20% length of each other,
-        the lower-confidence one is marked obsolete.
+        Two-phase approach designed to be called by an external agent
+        outside the swarm — never by swarm workers themselves.
+
+        Phase 1 (pure SQL, no LLM): Remove exact-duplicate ``fact`` text
+        within the same angle, keeping the highest-confidence row.
+
+        Phase 2 (LLM-assisted, optional): Pre-cluster candidates within
+        each angle using shared key terms extracted via SQL string
+        functions (no cartesian product). For each candidate cluster,
+        ask the LLM once "which of these are the same claim?" and mark
+        lower-confidence duplicates obsolete.
 
         Args:
-            similarity_threshold: Minimum prefix length for dedup matching.
+            complete: Async callable ``(prompt: str) -> str`` for LLM
+                judgment in Phase 2.  If None, only Phase 1 runs.
+            max_cluster_size: Max findings per LLM dedup call.
 
         Returns:
             Dict with compaction statistics.
         """
+        import asyncio
+
+        stats: dict[str, int] = {
+            "exact_duplicates_removed": 0,
+            "semantic_duplicates_removed": 0,
+            "total_checked": 0,
+        }
+
+        # ── Phase 1: exact-match dedup (pure SQL) ────────────────────
         with self._lock:
-            # Find duplicate groups by prefix
-            rows = self.conn.execute(
-                """SELECT id, fact, confidence, angle
+            # Find groups of identical fact text within the same angle
+            dup_groups = self.conn.execute(
+                """SELECT angle, fact, COUNT(*) as cnt,
+                          MAX(confidence) as max_conf
                    FROM conditions
                    WHERE consider_for_use = TRUE
-                     AND row_type = 'finding'
-                   ORDER BY angle, confidence DESC""",
+                     AND row_type IN ('finding', 'thought', 'insight')
+                   GROUP BY angle, fact
+                   HAVING COUNT(*) > 1""",
             ).fetchall()
 
-        if not rows:
-            return {"duplicates_removed": 0, "total_checked": 0}
-
-        # Group by angle, then dedup within angle
-        by_angle: dict[str, list[tuple]] = {}
-        for row in rows:
-            angle = row[3] or "general"
-            by_angle.setdefault(angle, []).append(row)
-
-        obsolete_ids: list[int] = []
-        for angle, group in by_angle.items():
-            seen_prefixes: dict[str, tuple[int, int]] = {}  # prefix -> (cid, fact_len)
-            for cid, fact, conf, _ in group:
-                prefix = fact[:similarity_threshold].lower().strip()
-                if prefix in seen_prefixes:
-                    # Check length similarity — within 20% of each other
-                    prev_cid, prev_len = seen_prefixes[prefix]
-                    fact_len = len(fact)
-                    shorter, longer = min(prev_len, fact_len), max(prev_len, fact_len)
-                    if longer == 0 or shorter / longer >= 0.8:
-                        # This is a duplicate — the first one we saw had higher
-                        # confidence (sorted DESC), so mark this one obsolete
-                        obsolete_ids.append(cid)
-                else:
-                    seen_prefixes[prefix] = (cid, len(fact))
-
-        if obsolete_ids:
+        for angle, fact, cnt, max_conf in dup_groups:
             with self._lock:
-                # Batch update in chunks of 500
-                for i in range(0, len(obsolete_ids), 500):
-                    chunk = obsolete_ids[i:i + 500]
-                    placeholders = ",".join("?" for _ in chunk)
-                    self.conn.execute(
-                        f"UPDATE conditions SET consider_for_use = FALSE, "
-                        f"obsolete_reason = 'compacted_duplicate' "
-                        f"WHERE id IN ({placeholders})",
-                        chunk,
+                # Keep the highest-confidence row, mark the rest obsolete
+                self.conn.execute(
+                    """UPDATE conditions
+                       SET consider_for_use = FALSE,
+                           obsolete_reason = 'exact_duplicate'
+                       WHERE angle = ?
+                         AND fact = ?
+                         AND consider_for_use = TRUE
+                         AND id NOT IN (
+                             SELECT id FROM conditions
+                             WHERE angle = ? AND fact = ?
+                               AND consider_for_use = TRUE
+                             ORDER BY confidence DESC
+                             LIMIT 1
+                         )""",
+                    [angle, fact, angle, fact],
+                )
+            stats["exact_duplicates_removed"] += cnt - 1
+
+        # ── Phase 2: LLM semantic dedup (optional) ───────────────────
+        if complete is None:
+            with self._lock:
+                stats["total_checked"] = self.conn.execute(
+                    """SELECT COUNT(*) FROM conditions
+                       WHERE consider_for_use = TRUE
+                         AND row_type IN ('finding', 'thought', 'insight')""",
+                ).fetchone()[0]
+
+            logger.info(
+                "exact_dupes=<%d>, total=<%d> | compaction phase 1 complete",
+                stats["exact_duplicates_removed"], stats["total_checked"],
+            )
+            return stats
+
+        # Get distinct angles
+        with self._lock:
+            angles = self.conn.execute(
+                """SELECT DISTINCT angle FROM conditions
+                   WHERE consider_for_use = TRUE
+                     AND row_type IN ('finding', 'thought', 'insight')
+                     AND angle != ''""",
+            ).fetchall()
+
+        semantic_removed = 0
+        for (angle,) in angles:
+            # Fetch active findings for this angle, ordered by confidence
+            with self._lock:
+                rows = self.conn.execute(
+                    """SELECT id, fact, confidence
+                       FROM conditions
+                       WHERE consider_for_use = TRUE
+                         AND angle = ?
+                         AND row_type IN ('finding', 'thought', 'insight')
+                       ORDER BY confidence DESC""",
+                    [angle],
+                ).fetchall()
+
+            if len(rows) < 2:
+                continue
+
+            # Build keyword index: extract significant words per finding
+            # to cluster candidates without cartesian product
+            word_to_ids: dict[str, list[int]] = {}
+            id_to_row: dict[int, tuple[int, str, float]] = {}
+            for cid, fact, conf in rows:
+                id_to_row[cid] = (cid, fact, conf)
+                words = set(
+                    w.lower() for w in re.findall(r"[a-zA-Z]{4,}", fact)
+                )
+                for w in words:
+                    word_to_ids.setdefault(w, []).append(cid)
+
+            # Find candidate clusters: findings sharing 3+ keywords
+            from collections import Counter
+            pair_overlap: Counter[tuple[int, int]] = Counter()
+            for w, ids in word_to_ids.items():
+                if len(ids) > 20:
+                    continue  # skip very common words
+                for i in range(len(ids)):
+                    for j in range(i + 1, len(ids)):
+                        a, b = min(ids[i], ids[j]), max(ids[i], ids[j])
+                        pair_overlap[(a, b)] += 1
+
+            # Group pairs with 3+ shared keywords into clusters
+            # using union-find to merge overlapping pairs
+            parent: dict[int, int] = {}
+
+            def find(x: int) -> int:
+                while parent.get(x, x) != x:
+                    parent[x] = parent.get(parent[x], parent[x])
+                    x = parent[x]
+                return x
+
+            def union(x: int, y: int) -> None:
+                px, py = find(x), find(y)
+                if px != py:
+                    parent[px] = py
+
+            for (a, b), count in pair_overlap.items():
+                if count >= 3:
+                    union(a, b)
+
+            # Collect clusters
+            clusters: dict[int, list[int]] = {}
+            for cid in id_to_row:
+                root = find(cid)
+                if root != cid or cid in parent:
+                    clusters.setdefault(root, []).append(cid)
+
+            # For each cluster, ask LLM to identify duplicates
+            for root, members in clusters.items():
+                if len(members) < 2:
+                    continue
+                # Cap cluster size to avoid huge prompts
+                members = sorted(
+                    members,
+                    key=lambda c: id_to_row[c][2],
+                    reverse=True,
+                )[:max_cluster_size]
+
+                # Build prompt listing the candidate findings
+                lines = []
+                for idx, cid in enumerate(members):
+                    _, fact, conf = id_to_row[cid]
+                    lines.append(f"[{idx}] (conf={conf:.2f}) {fact[:300]}")
+
+                prompt = (
+                    f"You are deduplicating research findings in the "
+                    f"'{angle}' domain.\n\n"
+                    f"Below are {len(members)} findings that may be "
+                    f"saying the same thing. Group them by semantic "
+                    f"equivalence — findings making the same factual "
+                    f"claim count as duplicates even if worded "
+                    f"differently.\n\n"
+                    + "\n".join(lines)
+                    + "\n\nFor each duplicate group, output ONLY the "
+                    f"index numbers of duplicates on one line, comma-"
+                    f"separated. The FIRST index in each group is the "
+                    f"keeper (highest confidence). Output one group per "
+                    f"line. If no duplicates exist, output NONE.\n"
+                    f"Example: 0,3,5\n1,4"
+                )
+
+                try:
+                    response = asyncio.get_event_loop().run_until_complete(
+                        complete(prompt),
                     )
+                except RuntimeError:
+                    # No running event loop — create one
+                    response = asyncio.run(complete(prompt))
+
+                # Parse response: each line is a group of indices
+                for line in response.strip().split("\n"):
+                    line = line.strip()
+                    if not line or line.upper() == "NONE":
+                        continue
+                    indices = []
+                    for part in line.split(","):
+                        part = part.strip().strip("[]")
+                        if part.isdigit():
+                            idx = int(part)
+                            if 0 <= idx < len(members):
+                                indices.append(idx)
+                    if len(indices) < 2:
+                        continue
+                    # First index is keeper, rest are duplicates
+                    for dup_idx in indices[1:]:
+                        dup_cid = members[dup_idx]
+                        with self._lock:
+                            self.conn.execute(
+                                """UPDATE conditions
+                                   SET consider_for_use = FALSE,
+                                       obsolete_reason = 'semantic_duplicate'
+                                   WHERE id = ?
+                                     AND consider_for_use = TRUE""",
+                                [dup_cid],
+                            )
+                        semantic_removed += 1
+
+        stats["semantic_duplicates_removed"] = semantic_removed
+
+        with self._lock:
+            stats["total_checked"] = self.conn.execute(
+                """SELECT COUNT(*) FROM conditions
+                   WHERE consider_for_use = TRUE
+                     AND row_type IN ('finding', 'thought', 'insight')""",
+            ).fetchone()[0]
 
         logger.info(
-            "compaction complete: %d duplicates removed from %d findings",
-            len(obsolete_ids), len(rows),
+            "exact_dupes=<%d>, semantic_dupes=<%d>, total=<%d> | compaction complete",
+            stats["exact_duplicates_removed"],
+            stats["semantic_duplicates_removed"],
+            stats["total_checked"],
         )
-        return {
-            "duplicates_removed": len(obsolete_ids),
-            "total_checked": len(rows),
-        }
+        return stats
 
     # ------------------------------------------------------------------
     # Knowledge summaries — rolling briefings for workers

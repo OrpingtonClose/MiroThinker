@@ -382,11 +382,18 @@ class MCPSwarmEngine:
             if (config.compact_every_n_waves > 0
                     and wave % config.compact_every_n_waves == 0):
                 compact_start = time.monotonic()
-                stats = self.store.compact()
+                stats = self.store.compact(complete=self.complete)
                 compact_time = time.monotonic() - compact_start
+                total_removed = (
+                    stats.get("exact_duplicates_removed", 0)
+                    + stats.get("semantic_duplicates_removed", 0)
+                )
                 logger.info(
-                    "wave=<%d>, duplicates_removed=<%d>, compact_time=<%.1f>s | compaction complete",
-                    wave, stats["duplicates_removed"], compact_time,
+                    "wave=<%d>, exact_dupes=<%d>, semantic_dupes=<%d>, compact_time=<%.1f>s | compaction complete",
+                    wave,
+                    stats.get("exact_duplicates_removed", 0),
+                    stats.get("semantic_duplicates_removed", 0),
+                    compact_time,
                 )
                 metrics.phase_times[f"compact_wave_{wave}"] = compact_time
 
