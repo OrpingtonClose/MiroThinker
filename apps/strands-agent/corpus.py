@@ -14,6 +14,7 @@ this store.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -416,6 +417,45 @@ class ConditionStore:
         )
 
     # ------------------------------------------------------------------
+    # Corpus fingerprinting (#190)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _corpus_fingerprint(text: str) -> str:
+        """SHA-256 hex digest of raw corpus text."""
+        return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+    def has_corpus_fingerprint(self, text: str) -> bool:
+        """Check whether *text* was already ingested (by SHA-256 fingerprint).
+
+        Prevents re-ingesting the same corpus across waves or runs.
+        """
+        fp = self._corpus_fingerprint(text)
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT 1 FROM conditions "
+                "WHERE row_type = 'corpus_fingerprint' AND source_ref = ? "
+                "LIMIT 1",
+                [fp],
+            ).fetchone()
+        return row is not None
+
+    def _record_corpus_fingerprint(self, text: str) -> None:
+        """Store a fingerprint row so future ingests are skipped."""
+        fp = self._corpus_fingerprint(text)
+        with self._lock:
+            cid = self._next_id
+            self._next_id += 1
+            self.conn.execute(
+                "INSERT INTO conditions "
+                "(id, fact, source_type, source_ref, row_type, "
+                "consider_for_use, created_at) "
+                "VALUES (?, ?, 'system', ?, 'corpus_fingerprint', FALSE, ?)",
+                [cid, f"corpus fingerprint: {len(text)} chars", fp,
+                 datetime.now(timezone.utc).isoformat()],
+            )
+
+    # ------------------------------------------------------------------
     # Ingestion (raw text -> atomised conditions)
     # ------------------------------------------------------------------
 
@@ -434,12 +474,23 @@ class ConditionStore:
         Every row in the corpus is a node in a DAG with traceable parents.
         No truncation. Full text stored as row_type='raw'.
 
+        Skips ingestion if the same text was already ingested (SHA-256
+        fingerprint check — #190).
+
         Atomisation is deferred to the caller (atomizer.py) or done
         inline via _atomise_simple() for basic paragraph splitting.
 
         Returns list of admitted condition IDs.
         """
         if not raw_text or not raw_text.strip():
+            return []
+
+        # Fingerprint dedup: skip if already ingested
+        if self.has_corpus_fingerprint(raw_text):
+            logger.info(
+                "source=<%s>, chars=<%d> | skipped — corpus already ingested (fingerprint match)",
+                source_type, len(raw_text),
+            )
             return []
 
         now = datetime.now(timezone.utc).isoformat()
@@ -490,6 +541,9 @@ class ConditionStore:
                 "WHERE id = ? AND row_type = 'raw'",
                 [str(len(chunk_ids)), raw_id],
             )
+
+        # Record fingerprint so the same corpus is never re-ingested
+        self._record_corpus_fingerprint(raw_text)
 
         logger.info(
             "ingested raw: %d paragraphs from %d chars (source=%s, iteration=%d)",

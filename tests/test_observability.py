@@ -169,6 +169,52 @@ class TestStoreHealthSnapshot:
 # ═══════════════════════════════════════════════════════════════════════
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Corpus fingerprinting (#190)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestCorpusFingerprinting:
+    """Verify SHA-256 fingerprint dedup on ingest_raw."""
+
+    def test_first_ingest_succeeds(self, store: ConditionStore) -> None:
+        ids = store.ingest_raw("Hello world paragraph one.\n\nParagraph two.")
+        assert len(ids) > 0
+
+    def test_duplicate_ingest_skipped(self, store: ConditionStore) -> None:
+        text = "Unique corpus content for dedup test.\n\nSecond paragraph."
+        ids1 = store.ingest_raw(text, source_type="corpus")
+        ids2 = store.ingest_raw(text, source_type="corpus")
+        assert len(ids1) > 0
+        assert ids2 == []  # skipped
+
+    def test_different_corpus_not_skipped(self, store: ConditionStore) -> None:
+        ids1 = store.ingest_raw("Corpus A content.\n\nMore A.")
+        ids2 = store.ingest_raw("Corpus B content.\n\nMore B.")
+        assert len(ids1) > 0
+        assert len(ids2) > 0
+
+    def test_has_corpus_fingerprint(self, store: ConditionStore) -> None:
+        text = "Check fingerprint existence."
+        assert not store.has_corpus_fingerprint(text)
+        store.ingest_raw(text)
+        assert store.has_corpus_fingerprint(text)
+
+    def test_fingerprint_not_in_research_queries(
+        self, store: ConditionStore,
+    ) -> None:
+        store.ingest_raw("Some corpus text here.\n\nAnother paragraph.")
+        findings = store.get_findings()
+        for f in findings:
+            assert "fingerprint" not in f.get("fact", "").lower() or \
+                f.get("row_type") != "corpus_fingerprint"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Schema migration — source_model / source_run columns
+# ═══════════════════════════════════════════════════════════════════════
+
+
 class TestSchemaMigration:
     """Verify that source_model and source_run columns exist after init."""
 

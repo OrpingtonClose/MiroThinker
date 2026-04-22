@@ -247,10 +247,15 @@ class MCPSwarmEngine:
             phase_start = time.monotonic()
             phase = f"wave_{wave}"
 
-            # Count findings before this wave
+            # Count worker-generated findings before this wave (#191)
+            # Excludes raw ingestion rows — only counts findings/thoughts/insights
+            # produced by worker agents, not corpus ingestion.
             with self.store._lock:
                 findings_before = self.store.conn.execute(
-                    "SELECT COUNT(*) FROM conditions WHERE consider_for_use = TRUE"
+                    "SELECT COUNT(*) FROM conditions "
+                    "WHERE consider_for_use = TRUE "
+                    "AND row_type IN ('finding', 'thought', 'insight', 'synthesis') "
+                    "AND source_type != 'corpus_section'"
                 ).fetchone()[0]
 
             await _emit({
@@ -300,10 +305,13 @@ class MCPSwarmEngine:
 
             metrics.total_tool_calls += wave_tool_calls
 
-            # Count findings after this wave
+            # Count worker-generated findings after this wave (#191)
             with self.store._lock:
                 findings_after = self.store.conn.execute(
-                    "SELECT COUNT(*) FROM conditions WHERE consider_for_use = TRUE"
+                    "SELECT COUNT(*) FROM conditions "
+                    "WHERE consider_for_use = TRUE "
+                    "AND row_type IN ('finding', 'thought', 'insight', 'synthesis') "
+                    "AND source_type != 'corpus_section'"
                 ).fetchone()[0]
 
             new_findings = findings_after - findings_before
