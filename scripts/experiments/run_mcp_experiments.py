@@ -598,8 +598,8 @@ def main() -> None:
         description="Run MCP engine experiments",
     )
     parser.add_argument(
-        "--corpus", required=True,
-        help="Path to corpus text/markdown file",
+        "--corpus", required=False, default=None,
+        help="Path to corpus text/markdown file (required unless --list)",
     )
     parser.add_argument(
         "--output-dir", default="experiment_results",
@@ -626,6 +626,12 @@ def main() -> None:
     )
 
     experiments = build_experiment_matrix()
+
+    if args.list_experiments:
+        # --list doesn't need a corpus file
+        pass
+    elif not args.corpus:
+        parser.error("--corpus is required when not using --list")
 
     if args.list_experiments:
         print(f"\n{'═' * 60}")
