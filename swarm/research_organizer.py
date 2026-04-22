@@ -147,11 +147,11 @@ Worker transcript:
 
 Output ONLY valid JSON — an array of objects:
 [
-  {{
+  {
     "doubt": "the specific uncertainty",
     "data_needed": "exactly what data would resolve it",
     "priority": "HIGH|MEDIUM|LOW"
-  }}
+  }
 ]"""
 
 
@@ -480,12 +480,12 @@ For each finding:
 
 Output ONLY valid JSON — an array of objects:
 [
-  {{
+  {
     "fact": "specific factual claim with exact numbers",
     "source": "URL or article title",
     "confidence": 0.8,
     "resolves_doubt": true/false
-  }}
+  }
 ]"""
 
 

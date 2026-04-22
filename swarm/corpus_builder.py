@@ -91,7 +91,7 @@ You are a research analyst. Deeply understand what this query is about \
 Research query: {query}
 
 Analyze this query and output ONLY valid JSON:
-{{
+{
   "entities": ["every entity, person, substance, concept mentioned or implied"],
   "domains": ["every knowledge domain this touches — be expansive"],
   "sub_questions": ["6-10 concrete sub-questions that research needs to answer"],
@@ -102,7 +102,7 @@ Analyze this query and output ONLY valid JSON:
     "include academic queries (pharmacokinetics, dose-response)",
     "include practitioner queries (protocol, dosage, timing)"
   ]
-}}"""
+}"""
 
 
 @dataclass
