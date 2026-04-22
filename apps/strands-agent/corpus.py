@@ -339,15 +339,20 @@ class ConditionStore:
 
         obsolete_ids: list[int] = []
         for angle, group in by_angle.items():
-            seen_prefixes: dict[str, int] = {}
+            seen_prefixes: dict[str, tuple[int, int]] = {}  # prefix -> (cid, fact_len)
             for cid, fact, conf, _ in group:
                 prefix = fact[:similarity_threshold].lower().strip()
                 if prefix in seen_prefixes:
-                    # This is a duplicate — the first one we saw had higher
-                    # confidence (sorted DESC), so mark this one obsolete
-                    obsolete_ids.append(cid)
+                    # Check length similarity — within 20% of each other
+                    prev_cid, prev_len = seen_prefixes[prefix]
+                    fact_len = len(fact)
+                    shorter, longer = min(prev_len, fact_len), max(prev_len, fact_len)
+                    if longer == 0 or shorter / longer >= 0.8:
+                        # This is a duplicate — the first one we saw had higher
+                        # confidence (sorted DESC), so mark this one obsolete
+                        obsolete_ids.append(cid)
                 else:
-                    seen_prefixes[prefix] = cid
+                    seen_prefixes[prefix] = (cid, len(fact))
 
         if obsolete_ids:
             with self._lock:
