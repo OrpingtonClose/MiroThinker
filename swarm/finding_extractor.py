@@ -104,6 +104,13 @@ async def extract_findings_llm(
         response = await complete(prompt)
         findings = _parse_findings_json(response, angle)
 
+        if not findings:
+            logger.info(
+                "angle=<%s> | LLM extraction returned 0 findings, falling back to heuristic",
+                angle,
+            )
+            findings = extract_findings_heuristic(worker_output, angle, max_findings=max_findings)
+
         logger.info(
             "angle=<%s>, findings_extracted=<%d> | LLM finding extraction complete",
             angle, len(findings),
@@ -323,7 +330,7 @@ def _parse_findings_json(
     text = re.sub(r'\s*```$', '', text)
 
     # Try to find a JSON array in the response
-    array_match = re.search(r'\[.*\]', text, re.DOTALL)
+    array_match = re.search(r'\[\s*\{.*\}\s*\]', text, re.DOTALL)
     if not array_match:
         logger.debug(
             "angle=<%s> | no JSON array found in LLM response",
