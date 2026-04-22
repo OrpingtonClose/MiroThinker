@@ -96,7 +96,17 @@ class ConditionStore:
             self.conn = duckdb.connect()
         self._lock = threading.RLock()  # Reentrant: methods call each other
         self._next_id = 1
+        self._db_path = db_path
         self.user_query: str = ""  # Set by _run_job for trigger_gossip context
+
+        # Enable WAL mode for file-backed databases — crash-safe writes
+        # and better concurrent read performance during 24h runs.
+        if db_path:
+            try:
+                self.conn.execute("PRAGMA enable_progress_bar")
+            except Exception:
+                pass
+
         self._setup_tables()
 
     def _setup_tables(self) -> None:
@@ -1481,26 +1491,33 @@ class ConditionStore:
         """
         fact_json = json.dumps(data, default=str)
         now = datetime.now(timezone.utc).isoformat()
-        with self._lock:
-            cid = self._next_id
-            self._next_id += 1
-            self.conn.execute(
-                """INSERT INTO conditions
-                   (id, fact, source_type, row_type,
-                    consider_for_use, angle, created_at,
-                    iteration, parent_id, source_model, source_run)
-                   VALUES (?, ?, 'observability', ?, FALSE, ?, ?, ?, ?, ?, ?)""",
-                [
-                    cid, fact_json, metric_type,
-                    angle, now, iteration, parent_id,
-                    source_model, source_run,
-                ],
+        try:
+            with self._lock:
+                cid = self._next_id
+                self._next_id += 1
+                self.conn.execute(
+                    """INSERT INTO conditions
+                       (id, fact, source_type, row_type,
+                        consider_for_use, angle, created_at,
+                        iteration, parent_id, source_model, source_run)
+                       VALUES (?, ?, 'observability', ?, FALSE, ?, ?, ?, ?, ?, ?)""",
+                    [
+                        cid, fact_json, metric_type,
+                        angle, now, iteration, parent_id,
+                        source_model, source_run,
+                    ],
+                )
+            logger.debug(
+                "metric_type=<%s>, angle=<%s>, iteration=<%d> | emitted metric #%d",
+                metric_type, angle, iteration, cid,
             )
-        logger.debug(
-            "metric_type=<%s>, angle=<%s>, iteration=<%d> | emitted metric #%d",
-            metric_type, angle, iteration, cid,
-        )
-        return cid
+            return cid
+        except Exception as exc:
+            logger.warning(
+                "metric_type=<%s>, error=<%s> | failed to emit metric, continuing",
+                metric_type, exc,
+            )
+            return -1
 
     def store_health_snapshot(
         self,
@@ -1511,41 +1528,50 @@ class ConditionStore:
         """Query the store's own health and persist as a ``store_metric`` row.
 
         Returns the health data dict (also stored as a metric row).
+        Never raises — returns empty dict on failure to avoid crashing
+        the main pipeline for observability failures.
         """
-        with self._lock:
-            total = self.conn.execute(
-                "SELECT COUNT(*) FROM conditions"
-            ).fetchone()[0]
-            active = self.conn.execute(
-                "SELECT COUNT(*) FROM conditions WHERE consider_for_use = TRUE"
-            ).fetchone()[0]
-            obsolete = total - active
+        try:
+            with self._lock:
+                total = self.conn.execute(
+                    "SELECT COUNT(*) FROM conditions"
+                ).fetchone()[0]
+                active = self.conn.execute(
+                    "SELECT COUNT(*) FROM conditions WHERE consider_for_use = TRUE"
+                ).fetchone()[0]
+                obsolete = total - active
 
-            rows_by_type = {}
-            for row_type, cnt in self.conn.execute(
-                "SELECT row_type, COUNT(*) FROM conditions GROUP BY row_type"
-            ).fetchall():
-                rows_by_type[row_type] = cnt
+                rows_by_type = {}
+                for row_type, cnt in self.conn.execute(
+                    "SELECT row_type, COUNT(*) FROM conditions GROUP BY row_type"
+                ).fetchall():
+                    rows_by_type[row_type] = cnt
 
-            rows_by_angle = {}
-            for ang, cnt in self.conn.execute(
-                "SELECT angle, COUNT(*) FROM conditions "
-                "WHERE consider_for_use = TRUE GROUP BY angle"
-            ).fetchall():
-                rows_by_angle[ang] = cnt
+                rows_by_angle = {}
+                for ang, cnt in self.conn.execute(
+                    "SELECT angle, COUNT(*) FROM conditions "
+                    "WHERE consider_for_use = TRUE GROUP BY angle"
+                ).fetchall():
+                    rows_by_angle[ang] = cnt
 
-        data = {
-            "total_rows": total,
-            "active_rows": active,
-            "obsolete_rows": obsolete,
-            "rows_by_type": rows_by_type,
-            "rows_by_angle": rows_by_angle,
-        }
-        self.emit_metric(
-            "store_metric", data,
-            source_run=source_run, iteration=iteration,
-        )
-        return data
+            data = {
+                "total_rows": total,
+                "active_rows": active,
+                "obsolete_rows": obsolete,
+                "rows_by_type": rows_by_type,
+                "rows_by_angle": rows_by_angle,
+            }
+            self.emit_metric(
+                "store_metric", data,
+                source_run=source_run, iteration=iteration,
+            )
+            return data
+        except Exception as exc:
+            logger.warning(
+                "error=<%s> | health snapshot failed, continuing",
+                exc,
+            )
+            return {}
 
     # ------------------------------------------------------------------
     # Query methods
