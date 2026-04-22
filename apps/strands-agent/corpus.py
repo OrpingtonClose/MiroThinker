@@ -227,10 +227,16 @@ class ConditionStore:
         expansion_depth: int = 0,
         iteration: int = 0,
         consider_for_use: bool = True,
+        source_model: str = "",
+        source_run: str = "",
     ) -> int | None:
         """Insert a single condition row.
 
         Returns the assigned condition ID, or None if fact is empty.
+
+        Args:
+            source_model: Model that produced this finding (#192 provenance).
+            source_run: Run identifier for cross-run comparison (#192).
         """
         fact = fact.strip()
         if not fact:
@@ -246,14 +252,16 @@ class ConditionStore:
                     row_type, related_id, consider_for_use,
                     confidence, verification_status, angle,
                     parent_id, strategy,
-                    expansion_depth, created_at, iteration)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    expansion_depth, created_at, iteration,
+                    source_model, source_run)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     cid, fact, source_url, source_type, source_ref,
                     row_type, related_id, consider_for_use,
                     confidence, verification_status, angle,
                     parent_id, strategy,
                     expansion_depth, now, iteration,
+                    source_model, source_run,
                 ],
             )
         logger.debug("admitted condition #%d: %.80s", cid, fact)

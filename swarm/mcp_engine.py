@@ -278,6 +278,7 @@ class MCPSwarmEngine:
                     max_tokens=config.max_tokens,
                     temperature=config.temperature,
                     phase=phase,
+                    source_run=run_id,
                 )
                 agents.append((agent, a))
 
@@ -405,6 +406,7 @@ class MCPSwarmEngine:
                 max_tokens=config.max_tokens,
                 temperature=0.5,  # slightly higher for creativity
                 phase="serendipity",
+                source_run=run_id,
             )
 
             serendipity_result = await run_worker_agent(

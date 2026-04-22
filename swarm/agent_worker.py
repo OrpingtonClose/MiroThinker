@@ -98,6 +98,7 @@ def create_worker_agent(
     max_tokens: int = 4096,
     temperature: float = 0.3,
     phase: str = "worker",
+    source_run: str = "",
 ) -> Agent:
     """Create a Strands Agent configured as a swarm worker.
 
@@ -116,6 +117,7 @@ def create_worker_agent(
         max_tokens: Max tokens per LLM response.
         temperature: Sampling temperature.
         phase: Current swarm phase for event attribution.
+        source_run: Run identifier for provenance tracking (#192).
 
     Returns:
         Configured Strands Agent ready to run.
@@ -125,6 +127,8 @@ def create_worker_agent(
         worker_angle=angle,
         worker_id=worker_id,
         phase=phase,
+        source_model=model,
+        source_run=source_run,
     )
 
     model_provider = OpenAIModel(
