@@ -62,13 +62,38 @@ async def run(
     store = ConditionStore(db_path=db_path)
 
     # Build completion function for angle detection + report gen
-    from scripts.h200_test.run_swarm_test import make_complete_fn
+    # Uses auth-aware httpx client (OpenRouter requires Bearer token)
+    import httpx
 
-    complete_fn = make_complete_fn(
-        model, api_base,
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
+    async def complete_fn(prompt: str) -> str:
+        """OpenAI-compatible completion with auth headers."""
+        url = f"{api_base}/chat/completions"
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": "Produce your analysis."},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        headers = {
+            "Content-Type": "application/json",
+        }
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            try:
+                resp = await client.post(url, json=payload, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+                return data["choices"][0]["message"]["content"]
+            except Exception:
+                logger.exception(
+                    "model=<%s>, url=<%s> | completion call failed", model, url,
+                )
+                return ""
 
     config = MCPSwarmConfig(
         max_workers=8,  # upper bound — actual workers = angles detected

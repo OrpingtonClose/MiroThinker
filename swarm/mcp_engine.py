@@ -320,15 +320,6 @@ class MCPSwarmEngine:
         for wave in range(1, config.max_waves + 1):
             phase_start = time.monotonic()
 
-            # Count findings before this wave
-            with self.store._lock:
-                findings_before = self.store.conn.execute(
-                    "SELECT COUNT(*) FROM conditions "
-                    "WHERE consider_for_use = TRUE "
-                    "AND row_type IN ('finding', 'thought', 'insight', 'synthesis') "
-                    "AND source_type != 'corpus_section'"
-                ).fetchone()[0]
-
             await _emit({
                 "type": "swarm_phase",
                 "phase": f"wave_{wave}_start",
@@ -724,7 +715,8 @@ class MCPSwarmEngine:
         if serendipity_result.get("status") == "success":
             response = serendipity_result.get("response", "")
             if response:
-                # Store transcript
+                # Store transcript — use wave after last regular wave
+                serendipity_iteration = metrics.total_waves + 1
                 store_worker_transcript(
                     store=self.store,
                     worker_id="serendipity",
@@ -732,7 +724,7 @@ class MCPSwarmEngine:
                     transcript=response,
                     source_model=serendipity_result.get("model", config.model),
                     source_run=config.source_run or run_id,
-                    iteration=0,
+                    iteration=serendipity_iteration,
                 )
 
                 # Extract findings
@@ -747,6 +739,7 @@ class MCPSwarmEngine:
                     findings=findings,
                     source_model=serendipity_result.get("model", config.model),
                     source_run=config.source_run or run_id,
+                    iteration=serendipity_iteration,
                 )
 
     async def _generate_rolling_summaries(
