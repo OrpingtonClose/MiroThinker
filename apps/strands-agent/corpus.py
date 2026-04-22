@@ -466,6 +466,10 @@ class ConditionStore:
                 root = find(cid)
                 if root != cid or cid in parent:
                     clusters.setdefault(root, []).append(cid)
+            # Ensure root nodes themselves are included in their cluster
+            for root in list(clusters.keys()):
+                if root not in clusters[root]:
+                    clusters[root].insert(0, root)
 
             # For each cluster, ask LLM to identify duplicates
             for root, members in clusters.items():
@@ -502,11 +506,20 @@ class ConditionStore:
                 )
 
                 try:
-                    response = asyncio.get_event_loop().run_until_complete(
-                        complete(prompt),
-                    )
+                    loop = asyncio.get_running_loop()
                 except RuntimeError:
-                    # No running event loop — create one
+                    loop = None
+
+                if loop and loop.is_running():
+                    # Already in an async context (e.g. called from synthesize())
+                    # Run the coroutine in a separate thread to avoid
+                    # "cannot call run_until_complete from a running loop"
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        response = pool.submit(
+                            asyncio.run, complete(prompt)
+                        ).result(timeout=120)
+                else:
                     response = asyncio.run(complete(prompt))
 
                 # Parse response: each line is a group of indices
