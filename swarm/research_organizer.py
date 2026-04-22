@@ -593,7 +593,7 @@ def store_clone_findings(
             source_model=f"clone_{clone_result.angle}",
             source_run=run_id,
             iteration=wave,
-            user_query=clone_result.doubt,
+            strategy=clone_result.doubt,
         )
         stored += 1
 
@@ -632,7 +632,7 @@ def build_fresh_evidence_section(
     try:
         with store._lock:
             rows = store.conn.execute(
-                """SELECT fact, confidence, user_query as doubt, source_ref
+                """SELECT fact, confidence, strategy as doubt, source_ref
                    FROM conditions
                    WHERE source_type = 'clone_research'
                      AND angle = ?
