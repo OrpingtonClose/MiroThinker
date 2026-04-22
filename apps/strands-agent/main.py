@@ -39,12 +39,14 @@ import json
 import logging
 import os
 import queue
+import sys
 import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -1083,6 +1085,139 @@ async def _openai_multi(
         }],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     })
+
+
+# ── Eval runner endpoint ──────────────────────────────────────────────
+
+
+class EvalRequest(BaseModel):
+    suite: Literal["offline", "integ", "judge", "all"] = Field(
+        default="offline",
+        description="Which eval suite to run: 'offline', 'integ', 'judge', or 'all'",
+    )
+    filter: str = Field(
+        default="",
+        description="Pytest -k filter expression (e.g. 'budget' or 'test_simple')",
+    )
+
+
+@app.post("/run-evals")
+async def run_evals(body: EvalRequest | None = None):
+    """Run the eval suite and return structured results.
+
+    Suites:
+      - offline: no API keys needed (hooks, metrics, plugins, session)
+      - integ: requires VENICE_API_KEY (e2e agent, tool usage, multi-turn)
+      - judge: requires VENICE_API_KEY (LLM-as-judge quality scoring)
+      - all: run everything
+    """
+    import json as _json
+    import os as _os
+    import subprocess
+    import tempfile
+
+    if body is None:
+        body = EvalRequest()
+
+    agent_dir = os.path.dirname(os.path.abspath(__file__))
+    evals_dir = os.path.join(agent_dir, "evals")
+
+    cmd = [
+        sys.executable, "-m", "pytest",
+        "--tb=short", "-q",
+        "--override-ini=addopts=",
+        "--json-report",
+    ]
+
+    # Suite selection
+    if body.suite == "integ":
+        cmd.extend(["-m", "integ"])
+    elif body.suite == "judge":
+        cmd.extend(["-k", "llm_judge"])
+    elif body.suite == "offline":
+        cmd.extend(["-m", "not integ"])
+    # 'all' runs everything — no filter
+
+    if body.filter:
+        if body.suite == "judge":
+            # Combine with existing -k llm_judge to avoid override
+            cmd[-1] = f"llm_judge and ({body.filter})"
+        else:
+            cmd.extend(["-k", body.filter])
+
+    # Temp file for JSON report (delete=False so we control cleanup)
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
+        json_path = f.name
+    cmd.extend([f"--json-report-file={json_path}"])
+    cmd.append(evals_dir)
+
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                cwd=agent_dir,
+            ),
+        )
+
+        # Parse JSON report while the file still exists
+        report = None
+        try:
+            with open(json_path) as f:
+                report = _json.load(f)
+        except Exception:
+            pass
+
+        if report:
+            tests = report.get("tests", [])
+            summary = report.get("summary", {})
+            return {
+                "status": "passed" if summary.get("failed", 0) == 0 else "failed",
+                "suite": body.suite,
+                "summary": {
+                    "passed": summary.get("passed", 0),
+                    "failed": summary.get("failed", 0),
+                    "skipped": summary.get("skipped", 0),
+                    "total": summary.get("total", 0),
+                    "duration": round(summary.get("duration", 0), 2),
+                },
+                "tests": [
+                    {
+                        "name": t.get("nodeid", ""),
+                        "outcome": t.get("outcome", ""),
+                        "duration": round(t.get("duration", 0), 3),
+                        "message": (
+                            t.get("call", {}).get("longrepr", "")[:500]
+                            if t.get("outcome") == "failed"
+                            else ""
+                        ),
+                    }
+                    for t in tests
+                ],
+            }
+
+        # Fallback: return raw output if JSON report unavailable
+        return {
+            "status": "passed" if result.returncode == 0 else "failed",
+            "suite": body.suite,
+            "summary": {"returncode": result.returncode},
+            "stdout": result.stdout[-5000:] if result.stdout else "",
+            "stderr": result.stderr[-2000:] if result.stderr else "",
+        }
+
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "summary": {"error": "eval run timed out after 300s"}}
+    except Exception as exc:
+        return {"status": "error", "summary": {"error": str(exc)}}
+    finally:
+        try:
+            _os.unlink(json_path)
+        except Exception:
+            pass
 
 
 # ── Public activity log endpoint ─────────────────────────────────────
