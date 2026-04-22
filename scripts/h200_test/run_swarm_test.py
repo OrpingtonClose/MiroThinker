@@ -332,6 +332,42 @@ def main() -> None:
         "--waves", type=int, default=3,
         help="Max worker waves for MCP engine (default: 3)",
     )
+    parser.add_argument(
+        "--model", default="",
+        help="Override model name for MCP engine (e.g. huihui-ai/Qwen3.5-32B-abliterated)",
+    )
+    parser.add_argument(
+        "--api-base", default="",
+        help="Override vLLM API base URL (default: SWARM_API_BASE or localhost:8000)",
+    )
+    parser.add_argument(
+        "--store-path", default="",
+        help="Path to persistent DuckDB store for cumulative runs",
+    )
+    parser.add_argument(
+        "--run-number", type=int, default=0,
+        help="Run number for cumulative tracking (1-based)",
+    )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Resume from existing store (skip corpus re-ingestion if store has data)",
+    )
+    parser.add_argument(
+        "--convergence-threshold", type=int, default=5,
+        help="Stop wave iteration when new findings per wave drops below this",
+    )
+    parser.add_argument(
+        "--max-tokens", type=int, default=4096,
+        help="Max tokens per worker LLM response",
+    )
+    parser.add_argument(
+        "--temperature", type=float, default=0.3,
+        help="Sampling temperature for workers",
+    )
+    parser.add_argument(
+        "--report-max-tokens", type=int, default=8192,
+        help="Max tokens for the final report generation",
+    )
 
     args = parser.parse_args()
 
@@ -390,29 +426,52 @@ def main() -> None:
         # MCP engine: agent-workers with ConditionStore tools
         from swarm.mcp_engine import MCPSwarmConfig, MCPSwarmEngine
 
+        # Resolve store: --store-path for cumulative runs, else --db, else default
+        store_path = args.store_path or (args.db if args.db else "mcp_swarm.duckdb")
         if store is None:
-            store = ConditionStore(db_path="mcp_swarm.duckdb")
+            store = ConditionStore(db_path=store_path)
 
-        api_base = _get_api_base()
-        default_model = _get_model("SWARM_WORKER_MODEL", "huihui-ai/Qwen3.5-32B-abliterated")
+        api_base = args.api_base or _get_api_base()
+        default_model = args.model or _get_model(
+            "SWARM_WORKER_MODEL", "huihui-ai/Qwen3.5-32B-abliterated",
+        )
+
+        # Determine run number for cumulative tracking
+        run_number = args.run_number
+        if run_number == 0 and args.resume:
+            # Auto-detect run number from existing store metadata
+            with store._lock:
+                existing_max = store.conn.execute(
+                    "SELECT COALESCE(MAX(source_run), 0) FROM conditions"
+                ).fetchone()[0]
+            run_number = existing_max + 1
+            logger.info(
+                "auto_run_number=<%d> | resuming from existing store",
+                run_number,
+            )
 
         mcp_config = MCPSwarmConfig(
             max_workers=config.max_workers,
             max_waves=args.waves,
+            convergence_threshold=args.convergence_threshold,
             api_base=api_base,
             model=default_model,
-            max_tokens=config.worker_max_tokens,
-            temperature=config.worker_temperature,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
             required_angles=list(REQUIRED_ANGLE_LABELS),
+            report_max_tokens=args.report_max_tokens,
             enable_serendipity_wave=True,
+            store_path=store_path,
+            source_model=default_model,
+            source_run=run_number,
         )
 
         # The MCP engine needs a simple completion function for
         # angle detection and report generation (non-agent calls)
         complete_fn = make_complete_fn(
             "SWARM_WORKER_MODEL", default_model,
-            max_tokens=config.worker_max_tokens,
-            temperature=config.worker_temperature,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
         )
 
         engine = MCPSwarmEngine(
@@ -430,20 +489,27 @@ def main() -> None:
             output_path = Path(args.output_dir)
             output_path.mkdir(parents=True, exist_ok=True)
             timestamp = time.strftime("%Y%m%d_%H%M%S")
+            model_tag = default_model.split("/")[-1].replace("-", "_")
 
-            report_path = output_path / f"mcp_report_{timestamp}.md"
+            report_path = output_path / f"mcp_report_run{run_number}_{model_tag}_{timestamp}.md"
             with open(report_path, "w") as f:
                 f.write(result.report)
 
-            metrics_path = output_path / f"mcp_metrics_{timestamp}.json"
+            metrics_path = output_path / f"mcp_metrics_run{run_number}_{model_tag}_{timestamp}.json"
             with open(metrics_path, "w") as f:
                 json.dump({
                     "engine": "mcp",
+                    "source_model": default_model,
+                    "source_run": run_number,
+                    "store_path": store_path,
                     "total_elapsed_s": result.metrics.total_elapsed_s,
                     "total_waves": result.metrics.total_waves,
                     "total_findings_stored": result.metrics.total_findings_stored,
                     "total_tool_calls": result.metrics.total_tool_calls,
                     "findings_per_wave": result.metrics.findings_per_wave,
+                    "findings_before_run": result.metrics.findings_before_run,
+                    "findings_after_run": result.metrics.findings_after_run,
+                    "delta": result.metrics.delta,
                     "phase_times": result.metrics.phase_times,
                     "convergence_reason": result.metrics.convergence_reason,
                     "angles_detected": result.angles_detected,
@@ -451,11 +517,16 @@ def main() -> None:
                 }, f, indent=2)
 
             print(f"\n{'═' * 60}")
-            print(f"  MCP SWARM TEST COMPLETE")
+            print(f"  MCP SWARM TEST COMPLETE — Run {run_number}")
             print(f"{'═' * 60}")
+            print(f"  Model:              {default_model}")
+            print(f"  Store:              {store_path}")
+            print(f"  Run number:         {run_number}")
             print(f"  Elapsed:            {result.metrics.total_elapsed_s:.1f}s")
             print(f"  Waves:              {result.metrics.total_waves}")
-            print(f"  Findings stored:    {result.metrics.total_findings_stored}")
+            print(f"  Findings before:    {result.metrics.findings_before_run}")
+            print(f"  Findings after:     {result.metrics.findings_after_run}")
+            print(f"  Delta (new):        {result.metrics.delta}")
             print(f"  Tool calls:         {result.metrics.total_tool_calls}")
             print(f"  Findings/wave:      {result.metrics.findings_per_wave}")
             print(f"  Convergence:        {result.metrics.convergence_reason}")

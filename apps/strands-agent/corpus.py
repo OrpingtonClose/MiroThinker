@@ -185,7 +185,7 @@ class ConditionStore:
             self._next_id = result[0] + 1
 
     def _ensure_lineage_columns(self) -> None:
-        """Backfill phase/parent_ids columns on pre-existing databases.
+        """Backfill phase/parent_ids/source_model/source_run columns on pre-existing databases.
 
         Safe to call repeatedly; DuckDB's ``ADD COLUMN IF NOT EXISTS``
         handles the idempotency.
@@ -193,6 +193,8 @@ class ConditionStore:
         for col, typedef in (
             ("phase", "TEXT DEFAULT ''"),
             ("parent_ids", "TEXT DEFAULT ''"),
+            ("source_model", "TEXT DEFAULT ''"),
+            ("source_run", "INTEGER DEFAULT 0"),
         ):
             try:
                 self.conn.execute(

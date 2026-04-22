@@ -52,16 +52,50 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _build_system_prompt(angle: str, query: str) -> str:
+def _build_system_prompt(
+    angle: str,
+    query: str,
+    source_model: str = "",
+    source_run: int = 0,
+) -> str:
     """Build the system prompt for a worker agent.
 
     The worker is told it's a specialist with research tools.  It doesn't
     know about the swarm, other workers, or the ConditionStore.  It just
     has tools to search, discover, and store findings.
+
+    When running in cumulative mode (source_run > 1), the prompt tells the
+    worker that prior research exists and it should focus on what's MISSING
+    or WRONG rather than re-stating known facts.
     """
+    cumulative_note = ""
+    if source_run > 1:
+        cumulative_note = (
+            f"\nIMPORTANT: This research database already contains findings "
+            f"from {source_run - 1} previous research run(s) by other models. "
+            f"Use search_corpus and get_peer_insights to see what has already "
+            f"been discovered. Focus on what's MISSING, WRONG, or UNDER-EXPLORED "
+            f"— not on re-stating what's already known. When you find something "
+            f"that contradicts a previous finding, use check_contradictions and "
+            f"store the contradiction with your reasoning.\n"
+        )
+
+    external_tools_note = ""
+    # The prompt hints about external tools; the actual tools are injected
+    # via extra_tools in build_worker_tools
+    if source_model:
+        external_tools_note = (
+            f"\nYou may also have web search, academic database, forum, and "
+            f"content extraction tools available. Use them when the research "
+            f"database doesn't have what you need. Store everything you find "
+            f"externally as findings.\n"
+        )
+
     return (
         f"You are a {angle} specialist conducting deep research.\n\n"
-        f"RESEARCH QUERY: {query}\n\n"
+        f"RESEARCH QUERY: {query}\n"
+        f"{cumulative_note}"
+        f"{external_tools_note}\n"
         f"You have access to a research database with corpus data and "
         f"findings from other specialists. Your job:\n\n"
         f"1. READ your assigned corpus section using get_corpus_section "
@@ -98,6 +132,9 @@ def create_worker_agent(
     max_tokens: int = 4096,
     temperature: float = 0.3,
     phase: str = "worker",
+    extra_tools: list[Any] | None = None,
+    source_model: str = "",
+    source_run: int = 0,
 ) -> Agent:
     """Create a Strands Agent configured as a swarm worker.
 
@@ -116,6 +153,9 @@ def create_worker_agent(
         max_tokens: Max tokens per LLM response.
         temperature: Sampling temperature.
         phase: Current swarm phase for event attribution.
+        extra_tools: Additional tools (e.g. external search) for workers.
+        source_model: Model identifier for source attribution.
+        source_run: Run number for cumulative tracking.
 
     Returns:
         Configured Strands Agent ready to run.
@@ -125,6 +165,9 @@ def create_worker_agent(
         worker_angle=angle,
         worker_id=worker_id,
         phase=phase,
+        extra_tools=extra_tools,
+        source_model=source_model,
+        source_run=source_run,
     )
 
     model_provider = OpenAIModel(
@@ -139,7 +182,11 @@ def create_worker_agent(
         },
     )
 
-    system_prompt = _build_system_prompt(angle, query)
+    system_prompt = _build_system_prompt(
+        angle, query,
+        source_model=source_model,
+        source_run=source_run,
+    )
 
     agent = Agent(
         model=model_provider,
