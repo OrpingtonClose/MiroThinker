@@ -642,7 +642,7 @@ class MCPSwarmEngine:
             f"You are writing a comprehensive research report.\n\n"
             f"RESEARCH QUERY: {query}\n\n"
             f"Store contains {stats['total_rows']} total entries across "
-            f"{stats.get('angles', 'multiple')} angles. "
+            f"{len(stats.get('by_angle', {}))} angles. "
             f"Below are the highest-confidence findings from "
             f"{len(assignments)} specialist researchers.\n\n"
             f"{store_text}\n\n"
