@@ -80,9 +80,6 @@ def build_worker_tools(
     worker_angle: str,
     worker_id: str,
     phase: str = "worker",
-    extra_tools: list[Any] | None = None,
-    source_model: str = "",
-    source_run: int = 0,
 ) -> list[Any]:
     """Build a set of @tool-decorated functions bound to a specific worker.
 
@@ -94,9 +91,6 @@ def build_worker_tools(
         worker_angle: This worker's assigned research angle.
         worker_id: Unique identifier for this worker.
         phase: Current swarm phase (for event logging).
-        extra_tools: Additional tools (e.g. external search) to append.
-        source_model: Model identifier for source attribution in cumulative runs.
-        source_run: Run number for cumulative tracking.
 
     Returns:
         List of tool-decorated callables ready for a Strands Agent.
@@ -295,16 +289,10 @@ def build_worker_tools(
 
         confidence = max(0.0, min(1.0, confidence))
 
-        metadata_dict: dict[str, Any] = {
+        metadata = json.dumps({
             "worker_id": worker_id,
-        }
-        if reasoning:
-            metadata_dict["reasoning"] = reasoning
-        if source_model:
-            metadata_dict["source_model"] = source_model
-        if source_run:
-            metadata_dict["source_run"] = source_run
-        metadata = json.dumps(metadata_dict)
+            "reasoning": reasoning,
+        }) if reasoning else ""
 
         with store._lock:
             cid = store._next_id
@@ -315,16 +303,13 @@ def build_worker_tools(
                 """INSERT INTO conditions
                    (id, fact, source_url, source_type, row_type,
                     consider_for_use, confidence, angle, strategy,
-                    created_at, phase, verification_status,
-                    source_model, source_run)
+                    created_at, phase, verification_status)
                    VALUES (?, ?, ?, 'worker_analysis', 'finding',
-                           TRUE, ?, ?, ?, ?, ?, 'speculative',
-                           ?, ?)""",
+                           TRUE, ?, ?, ?, ?, ?, 'speculative')""",
                 [
                     cid, fact.strip(), evidence_source,
                     confidence, worker_angle, metadata,
                     now, phase,
-                    source_model, source_run,
                 ],
             )
 
@@ -521,7 +506,7 @@ def build_worker_tools(
                          f"{remaining} remaining]\n\n{chunk}"}],
         }
 
-    tools: list[Any] = [
+    return [
         search_corpus,
         get_peer_insights,
         store_finding,
@@ -529,6 +514,3 @@ def build_worker_tools(
         get_research_gaps,
         get_corpus_section,
     ]
-    if extra_tools:
-        tools.extend(extra_tools)
-    return tools

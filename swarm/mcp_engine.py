@@ -79,12 +79,6 @@ class MCPSwarmMetrics:
     total_elapsed_s: float = 0.0
     convergence_reason: str = ""
     worker_results: list[dict[str, Any]] = field(default_factory=list)
-    # Cumulative tracking
-    findings_before_run: int = 0
-    findings_after_run: int = 0
-    delta: int = 0
-    source_model: str = ""
-    source_run: int = 0
 
 
 @dataclass
@@ -112,11 +106,6 @@ class MCPSwarmConfig:
         required_angles: Angles that must be covered regardless of corpus.
         report_max_tokens: Max tokens for the report generation call.
         enable_serendipity_wave: Run a final cross-domain discovery wave.
-        store_path: Path to persistent DuckDB file for cumulative runs.
-        source_model: Model identifier tag for source attribution.
-        source_run: Run number for cumulative tracking.
-        extra_tools: Additional tools (e.g. external search) for workers.
-        serendipity_temperature: Sampling temperature for the serendipity wave.
     """
 
     max_workers: int = 7
@@ -130,11 +119,6 @@ class MCPSwarmConfig:
     required_angles: list[str] = field(default_factory=list)
     report_max_tokens: int = 8192
     enable_serendipity_wave: bool = True
-    store_path: str = ""
-    source_model: str = ""
-    source_run: int = 0
-    extra_tools: list[Any] = field(default_factory=list)
-    serendipity_temperature: float = 0.5
 
 
 class MCPSwarmEngine:
@@ -183,17 +167,8 @@ class MCPSwarmEngine:
             MCPSwarmResult with report and metrics.
         """
         t0 = time.monotonic()
-        metrics = MCPSwarmMetrics(
-            source_model=self.config.source_model,
-            source_run=self.config.source_run,
-        )
+        metrics = MCPSwarmMetrics()
         config = self.config
-
-        # Snapshot store size before this run (for cumulative delta tracking)
-        with self.store._lock:
-            metrics.findings_before_run = self.store.conn.execute(
-                "SELECT COUNT(*) FROM conditions WHERE consider_for_use = TRUE"
-            ).fetchone()[0]
 
         async def _emit(event: dict) -> None:
             if on_event is not None:
@@ -296,9 +271,6 @@ class MCPSwarmEngine:
                     max_tokens=config.max_tokens,
                     temperature=config.temperature,
                     phase=phase,
-                    extra_tools=config.extra_tools,
-                    source_model=config.source_model,
-                    source_run=config.source_run,
                 )
                 agents.append((agent, a))
 
@@ -382,11 +354,8 @@ class MCPSwarmEngine:
                 model=config.model,
                 api_key=config.api_key,
                 max_tokens=config.max_tokens,
-                temperature=config.serendipity_temperature,
+                temperature=0.5,  # slightly higher for creativity
                 phase="serendipity",
-                extra_tools=config.extra_tools,
-                source_model=config.source_model,
-                source_run=config.source_run,
             )
 
             serendipity_result = await run_worker_agent(
@@ -412,20 +381,6 @@ class MCPSwarmEngine:
                 "elapsed_s": round(metrics.phase_times["serendipity"], 1),
             })
 
-        # ── Cumulative delta tracking ────────────────────────────────
-        with self.store._lock:
-            metrics.findings_after_run = self.store.conn.execute(
-                "SELECT COUNT(*) FROM conditions WHERE consider_for_use = TRUE"
-            ).fetchone()[0]
-        metrics.delta = metrics.findings_after_run - metrics.findings_before_run
-
-        logger.info(
-            "source_model=<%s>, source_run=<%d>, before=<%d>, after=<%d>, delta=<%d> | "
-            "cumulative run complete",
-            config.source_model, config.source_run,
-            metrics.findings_before_run, metrics.findings_after_run, metrics.delta,
-        )
-
         # ── Report generation ────────────────────────────────────────
         phase_start = time.monotonic()
         report = await self._generate_report(query, assignments)
@@ -437,9 +392,6 @@ class MCPSwarmEngine:
             "phase": "complete",
             "total_elapsed_s": round(metrics.total_elapsed_s, 1),
             "total_findings": metrics.total_findings_stored,
-            "findings_before_run": metrics.findings_before_run,
-            "findings_after_run": metrics.findings_after_run,
-            "delta": metrics.delta,
         })
 
         return MCPSwarmResult(
