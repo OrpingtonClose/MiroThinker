@@ -245,7 +245,7 @@ async def run_single_experiment(
             "experiment=<%s>, env=<%s> | API key not found",
             experiment.name, experiment.api_key_env,
         )
-        return {"error": f"Missing {experiment.api_key_env}"}
+        return {"experiment": experiment.name, "error": f"Missing {experiment.api_key_env}"}
 
     # Create fresh store for this experiment
     store = ConditionStore(db_path="")  # in-memory
