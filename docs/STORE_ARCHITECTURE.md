@@ -40,13 +40,13 @@ Raw corpus paragraph (parent_id=NULL)
 | `finding` | Worker-synthesized claim or extracted fact | Source `raw` or `finding` row |
 | `thought` | Intermediate reasoning step | Source row that prompted it |
 | `insight` | Cross-domain connection or synthesis | Source finding(s) |
-| `tool_call` | Audit record of a tool invocation | `NULL` (standalone event) |
 | `dedup_decision` | Record of a compaction judgment | Row that was judged |
 | `relevance_score` | Per-angle relevance assessment | Row that was scored |
 | `atom` | Disaggregated atomic claim from a larger blob | Source blob row |
 | `similarity` | Detected similarity between two findings | One finding (`related_id` → other) |
 | `contradiction` | Detected contradiction between findings | One finding (`related_id` → other) |
 | `synthesis` | Merged/summarized knowledge briefing | Representative finding from angle |
+| `worker_transcript` | Full conversation transcript from a worker's reasoning session | `NULL` (audit record) |
 
 ### Key Columns for Lineage
 
@@ -56,16 +56,138 @@ related_id      INTEGER   -- Secondary relationship (e.g., the "other" in a dedu
 source_model    TEXT      -- Which model architecture produced this row
 source_run      TEXT      -- Which run produced this row (e.g., "run_20250416_120000")
 source_type     TEXT      -- How this row was created (e.g., "worker_analysis", "corpus_ingestion", "compaction")
-phase           TEXT      -- Swarm phase when created (e.g., "worker", "serendipity", "compact")
+phase           TEXT      -- Swarm phase when created (e.g., "worker", "serendipity", "compact", "catalogue")
 ```
+
+## Worker Architecture: Tool-Free Bees
+
+### Workers Have No Tools
+
+Workers are pure reasoning agents. They receive a **data package** — curated, angle-relevant material injected into their initial prompt — and reason over it. They don't search the store, they don't store findings, they don't call any tools. They just think.
+
+The engine (orchestrator) prepares data packages before each wave:
+1. Query the store for material relevant to the worker's angle
+2. Include the latest rolling knowledge summary for the angle
+3. Include any cross-domain connections flagged for the angle
+4. Inject this package into the worker's system prompt or initial context
+
+The worker reasons over the package and produces text. That's it.
+
+### Why Tool-Free?
+
+- **Context purity**: Tool calls consume context window space and change reasoning behavior. A worker reasoning freely about insulin pharmacokinetics shouldn't be interrupted by `search_corpus` return formatting.
+- **Audit clarity**: When tools call the store, you can't distinguish the worker's reasoning from tool orchestration noise. With tool-free workers, the worker's output IS the reasoning — pure signal.
+- **Architecture simplicity**: Workers don't need the Strands Agent tool-calling loop. They can be raw `llm_complete` calls with rich context, which is simpler and cheaper than a full Agent.
+
+### Extracting Findings from Worker Reasoning
+
+A **Strands hook observer** attached to each worker captures output without modifying context:
+
+- **`AfterModelCallEvent`** — fires after every model response. `stop_response.message` contains the full response text.
+- **`MessageAddedEvent`** — fires when any message is added to conversation. Captures the full dialogue.
+- **`AfterInvocationEvent`** — fires when the worker finishes. `result` contains the final `AgentResult`.
+
+The observer:
+1. Captures the worker's complete conversation transcript (stored as `worker_transcript` row for audit)
+2. The orchestrator later extracts claims from this transcript via the Flock-with-cloned-context pattern (see below)
+3. Extracted claims are stored as `finding` rows with `parent_id` → transcript row
+
+The worker never knows this is happening. Its context stays pristine.
+
+## Cloned Context as Flock Backend: The Expert LLM Pattern
+
+### The Core Insight
+
+Each worker accumulates angle-specific expertise in its conversation history. This expertise is valuable beyond just the worker's reasoning output — it can drive store operations (disaggregation, relevance scoring, dedup judgments) with domain-specific intelligence.
+
+But you don't modify the worker's context to do this. Instead, you **clone the worker's context** and use it as the LLM backend for Flock SQL queries.
+
+### How It Works
+
+Flock's `llm_complete`/`llm_filter` needs an LLM to drive it. Normally that's a generic endpoint. Instead, you point Flock at a **session proxy** that prepends the worker's conversation history to every request:
+
+```
+Orchestrator runs Flock SQL
+    │
+    ▼
+DuckDB executes llm_filter("is this relevant to insulin timing?")
+    │
+    ▼
+Flock sends request to session proxy
+    │
+    ▼
+Session proxy prepends insulin worker's full conversation history
+    │
+    ▼
+vLLM receives: [worker's conversation] + [Flock's question]
+    │
+    ▼
+vLLM prefix cache: conversation already cached from prior calls → fast
+    │
+    ▼
+Response: domain-expert judgment informed by full angle context
+    │
+    ▼
+Orchestrator stores result as row with parent_id lineage
+```
+
+### The Session Proxy
+
+A thin FastAPI service (~100 lines) that sits between Flock and vLLM:
+
+```python
+# Maintains per-worker conversation contexts
+sessions: dict[str, list[dict]] = {}
+
+@app.post("/v1/chat/completions")
+async def completions(request: ChatRequest):
+    session_id = request.headers.get("X-Session-Id")
+    if session_id and session_id in sessions:
+        # Prepend the worker's conversation as context
+        messages = sessions[session_id] + request.messages
+    else:
+        messages = request.messages
+    # Forward to vLLM
+    return await vllm_client.chat(messages=messages, ...)
+```
+
+### vLLM Prefix Caching
+
+vLLM has built-in prefix caching. When the proxy sends the worker's conversation as a prefix:
+- **First call**: vLLM computes the full KV cache for the conversation (expensive)
+- **Subsequent calls**: vLLM detects the same prefix, reuses the cached KV states (nearly free)
+
+On the 8×H200, each GPU serves one model. The proxy maintains conversation histories for each worker. Flock calls route through the proxy, vLLM caches the KV states. No extra infrastructure needed.
+
+### The Flow
+
+After each research wave:
+
+1. **Worker reasons** → produces text (tool-free)
+2. **Hook observer captures** → stores transcript as audit row
+3. **Orchestrator clones worker context** → registers conversation with session proxy
+4. **Orchestrator runs Flock SQL** → `llm_filter`, `llm_complete` route through the cloned context
+5. **Cloned context answers** with domain expertise:
+   - "Is this finding relevant to my angle?" → relevance scoring
+   - "Break this paragraph into atomic claims" → disaggregation
+   - "Are these two findings the same claim?" → semantic dedup
+6. **All results stored** as rows with `parent_id` lineage
+7. **Real worker untouched** → continues in next wave with fresh data package
+
+### Why This Pattern Is Powerful
+
+- The worker's accumulated context becomes a **reusable expert resource** — not just for its own reasoning, but for driving intelligent store operations
+- Each worker is the **relevance oracle for its own angle** — the insulin specialist scores insulin relevance, the hematology specialist scores hematology relevance
+- The real worker's context is **never polluted** — the clone is disposable, the original continues unmodified
+- **Self-improvement**: the audit trail of extracted claims vs. full conversation transcripts enables measuring extraction recall and improving over time
 
 ## Data Flow: No Truncation, Smart Retrieval
 
 ### The Problem with Truncation
 
-Truncation (cutting off tool returns at N characters) destroys information and breaks the audit trail. If a worker's `search_corpus` call returns 15 results but the tool truncated 85 more, you cannot audit:
+Truncation (cutting off tool returns at N characters) destroys information and breaks the audit trail. If a data package was truncated, you cannot audit:
 - What the worker could have seen but didn't
-- Whether the truncated results contained the critical connection
+- Whether the truncated material contained the critical connection
 - Whether a different truncation boundary would have changed the worker's conclusions
 
 ### The Solution: Disaggregation + Per-Angle Relevance Ranking
@@ -73,14 +195,14 @@ Truncation (cutting off tool returns at N characters) destroys information and b
 Instead of returning large blobs and truncating, the system:
 
 1. **Disaggregates** large findings into atomic claims (each stored as a row with `parent_id` → source)
-2. **Ranks by per-angle relevance** — each worker has a different angle, so the same query returns different results for different workers
-3. **Returns complete atoms** — no individual result is ever cut off; the worker controls how many results via `max_results`
+2. **Ranks by per-angle relevance** — scored by the cloned worker context via Flock (the domain expert)
+3. **Returns complete atoms** — no individual result is ever cut off
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │                   ConditionStore                     │
 │                                                     │
-│  Raw paragraphs ──► Atoms (via Flock query agent)   │
+│  Raw paragraphs ──► Atoms (via orchestrator + Flock)│
 │       │                    │                        │
 │       │              ┌─────┴──────┐                 │
 │       │              │ parent_id  │                 │
@@ -94,42 +216,29 @@ Instead of returning large blobs and truncating, the system:
 │                  └──────────────────┘               │
 └──────────────────────┬──────────────────────────────┘
                        │
+        Orchestrator runs Flock SQL per angle,
+        routed through cloned worker contexts
+                       │
           ┌────────────┼────────────┐
           │            │            │
-    Worker A       Worker B    Worker C
-    (insulin)    (hematology) (ancillaries)
+    Clone A        Clone B     Clone C
+    (insulin       (hematology (ancillaries
+     context)       context)    context)
           │            │            │
      Relevance    Relevance    Relevance
-     scored for   scored for   scored for
+     scored by    scored by    scored by
      insulin      hematology   ancillaries
+     expert       expert       expert
           │            │            │
      Top-N atoms  Top-N atoms  Top-N atoms
      (complete,   (complete,   (complete,
       no cutoff)   no cutoff)   no cutoff)
+          │            │            │
+          ▼            ▼            ▼
+     Data package  Data package Data package
+     for Worker A  for Worker B for Worker C
+     (next wave)   (next wave)  (next wave)
 ```
-
-### The Flock Query Agent
-
-A dedicated agent **outside the swarm** that:
-
-1. Reads raw findings/paragraphs from the store
-2. Uses Flock `llm_complete` in SQL to break them into atomic claims
-3. Stores each atom as a new row: `row_type='atom'`, `parent_id` → source
-4. Scores relevance per-angle using Flock `llm_filter` or keyword overlap
-5. Stores relevance scores as rows: `row_type='relevance_score'`, `parent_id` → atom
-
-This agent runs **between waves** or on a schedule. It does not consume worker context — it has its own LLM calls via Flock.
-
-### Worker Tool Behavior
-
-When a worker calls `search_corpus(query, max_results=15)`:
-
-1. SQL query fetches atoms + findings matching the query terms
-2. Results ranked by relevance to **this worker's specific angle**
-3. Top `max_results` returned — each result is a complete atomic claim, never truncated
-4. The tool call itself is logged as a `tool_call` row in the store
-
-The worker controls volume via `max_results`. The system controls quality via relevance ranking. No information is destroyed.
 
 ## Compaction: Decisions Are Data
 
@@ -151,16 +260,16 @@ For each duplicate group:
 - Mark others `consider_for_use = FALSE`
 - Store a `dedup_decision` row: `parent_id` → obsoleted row, `related_id` → kept row, `obsolete_reason = 'exact_duplicate'`
 
-### Phase 2: Semantic Dedup (LLM-Assisted)
+### Phase 2: Semantic Dedup (LLM-Assisted via Cloned Context)
 
-Called by an external agent (not swarm workers):
+The orchestrator runs Flock SQL with the cloned worker context as the LLM backend:
 
 1. Pre-cluster candidates by shared keywords within angle (union-find, no cartesian product)
-2. For each cluster, one LLM call: "which of these are the same claim?"
+2. For each cluster, Flock `llm_filter` driven by the angle's cloned context: "are these the same claim?"
 3. Mark lower-confidence duplicates obsolete
 4. Store each decision: `row_type='dedup_decision'`, `parent_id` → obsoleted, `related_id` → keeper, `obsolete_reason = 'semantic_duplicate'`
 
-The LLM's judgment is part of the audit trail. You can query: "show me every finding that was removed by semantic dedup and what it was compared against."
+The domain expert's judgment drives dedup — the insulin specialist decides whether two insulin claims are truly identical, not a generic model.
 
 ## Corpus Fingerprinting
 
@@ -176,7 +285,7 @@ CREATE TABLE corpus_fingerprints (
 )
 ```
 
-Before ingestion, compute `SHA256(corpus_text)` and check `corpus_fingerprints`. If present, skip. The fingerprint check itself can be logged.
+Before ingestion, compute `SHA256(corpus_text)` and check `corpus_fingerprints`. If present, skip.
 
 ## Source Provenance
 
@@ -267,23 +376,25 @@ CREATE TABLE knowledge_summaries (
 )
 ```
 
-Workers call `get_knowledge_briefing()` to see compressed state instead of reading every individual finding. The summaries are a **view** — the underlying findings remain intact in `conditions`.
+Summaries are injected into worker data packages so workers see compressed state instead of raw finding lists. The summaries are a **view** — the underlying findings remain intact in `conditions`.
 
 ## Design Invariants
 
-1. **No truncation.** Ever. Workers control volume via `max_results`. The system controls quality via relevance ranking.
+1. **No truncation.** Ever. The orchestrator controls data package size via disaggregation + relevance ranking. No individual atom is ever cut off.
 2. **No data modification.** Raw corpus, findings, atoms — all immutable once written. `consider_for_use = FALSE` hides but never deletes.
-3. **Every operation is a row.** Tool calls, dedup decisions, relevance scores, atomisation — all stored with `parent_id` lineage.
+3. **Every operation is a row.** Dedup decisions, relevance scores, atomisation, conversation transcripts — all stored with `parent_id` lineage.
 4. **`parent_id` connects everything.** Any row can be traced back through the DAG to its ultimate source.
-5. **Per-angle relevance.** The same query returns different results for different workers because relevance is scored against the worker's specific research angle.
-6. **External agents handle store hygiene.** Compaction, disaggregation, and relevance scoring are done by agents outside the swarm. Workers only read and write findings.
+5. **Workers are tool-free.** They receive data packages and reason. They don't interact with the store directly.
+6. **Cloned context drives Flock.** The orchestrator uses cloned worker contexts as expert LLM backends for store operations. The real worker is never modified.
+7. **The orchestrator runs all store operations.** Compaction, disaggregation, relevance scoring, data package preparation — all orchestrator-level, never worker-level.
 
 ## Implementation Files
 
 | File | Responsibility |
 |---|---|
 | `apps/strands-agent/corpus.py` | `ConditionStore` — schema, reads, writes, compaction, fingerprinting |
-| `swarm/worker_tools.py` | `@tool`-decorated functions workers use to interact with the store |
-| `swarm/mcp_engine.py` | Orchestrator — calls compaction, rolling summaries between waves |
-| `swarm/agent_worker.py` | Factory for creating Strands Agent workers with store tools |
+| `swarm/mcp_engine.py` | Orchestrator — prepares data packages, runs Flock queries, calls compaction between waves |
+| `swarm/agent_worker.py` | Factory for creating tool-free worker agents |
+| `swarm/worker_observer.py` | Strands hook provider that captures worker conversation transcripts |
+| `swarm/session_proxy.py` | FastAPI proxy that prepends cloned worker context for vLLM prefix caching |
 | `scripts/h200_test/run_swarm_test.py` | CLI runner exposing all hyperparameters |
