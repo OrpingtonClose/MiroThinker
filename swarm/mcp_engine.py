@@ -388,7 +388,14 @@ class MCPSwarmEngine:
             if (config.compact_every_n_waves > 0
                     and wave % config.compact_every_n_waves == 0):
                 compact_start = time.monotonic()
-                stats = self.store.compact(complete=self.complete)
+                try:
+                    stats = self.store.compact(complete=self.complete)
+                except Exception as exc:
+                    logger.warning(
+                        "wave=<%d>, error=<%s> | compaction failed, continuing",
+                        wave, exc,
+                    )
+                    stats = {"exact_duplicates_removed": 0, "semantic_duplicates_removed": 0}
                 compact_time = time.monotonic() - compact_start
                 total_removed = (
                     stats.get("exact_duplicates_removed", 0)
