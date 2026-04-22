@@ -357,7 +357,10 @@ def _parse_findings_json(
         if not fact or len(fact) < 10:
             continue
 
-        confidence = float(item.get("confidence", 0.7))
+        try:
+            confidence = float(item.get("confidence", 0.7))
+        except (TypeError, ValueError):
+            confidence = 0.7
         confidence = max(0.0, min(1.0, confidence))
 
         tags = item.get("tags", [])

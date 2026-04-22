@@ -383,20 +383,12 @@ def main() -> None:
         help="Run identifier for provenance (e.g. run_042)",
     )
     parser.add_argument(
-        "--max-return-chars", type=int, default=6000,
-        help="Hard ceiling on chars any tool call returns (default: 6000)",
-    )
-    parser.add_argument(
         "--compact-every", type=int, default=3,
         help="Run store compaction every N waves (0 = disable, default: 3)",
     )
     parser.add_argument(
         "--no-rolling-summaries", action="store_true",
         help="Disable rolling knowledge summaries between waves",
-    )
-    parser.add_argument(
-        "--report-max-chars", type=int, default=24000,
-        help="Max prompt chars for report generation (default: 24000)",
     )
 
     args = parser.parse_args()
