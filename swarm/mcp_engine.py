@@ -7,28 +7,27 @@ Replaces the single-shot prompt-stuffing architecture with agent-workers
 that explore the corpus via tool calls.  Each worker is a Strands Agent
 with tools to search, discover peer findings, and store its analysis.
 
-Key differences from the original GossipSwarm:
-- **No context window constraint**: Workers pull data on demand via tools.
-  A 32K context model can process a 10MB corpus — it just makes more
-  tool calls.
-- **No queen merge**: Workers write findings directly to the store.
-  The final report is a separate task that queries the store.
-- **No explicit gossip rounds**: Workers discover peer findings via
-  get_peer_insights tool.  Cross-pollination happens organically as
-  workers store findings that become visible to other workers' searches.
-- **Convergence via store**: The engine runs workers in waves.  After
-  each wave, it checks whether new findings are still being stored.
-  When the store stops growing, the swarm has converged.
+24-hour continuous operation:
+    - Corpus fingerprinting: skip re-ingestion if corpus already in store
+    - Token budgets: every tool call return is capped to prevent overflow
+    - Source provenance: every finding tagged with model + run number
+    - Store compaction: periodic deduplication to prevent unbounded growth
+    - Rolling summarization: knowledge briefings compress prior runs
+    - Report generation with token budget: prompt capped regardless of
+      store size
 
 Architecture:
 
     ┌─────────────────────────────────────────────────┐
     │              MCPSwarmEngine                       │
+    │  0. Check corpus fingerprint (skip if seen)     │
     │  1. Ingest corpus into ConditionStore            │
     │  2. Create N agent-workers (one per angle)       │
     │  3. Run workers in parallel waves                │
     │  4. Check convergence (store growth rate)        │
-    │  5. Generate report from store                   │
+    │  5. Compact store (periodic dedup)               │
+    │  6. Generate rolling summaries                   │
+    │  7. Generate report from store                   │
     └──────────────┬──────────────────────────────────┘
                    │
         ┌──────────┼──────────┐
@@ -45,6 +44,7 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
@@ -107,6 +107,12 @@ class MCPSwarmConfig:
         required_angles: Angles that must be covered regardless of corpus.
         report_max_tokens: Max tokens for the report generation call.
         enable_serendipity_wave: Run a final cross-domain discovery wave.
+        source_model: Model name for provenance tracking.
+        source_run: Run identifier (e.g. "run_042") for provenance.
+        max_return_chars: Hard ceiling on characters any tool call returns.
+        compact_every_n_waves: Run store compaction after this many waves.
+        enable_rolling_summaries: Generate knowledge briefings after waves.
+        report_max_chars: Max prompt chars for report generation.
     """
 
     max_workers: int = 7
@@ -120,6 +126,12 @@ class MCPSwarmConfig:
     required_angles: list[str] = field(default_factory=list)
     report_max_tokens: int = 8192
     enable_serendipity_wave: bool = True
+    source_model: str = ""
+    source_run: str = ""
+    max_return_chars: int = 6000
+    compact_every_n_waves: int = 3
+    enable_rolling_summaries: bool = True
+    report_max_chars: int = 24000
 
 
 class MCPSwarmEngine:
@@ -153,11 +165,14 @@ class MCPSwarmEngine:
     ) -> MCPSwarmResult:
         """Run the MCP swarm pipeline.
 
-        1. Ingest corpus into ConditionStore
+        0. Check corpus fingerprint (skip re-ingestion if already seen)
+        1. Ingest corpus into ConditionStore (only if new)
         2. Detect angles and assign sections
         3. Run agent-workers in parallel waves
         4. Check convergence between waves
-        5. Generate report from store
+        5. Compact store periodically
+        6. Generate rolling summaries
+        7. Generate report from store
 
         Args:
             corpus: Full text corpus to synthesize.
@@ -179,15 +194,20 @@ class MCPSwarmEngine:
                 except Exception:
                     pass
 
-        # ── Phase 0: Corpus ingestion ────────────────────────────────
+        # ── Phase 0: Corpus ingestion (with fingerprint check) ───────
         phase_start = time.monotonic()
+
+        # Compute corpus fingerprint to prevent re-ingestion
+        corpus_hash = hashlib.sha256(corpus.encode()).hexdigest()[:16]
+        corpus_already_ingested = self.store.has_corpus_hash(corpus_hash)
+
         sections = detect_sections(corpus)
         logger.info(
-            "sections=<%d>, corpus_chars=<%d> | corpus analysis complete",
-            len(sections), len(corpus),
+            "sections=<%d>, corpus_chars=<%d>, already_ingested=<%s> | corpus analysis complete",
+            len(sections), len(corpus), corpus_already_ingested,
         )
 
-        # Ingest each section as raw data with angle attribution
+        # Detect angles (always needed for worker assignment)
         required_angles = list(config.required_angles)
         if not required_angles:
             required_angles = await extract_required_angles(
@@ -214,15 +234,35 @@ class MCPSwarmEngine:
             max_workers=config.max_workers,
         )
 
-        # Ingest assigned sections into the store
-        for a in assignments:
-            self.store.ingest_raw(
-                raw_text=a.raw_content,
-                source_type="corpus_section",
-                source_ref=f"section_{a.worker_id}",
-                angle=a.angle,
-                iteration=0,
-                user_query=query,
+        # Only ingest if corpus hasn't been seen before
+        if not corpus_already_ingested:
+            for a in assignments:
+                self.store.ingest_raw(
+                    raw_text=a.raw_content,
+                    source_type="corpus_section",
+                    source_ref=f"section_{a.worker_id}",
+                    angle=a.angle,
+                    iteration=0,
+                    user_query=query,
+                )
+            # Register fingerprint so future runs skip ingestion
+            paragraph_count = sum(
+                len(a.raw_content.split("\n\n")) for a in assignments
+            )
+            self.store.register_corpus_hash(
+                fingerprint=corpus_hash,
+                source=f"corpus_{len(corpus)}_chars",
+                char_count=len(corpus),
+                paragraph_count=paragraph_count,
+            )
+            logger.info(
+                "corpus_hash=<%s>, paragraphs=<%d> | corpus ingested and fingerprinted",
+                corpus_hash, paragraph_count,
+            )
+        else:
+            logger.info(
+                "corpus_hash=<%s> | corpus already in store, skipping re-ingestion",
+                corpus_hash,
             )
 
         metrics.total_workers = len(assignments)
@@ -233,16 +273,16 @@ class MCPSwarmEngine:
             "phase": "ingestion_complete",
             "workers": len(assignments),
             "angles": [a.angle for a in assignments],
+            "corpus_skipped": corpus_already_ingested,
         })
 
         logger.info(
-            "workers=<%d>, angles=<%s> | corpus ingested, starting agent waves",
+            "workers=<%d>, angles=<%s> | starting agent waves",
             len(assignments), [a.angle for a in assignments],
         )
 
         # ── Phase 1-N: Worker waves ──────────────────────────────────
-        # Each wave: create agent-workers, run in parallel, count new findings.
-        # Stop when findings per wave drops below convergence threshold.
+        wave = 0
         for wave in range(1, config.max_waves + 1):
             phase_start = time.monotonic()
             phase = f"wave_{wave}"
@@ -278,7 +318,9 @@ class MCPSwarmEngine:
                     max_tokens=config.max_tokens,
                     temperature=config.temperature,
                     phase=phase,
-                    source_run=run_id,
+                    max_return_chars=config.max_return_chars,
+                    source_model=config.source_model or config.model,
+                    source_run=config.source_run or run_id,
                 )
                 agents.append((agent, a))
 
@@ -317,7 +359,13 @@ class MCPSwarmEngine:
 
             new_findings = findings_after - findings_before
             metrics.findings_per_wave.append(new_findings)
-            metrics.total_findings_stored = findings_after
+
+            # Track total active findings (all types)
+            with self.store._lock:
+                total_active = self.store.conn.execute(
+                    "SELECT COUNT(*) FROM conditions WHERE consider_for_use = TRUE"
+                ).fetchone()[0]
+            metrics.total_findings_stored = total_active
 
             wave_time = time.monotonic() - phase_start
             metrics.phase_times[f"wave_{wave}"] = wave_time
@@ -327,21 +375,47 @@ class MCPSwarmEngine:
                 "phase": f"wave_{wave}_complete",
                 "wave": wave,
                 "new_findings": new_findings,
-                "total_findings": findings_after,
+                "total_findings": total_active,
                 "elapsed_s": round(wave_time, 1),
             })
 
             logger.info(
                 "wave=<%d>, new_findings=<%d>, total=<%d>, elapsed_s=<%.1f> | wave complete",
-                wave, new_findings, findings_after, wave_time,
+                wave, new_findings, total_active, wave_time,
             )
+
+            # Periodic compaction to prevent unbounded store growth
+            if (config.compact_every_n_waves > 0
+                    and wave % config.compact_every_n_waves == 0):
+                compact_start = time.monotonic()
+                try:
+                    stats = self.store.compact(complete=self.complete)
+                except Exception as exc:
+                    logger.warning(
+                        "wave=<%d>, error=<%s> | compaction failed, continuing",
+                        wave, exc,
+                    )
+                    stats = {"exact_duplicates_removed": 0, "semantic_duplicates_removed": 0}
+                compact_time = time.monotonic() - compact_start
+                total_removed = (
+                    stats.get("exact_duplicates_removed", 0)
+                    + stats.get("semantic_duplicates_removed", 0)
+                )
+                logger.info(
+                    "wave=<%d>, exact_dupes=<%d>, semantic_dupes=<%d>, compact_time=<%.1f>s | compaction complete",
+                    wave,
+                    stats.get("exact_duplicates_removed", 0),
+                    stats.get("semantic_duplicates_removed", 0),
+                    compact_time,
+                )
+                metrics.phase_times[f"compact_wave_{wave}"] = compact_time
 
             # ── Emit wave metric ─────────────────────────────────
             self.store.emit_metric(
                 "wave_metric",
                 {
                     "findings_new": new_findings,
-                    "findings_total": findings_after,
+                    "findings_total": total_active,
                     "tool_calls": wave_tool_calls,
                     "elapsed_s": round(wave_time, 1),
                     "workers": len(assignments),
@@ -395,6 +469,9 @@ class MCPSwarmEngine:
         if config.enable_serendipity_wave and len(assignments) >= 2:
             phase_start = time.monotonic()
 
+            # Build angle list for targeted cross-domain search
+            angle_list = ", ".join(a.angle for a in assignments)
+
             serendipity_agent = create_worker_agent(
                 store=self.store,
                 angle="cross-domain connections",
@@ -406,7 +483,9 @@ class MCPSwarmEngine:
                 max_tokens=config.max_tokens,
                 temperature=0.5,  # slightly higher for creativity
                 phase="serendipity",
-                source_run=run_id,
+                max_return_chars=config.max_return_chars,
+                source_model=config.source_model or config.model,
+                source_run=config.source_run or run_id,
             )
 
             serendipity_result = await run_worker_agent(
@@ -415,12 +494,15 @@ class MCPSwarmEngine:
                 worker_id="serendipity",
                 query=(
                     f"Your job is to find CROSS-DOMAIN CONNECTIONS that no single "
-                    f"specialist would see. Use get_peer_insights and search_corpus "
-                    f"to find where different specialists' findings interact, compound, "
-                    f"or contradict in unexpected ways. Look for: compound interactions, "
-                    f"nutrient-drug interactions, timing dependencies, dose-response "
-                    f"relationships that span multiple domains. Store every cross-domain "
-                    f"connection as a finding. Research query: {query}"
+                    f"specialist would see. The research angles are: {angle_list}. "
+                    f"Use find_connections to discover interactions between angle pairs. "
+                    f"Use get_peer_insights and search_corpus to find where different "
+                    f"specialists' findings interact, compound, or contradict in "
+                    f"unexpected ways. Look for: compound interactions (e.g. iron + "
+                    f"trenbolone hematocrit), nutrient-drug interactions, timing "
+                    f"dependencies, dose-response relationships that span multiple "
+                    f"domains. Store every cross-domain connection as a finding with "
+                    f"store_finding. Research query: {query}"
                 ),
             )
             metrics.worker_results.append(serendipity_result)
@@ -431,6 +513,12 @@ class MCPSwarmEngine:
                 "phase": "serendipity_complete",
                 "elapsed_s": round(metrics.phase_times["serendipity"], 1),
             })
+
+        # ── Rolling summaries (optional) ─────────────────────────────
+        if config.enable_rolling_summaries:
+            phase_start = time.monotonic()
+            await self._generate_rolling_summaries(assignments)
+            metrics.phase_times["summaries"] = time.monotonic() - phase_start
 
         # ── Report generation ────────────────────────────────────────
         phase_start = time.monotonic()
@@ -482,6 +570,70 @@ class MCPSwarmEngine:
             angles_detected=[a.angle for a in assignments],
         )
 
+    async def _generate_rolling_summaries(
+        self,
+        assignments: list[WorkerAssignment],
+    ) -> None:
+        """Generate knowledge briefings per angle for future workers.
+
+        Compresses the current angle-level findings into a short summary
+        and stores it in the knowledge_summaries table.  Workers in
+        subsequent runs can call get_knowledge_briefing() to see a
+        condensed view of all accumulated knowledge without reading
+        every individual finding.
+        """
+        # Get current run number from store stats
+        stats = self.store.get_store_stats()
+        run_number = len(stats.get("models_seen", [])) or 1
+
+        for a in assignments:
+            with self.store._lock:
+                count = self.store.conn.execute(
+                    """SELECT COUNT(*) FROM conditions
+                       WHERE consider_for_use = TRUE
+                         AND angle = ?
+                         AND row_type IN ('finding', 'thought', 'insight')""",
+                    [a.angle],
+                ).fetchone()[0]
+
+            if count == 0:
+                continue
+
+            # Get top findings for this angle (highest confidence)
+            with self.store._lock:
+                rows = self.store.conn.execute(
+                    """SELECT fact, confidence
+                       FROM conditions
+                       WHERE consider_for_use = TRUE
+                         AND angle = ?
+                         AND row_type IN ('finding', 'thought', 'insight')
+                       ORDER BY confidence DESC
+                       LIMIT 15""",
+                    [a.angle],
+                ).fetchall()
+
+            if not rows:
+                continue
+
+            # Build a condensed summary from top findings
+            summary_parts = [f"[{a.angle}] {count} total findings. Top claims:"]
+            for fact, conf in rows:
+                summary_parts.append(f"- (conf={conf:.2f}) {fact[:200]}")
+
+            summary = "\n".join(summary_parts)[:2000]
+
+            self.store.store_summary(
+                angle=a.angle,
+                summary=summary,
+                finding_count=count,
+                run_number=run_number,
+            )
+
+        logger.info(
+            "angles=<%d>, run_number=<%d> | rolling summaries generated",
+            len(assignments), run_number,
+        )
+
     async def _generate_report(
         self,
         query: str,
@@ -490,66 +642,99 @@ class MCPSwarmEngine:
         """Generate a report by querying the store, not by queen merge.
 
         Retrieves top findings per angle from the store and asks the LLM
-        to compose a narrative from structured data — much smaller prompt
-        than the old queen merge which received all worker outputs.
+        to compose a narrative from structured data.  The prompt is capped
+        at report_max_chars to prevent context overflow even with 600K+
+        findings in the store.
+
+        Prioritizes worker-generated insights over raw corpus paragraphs.
         """
-        # Gather top findings per angle
+        max_chars = self.config.report_max_chars
+        # Reserve space for the prompt framing
+        framing_budget = 800
+        findings_budget = max_chars - framing_budget
+
+        # Gather top findings per angle, preferring worker analysis
         sections = []
+        chars_used = 0
         for a in assignments:
+            if chars_used >= findings_budget:
+                break
+
             with self.store._lock:
                 rows = self.store.conn.execute(
-                    """SELECT fact, confidence, source_url
+                    """SELECT fact, confidence, source_url, source_type
                        FROM conditions
                        WHERE consider_for_use = TRUE
                          AND angle = ?
                          AND row_type IN ('finding', 'thought', 'insight')
-                       ORDER BY confidence DESC
+                       ORDER BY
+                         CASE WHEN source_type = 'worker_analysis' THEN 0 ELSE 1 END,
+                         confidence DESC
                        LIMIT 30""",
                     [a.angle],
                 ).fetchall()
 
             if rows:
                 findings = []
-                for fact, conf, src_url in rows:
+                section_chars = 0
+                for fact, conf, src_url, src_type in rows:
                     src = f" ({src_url})" if src_url else ""
-                    findings.append(f"  [conf={conf:.2f}] {fact}{src}")
-                sections.append(
-                    f"=== {a.angle.upper()} ({len(rows)} findings) ===\n"
-                    + "\n".join(findings)
-                )
+                    tag = " [worker]" if src_type == "worker_analysis" else ""
+                    line = f"  [conf={conf:.2f}]{tag} {fact}{src}"
+                    if chars_used + section_chars + len(line) > findings_budget:
+                        break
+                    findings.append(line)
+                    section_chars += len(line) + 1
+
+                if findings:
+                    header = f"=== {a.angle.upper()} ({len(findings)} findings) ===\n"
+                    section = header + "\n".join(findings)
+                    sections.append(section)
+                    chars_used += len(section) + 2
 
         # Get cross-domain findings
-        with self.store._lock:
-            cross_rows = self.store.conn.execute(
-                """SELECT fact, confidence, angle
-                   FROM conditions
-                   WHERE consider_for_use = TRUE
-                     AND angle = 'cross-domain connections'
-                     AND row_type IN ('finding', 'thought', 'insight')
-                   ORDER BY confidence DESC
-                   LIMIT 20""",
-            ).fetchall()
+        if chars_used < findings_budget:
+            with self.store._lock:
+                cross_rows = self.store.conn.execute(
+                    """SELECT fact, confidence, angle
+                       FROM conditions
+                       WHERE consider_for_use = TRUE
+                         AND angle = 'cross-domain connections'
+                         AND row_type IN ('finding', 'thought', 'insight')
+                       ORDER BY confidence DESC
+                       LIMIT 20""",
+                ).fetchall()
 
-        if cross_rows:
-            cross_findings = []
-            for fact, conf, angle in cross_rows:
-                cross_findings.append(f"  [conf={conf:.2f}] {fact}")
-            sections.append(
-                f"=== CROSS-DOMAIN CONNECTIONS ({len(cross_rows)} findings) ===\n"
-                + "\n".join(cross_findings)
-            )
+            if cross_rows:
+                cross_findings = []
+                for fact, conf, angle in cross_rows:
+                    line = f"  [conf={conf:.2f}] {fact}"
+                    if chars_used + len(line) > findings_budget:
+                        break
+                    cross_findings.append(line)
+                    chars_used += len(line) + 1
+
+                if cross_findings:
+                    sections.append(
+                        f"=== CROSS-DOMAIN CONNECTIONS ({len(cross_findings)} findings) ===\n"
+                        + "\n".join(cross_findings)
+                    )
 
         if not sections:
             return "(no findings to report — store is empty)"
+
+        # Get store stats for context
+        stats = self.store.get_store_stats()
 
         store_text = "\n\n".join(sections)
 
         prompt = (
             f"You are writing a comprehensive research report.\n\n"
             f"RESEARCH QUERY: {query}\n\n"
-            f"Below are the key findings from {len(assignments)} specialist "
-            f"researchers, organized by domain. Each finding has a confidence "
-            f"score and source attribution.\n\n"
+            f"Store contains {stats['total_rows']} total entries across "
+            f"{len(stats.get('by_angle', {}))} angles. "
+            f"Below are the highest-confidence findings from "
+            f"{len(assignments)} specialist researchers.\n\n"
             f"{store_text}\n\n"
             f"Write a comprehensive, practitioner-grade report that:\n"
             f"1. Synthesizes these findings into a coherent narrative\n"

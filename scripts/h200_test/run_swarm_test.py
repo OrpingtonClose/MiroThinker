@@ -374,6 +374,30 @@ def main() -> None:
         "--no-serendipity", action="store_true",
         help="Disable the serendipity cross-domain wave",
     )
+    parser.add_argument(
+        "--source-model", default="",
+        help="Model name for provenance tracking in store",
+    )
+    parser.add_argument(
+        "--source-run", default="",
+        help="Run identifier for provenance (e.g. run_042)",
+    )
+    parser.add_argument(
+        "--max-return-chars", type=int, default=6000,
+        help="Hard ceiling on chars any tool call returns (default: 6000)",
+    )
+    parser.add_argument(
+        "--compact-every", type=int, default=3,
+        help="Run store compaction every N waves (0 = disable, default: 3)",
+    )
+    parser.add_argument(
+        "--no-rolling-summaries", action="store_true",
+        help="Disable rolling knowledge summaries between waves",
+    )
+    parser.add_argument(
+        "--report-max-chars", type=int, default=24000,
+        help="Max prompt chars for report generation (default: 24000)",
+    )
 
     args = parser.parse_args()
 
@@ -440,6 +464,10 @@ def main() -> None:
             "SWARM_WORKER_MODEL", "huihui-ai/Qwen3.5-32B-abliterated",
         )
 
+        # Resolve source_model from flag or model name
+        resolved_source_model = args.source_model or default_model
+        resolved_source_run = args.source_run or f"run_{time.strftime('%Y%m%d_%H%M%S')}"
+
         mcp_config = MCPSwarmConfig(
             max_workers=config.max_workers,
             max_waves=args.waves,
@@ -452,6 +480,12 @@ def main() -> None:
             required_angles=list(REQUIRED_ANGLE_LABELS),
             report_max_tokens=args.report_max_tokens,
             enable_serendipity_wave=not args.no_serendipity,
+            source_model=resolved_source_model,
+            source_run=resolved_source_run,
+            max_return_chars=args.max_return_chars,
+            compact_every_n_waves=args.compact_every,
+            enable_rolling_summaries=not args.no_rolling_summaries,
+            report_max_chars=args.report_max_chars,
         )
 
         # The MCP engine needs a simple completion function for
@@ -495,6 +529,12 @@ def main() -> None:
                     "max_waves": args.waves,
                     "report_max_tokens": args.report_max_tokens,
                     "serendipity_enabled": not args.no_serendipity,
+                    "source_model": resolved_source_model,
+                    "source_run": resolved_source_run,
+                    "max_return_chars": args.max_return_chars,
+                    "compact_every_n_waves": args.compact_every,
+                    "rolling_summaries_enabled": not args.no_rolling_summaries,
+                    "report_max_chars": args.report_max_chars,
                     "total_elapsed_s": result.metrics.total_elapsed_s,
                     "total_waves": result.metrics.total_waves,
                     "total_findings_stored": result.metrics.total_findings_stored,
@@ -510,11 +550,17 @@ def main() -> None:
             print(f"  MCP SWARM TEST COMPLETE")
             print(f"{'═' * 60}")
             print(f"  Model:              {default_model}")
+            print(f"  Source model:       {resolved_source_model}")
+            print(f"  Source run:         {resolved_source_run}")
             print(f"  API base:           {api_base}")
             print(f"  Temperature:        {args.temperature}")
             print(f"  Max tokens:         {args.max_tokens}")
+            print(f"  Max return chars:   {args.max_return_chars}")
+            print(f"  Report max chars:   {args.report_max_chars}")
             print(f"  Convergence:        {args.convergence_threshold}")
             print(f"  Serendipity:        {not args.no_serendipity}")
+            print(f"  Rolling summaries:  {not args.no_rolling_summaries}")
+            print(f"  Compact every:      {args.compact_every} waves")
             print(f"  Elapsed:            {result.metrics.total_elapsed_s:.1f}s")
             print(f"  Waves:              {result.metrics.total_waves}")
             print(f"  Findings stored:    {result.metrics.total_findings_stored}")

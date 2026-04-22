@@ -98,6 +98,8 @@ def create_worker_agent(
     max_tokens: int = 4096,
     temperature: float = 0.3,
     phase: str = "worker",
+    max_return_chars: int = 6000,
+    source_model: str = "",
     source_run: str = "",
 ) -> Agent:
     """Create a Strands Agent configured as a swarm worker.
@@ -117,6 +119,8 @@ def create_worker_agent(
         max_tokens: Max tokens per LLM response.
         temperature: Sampling temperature.
         phase: Current swarm phase for event attribution.
+        max_return_chars: Hard ceiling on chars any tool call returns.
+        source_model: Model name for provenance tracking.
         source_run: Run identifier for provenance tracking (#192).
 
     Returns:
@@ -127,7 +131,8 @@ def create_worker_agent(
         worker_angle=angle,
         worker_id=worker_id,
         phase=phase,
-        source_model=model,
+        max_return_chars=max_return_chars,
+        source_model=source_model or model,
         source_run=source_run,
     )
 

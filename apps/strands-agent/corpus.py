@@ -175,11 +175,40 @@ class ConditionStore:
 
                 -- Swarm lineage (unified with LineageStore)
                 phase TEXT DEFAULT '',
-                parent_ids TEXT DEFAULT ''
+                parent_ids TEXT DEFAULT '',
+
+                -- Source provenance (24h continuous operation)
+                source_model TEXT DEFAULT '',
+                source_run TEXT DEFAULT ''
             )
         """)
+
+        # Corpus fingerprint tracking — prevents re-ingestion
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS corpus_fingerprints (
+                fingerprint TEXT PRIMARY KEY,
+                source TEXT DEFAULT '',
+                ingested_at TEXT DEFAULT '',
+                char_count INTEGER DEFAULT 0,
+                paragraph_count INTEGER DEFAULT 0
+            )
+        """)
+
+        # Store-level summaries for rolling knowledge briefings
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS knowledge_summaries (
+                id INTEGER PRIMARY KEY,
+                angle TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                finding_count INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT '',
+                run_number INTEGER DEFAULT 0
+            )
+        """)
+
         # Ensure lineage columns exist on older databases (idempotent).
         self._ensure_lineage_columns()
+        self._ensure_provenance_columns()
         # Seed next_id from existing rows
         result = self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM conditions").fetchone()
         if result:
@@ -206,6 +235,406 @@ class ConditionStore:
                 # Older DuckDB versions without IF NOT EXISTS support will
                 # error on a duplicate column; swallow and continue.
                 pass
+
+    def _ensure_provenance_columns(self) -> None:
+        """Backfill source_model/source_run columns on pre-existing databases."""
+        for col, typedef in (
+            ("source_model", "TEXT DEFAULT ''"),
+            ("source_run", "TEXT DEFAULT ''"),
+        ):
+            try:
+                self.conn.execute(
+                    f"ALTER TABLE conditions ADD COLUMN IF NOT EXISTS "
+                    f"{col} {typedef}"
+                )
+            except Exception:
+                pass
+
+        # Ensure metadata tables exist on older databases
+        try:
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS corpus_fingerprints (
+                    fingerprint TEXT PRIMARY KEY,
+                    source TEXT DEFAULT '',
+                    ingested_at TEXT DEFAULT '',
+                    char_count INTEGER DEFAULT 0,
+                    paragraph_count INTEGER DEFAULT 0
+                )
+            """)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS knowledge_summaries (
+                    id INTEGER PRIMARY KEY,
+                    angle TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    finding_count INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT '',
+                    run_number INTEGER DEFAULT 0
+                )
+            """)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Corpus fingerprinting — prevents re-ingestion across runs
+    # ------------------------------------------------------------------
+
+    def has_corpus_hash(self, fingerprint: str) -> bool:
+        """Check if a corpus with this hash has already been ingested."""
+        with self._lock:
+            result = self.conn.execute(
+                "SELECT COUNT(*) FROM corpus_fingerprints WHERE fingerprint = ?",
+                [fingerprint],
+            ).fetchone()
+        return bool(result and result[0] > 0)
+
+    def register_corpus_hash(
+        self,
+        fingerprint: str,
+        source: str = "",
+        char_count: int = 0,
+        paragraph_count: int = 0,
+    ) -> None:
+        """Register that a corpus has been ingested."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self.conn.execute(
+                """INSERT OR REPLACE INTO corpus_fingerprints
+                   (fingerprint, source, ingested_at, char_count, paragraph_count)
+                   VALUES (?, ?, ?, ?, ?)""",
+                [fingerprint, source, now, char_count, paragraph_count],
+            )
+
+    # ------------------------------------------------------------------
+    # Store compaction — deduplicate and archive stale findings
+    # ------------------------------------------------------------------
+
+    def compact(
+        self,
+        complete: Any = None,
+        max_cluster_size: int = 8,
+    ) -> dict[str, int]:
+        """Deduplicate findings using exact-match and LLM semantic judgment.
+
+        Two-phase approach designed to be called by an external agent
+        outside the swarm — never by swarm workers themselves.
+
+        Phase 1 (pure SQL, no LLM): Remove exact-duplicate ``fact`` text
+        within the same angle, keeping the highest-confidence row.
+
+        Phase 2 (LLM-assisted, optional): Pre-cluster candidates within
+        each angle using shared key terms extracted via SQL string
+        functions (no cartesian product). For each candidate cluster,
+        ask the LLM once "which of these are the same claim?" and mark
+        lower-confidence duplicates obsolete.
+
+        Args:
+            complete: Async callable ``(prompt: str) -> str`` for LLM
+                judgment in Phase 2.  If None, only Phase 1 runs.
+            max_cluster_size: Max findings per LLM dedup call.
+
+        Returns:
+            Dict with compaction statistics.
+        """
+        import asyncio
+
+        stats: dict[str, int] = {
+            "exact_duplicates_removed": 0,
+            "semantic_duplicates_removed": 0,
+            "total_checked": 0,
+        }
+
+        # ── Phase 1: exact-match dedup (pure SQL) ────────────────────
+        with self._lock:
+            # Find groups of identical fact text within the same angle
+            dup_groups = self.conn.execute(
+                """SELECT angle, fact, COUNT(*) as cnt,
+                          MAX(confidence) as max_conf
+                   FROM conditions
+                   WHERE consider_for_use = TRUE
+                     AND row_type IN ('finding', 'thought', 'insight')
+                   GROUP BY angle, fact
+                   HAVING COUNT(*) > 1""",
+            ).fetchall()
+
+        for angle, fact, cnt, max_conf in dup_groups:
+            with self._lock:
+                # Keep the highest-confidence row, mark the rest obsolete
+                self.conn.execute(
+                    """UPDATE conditions
+                       SET consider_for_use = FALSE,
+                           obsolete_reason = 'exact_duplicate'
+                       WHERE angle = ?
+                         AND fact = ?
+                         AND consider_for_use = TRUE
+                         AND id NOT IN (
+                             SELECT id FROM conditions
+                             WHERE angle = ? AND fact = ?
+                               AND consider_for_use = TRUE
+                             ORDER BY confidence DESC
+                             LIMIT 1
+                         )""",
+                    [angle, fact, angle, fact],
+                )
+            stats["exact_duplicates_removed"] += cnt - 1
+
+        # ── Phase 2: LLM semantic dedup (optional) ───────────────────
+        if complete is None:
+            with self._lock:
+                stats["total_checked"] = self.conn.execute(
+                    """SELECT COUNT(*) FROM conditions
+                       WHERE consider_for_use = TRUE
+                         AND row_type IN ('finding', 'thought', 'insight')""",
+                ).fetchone()[0]
+
+            logger.info(
+                "exact_dupes=<%d>, total=<%d> | compaction phase 1 complete",
+                stats["exact_duplicates_removed"], stats["total_checked"],
+            )
+            return stats
+
+        # Get distinct angles
+        with self._lock:
+            angles = self.conn.execute(
+                """SELECT DISTINCT angle FROM conditions
+                   WHERE consider_for_use = TRUE
+                     AND row_type IN ('finding', 'thought', 'insight')
+                     AND angle != ''""",
+            ).fetchall()
+
+        semantic_removed = 0
+        for (angle,) in angles:
+            # Fetch active findings for this angle, ordered by confidence
+            with self._lock:
+                rows = self.conn.execute(
+                    """SELECT id, fact, confidence
+                       FROM conditions
+                       WHERE consider_for_use = TRUE
+                         AND angle = ?
+                         AND row_type IN ('finding', 'thought', 'insight')
+                       ORDER BY confidence DESC""",
+                    [angle],
+                ).fetchall()
+
+            if len(rows) < 2:
+                continue
+
+            # Build keyword index: extract significant words per finding
+            # to cluster candidates without cartesian product
+            word_to_ids: dict[str, list[int]] = {}
+            id_to_row: dict[int, tuple[int, str, float]] = {}
+            for cid, fact, conf in rows:
+                id_to_row[cid] = (cid, fact, conf)
+                words = set(
+                    w.lower() for w in re.findall(r"[a-zA-Z]{4,}", fact)
+                )
+                for w in words:
+                    word_to_ids.setdefault(w, []).append(cid)
+
+            # Find candidate clusters: findings sharing 3+ keywords
+            from collections import Counter
+            pair_overlap: Counter[tuple[int, int]] = Counter()
+            for w, ids in word_to_ids.items():
+                if len(ids) > 20:
+                    continue  # skip very common words
+                for i in range(len(ids)):
+                    for j in range(i + 1, len(ids)):
+                        a, b = min(ids[i], ids[j]), max(ids[i], ids[j])
+                        pair_overlap[(a, b)] += 1
+
+            # Group pairs with 3+ shared keywords into clusters
+            # using union-find to merge overlapping pairs
+            parent: dict[int, int] = {}
+
+            def find(x: int) -> int:
+                while parent.get(x, x) != x:
+                    parent[x] = parent.get(parent[x], parent[x])
+                    x = parent[x]
+                return x
+
+            def union(x: int, y: int) -> None:
+                px, py = find(x), find(y)
+                if px != py:
+                    parent[px] = py
+
+            for (a, b), count in pair_overlap.items():
+                if count >= 3:
+                    union(a, b)
+
+            # Collect clusters
+            clusters: dict[int, list[int]] = {}
+            for cid in id_to_row:
+                root = find(cid)
+                if root != cid or cid in parent:
+                    clusters.setdefault(root, []).append(cid)
+            # Ensure root nodes themselves are included in their cluster
+            for root in list(clusters.keys()):
+                if root not in clusters[root]:
+                    clusters[root].insert(0, root)
+
+            # For each cluster, ask LLM to identify duplicates
+            for root, members in clusters.items():
+                if len(members) < 2:
+                    continue
+                # Cap cluster size to avoid huge prompts
+                members = sorted(
+                    members,
+                    key=lambda c: id_to_row[c][2],
+                    reverse=True,
+                )[:max_cluster_size]
+
+                # Build prompt listing the candidate findings
+                lines = []
+                for idx, cid in enumerate(members):
+                    _, fact, conf = id_to_row[cid]
+                    lines.append(f"[{idx}] (conf={conf:.2f}) {fact[:300]}")
+
+                prompt = (
+                    f"You are deduplicating research findings in the "
+                    f"'{angle}' domain.\n\n"
+                    f"Below are {len(members)} findings that may be "
+                    f"saying the same thing. Group them by semantic "
+                    f"equivalence — findings making the same factual "
+                    f"claim count as duplicates even if worded "
+                    f"differently.\n\n"
+                    + "\n".join(lines)
+                    + "\n\nFor each duplicate group, output ONLY the "
+                    f"index numbers of duplicates on one line, comma-"
+                    f"separated. The FIRST index in each group is the "
+                    f"keeper (highest confidence). Output one group per "
+                    f"line. If no duplicates exist, output NONE.\n"
+                    f"Example: 0,3,5\n1,4"
+                )
+
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+
+                if loop and loop.is_running():
+                    # Already in an async context (e.g. called from synthesize())
+                    # Run the coroutine in a separate thread to avoid
+                    # "cannot call run_until_complete from a running loop"
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        response = pool.submit(
+                            asyncio.run, complete(prompt)
+                        ).result(timeout=120)
+                else:
+                    response = asyncio.run(complete(prompt))
+
+                # Parse response: each line is a group of indices
+                for line in response.strip().split("\n"):
+                    line = line.strip()
+                    if not line or line.upper() == "NONE":
+                        continue
+                    indices = []
+                    for part in line.split(","):
+                        part = part.strip().strip("[]")
+                        if part.isdigit():
+                            idx = int(part)
+                            if 0 <= idx < len(members):
+                                indices.append(idx)
+                    if len(indices) < 2:
+                        continue
+                    # First index is keeper, rest are duplicates
+                    for dup_idx in indices[1:]:
+                        dup_cid = members[dup_idx]
+                        with self._lock:
+                            self.conn.execute(
+                                """UPDATE conditions
+                                   SET consider_for_use = FALSE,
+                                       obsolete_reason = 'semantic_duplicate'
+                                   WHERE id = ?
+                                     AND consider_for_use = TRUE""",
+                                [dup_cid],
+                            )
+                        semantic_removed += 1
+
+        stats["semantic_duplicates_removed"] = semantic_removed
+
+        with self._lock:
+            stats["total_checked"] = self.conn.execute(
+                """SELECT COUNT(*) FROM conditions
+                   WHERE consider_for_use = TRUE
+                     AND row_type IN ('finding', 'thought', 'insight')""",
+            ).fetchone()[0]
+
+        logger.info(
+            "exact_dupes=<%d>, semantic_dupes=<%d>, total=<%d> | compaction complete",
+            stats["exact_duplicates_removed"],
+            stats["semantic_duplicates_removed"],
+            stats["total_checked"],
+        )
+        return stats
+
+    # ------------------------------------------------------------------
+    # Knowledge summaries — rolling briefings for workers
+    # ------------------------------------------------------------------
+
+    def get_latest_summary(self, angle: str) -> str:
+        """Get the most recent knowledge summary for an angle.
+
+        Returns empty string if no summary exists.
+        """
+        with self._lock:
+            result = self.conn.execute(
+                """SELECT summary FROM knowledge_summaries
+                   WHERE angle = ?
+                   ORDER BY id DESC LIMIT 1""",
+                [angle],
+            ).fetchone()
+        return result[0] if result else ""
+
+    def store_summary(
+        self,
+        angle: str,
+        summary: str,
+        finding_count: int = 0,
+        run_number: int = 0,
+    ) -> None:
+        """Store a knowledge summary for an angle."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            sid = self.conn.execute(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM knowledge_summaries"
+            ).fetchone()[0]
+            self.conn.execute(
+                """INSERT INTO knowledge_summaries
+                   (id, angle, summary, finding_count, created_at, run_number)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                [sid, angle, summary, finding_count, now, run_number],
+            )
+
+    def get_store_stats(self) -> dict[str, Any]:
+        """Get aggregate statistics about the store for diagnostics."""
+        with self._lock:
+            total = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions"
+            ).fetchone()[0]
+            active = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions WHERE consider_for_use = TRUE"
+            ).fetchone()[0]
+            by_type = self.conn.execute(
+                """SELECT row_type, COUNT(*) FROM conditions
+                   WHERE consider_for_use = TRUE
+                   GROUP BY row_type"""
+            ).fetchall()
+            by_angle = self.conn.execute(
+                """SELECT angle, COUNT(*) FROM conditions
+                   WHERE consider_for_use = TRUE AND row_type = 'finding'
+                   GROUP BY angle ORDER BY COUNT(*) DESC"""
+            ).fetchall()
+            models = self.conn.execute(
+                """SELECT DISTINCT source_model FROM conditions
+                   WHERE source_model != '' AND source_model IS NOT NULL"""
+            ).fetchall()
+        return {
+            "total_rows": total,
+            "active_rows": active,
+            "by_type": dict(by_type),
+            "by_angle": dict(by_angle),
+            "models_seen": [r[0] for r in models],
+        }
 
     # ------------------------------------------------------------------
     # Core write methods
