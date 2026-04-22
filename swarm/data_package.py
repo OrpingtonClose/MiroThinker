@@ -183,6 +183,7 @@ def build_data_packages(
     *,
     prior_outputs: dict[str, str] | None = None,
     model_map: dict[str, str] | None = None,
+    default_model: str = "",
     lineage_entries: list["LineageEntry"] | None = None,
 ) -> list[DataPackage]:
     """Build data packages for all workers in a wave.
@@ -200,6 +201,7 @@ def build_data_packages(
         query: The user's research query.
         prior_outputs: Map of angle → previous wave's worker output text.
         model_map: Map of angle → model name for per-worker model assignment.
+        default_model: Fallback model name when angle is not in model_map.
         lineage_entries: Accumulated lineage entries for hive RAG queries.
 
     Returns:
@@ -213,7 +215,7 @@ def build_data_packages(
     for a in assignments:
         angle = a.angle
         worker_id = f"worker_{a.worker_id}_wave_{wave}"
-        model = model_map.get(angle, "")
+        model = model_map.get(angle, default_model)
 
         pkg = DataPackage(
             angle=angle,

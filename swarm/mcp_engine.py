@@ -335,6 +335,7 @@ class MCPSwarmEngine:
                 query=query,
                 prior_outputs=prior_outputs,
                 model_map=config.model_map,
+                default_model=config.model,
             )
             metrics.phase_times[f"wave_{wave}_pkg"] = time.monotonic() - pkg_start
 
