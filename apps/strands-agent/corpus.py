@@ -185,7 +185,7 @@ class ConditionStore:
             self._next_id = result[0] + 1
 
     def _ensure_lineage_columns(self) -> None:
-        """Backfill phase/parent_ids columns on pre-existing databases.
+        """Backfill phase/parent_ids/provenance columns on pre-existing databases.
 
         Safe to call repeatedly; DuckDB's ``ADD COLUMN IF NOT EXISTS``
         handles the idempotency.
@@ -193,6 +193,8 @@ class ConditionStore:
         for col, typedef in (
             ("phase", "TEXT DEFAULT ''"),
             ("parent_ids", "TEXT DEFAULT ''"),
+            ("source_model", "TEXT DEFAULT ''"),
+            ("source_run", "TEXT DEFAULT ''"),
         ):
             try:
                 self.conn.execute(
@@ -948,6 +950,109 @@ class ConditionStore:
                          AND consider_for_use = TRUE"""
                 ).fetchone()
         return result[0] if result else 0
+
+    # ------------------------------------------------------------------
+    # Observability — metrics as store rows
+    # ------------------------------------------------------------------
+
+    def emit_metric(
+        self,
+        metric_type: str,
+        data: dict[str, Any],
+        *,
+        angle: str = "system",
+        source_model: str = "",
+        source_run: str = "",
+        iteration: int = 0,
+        parent_id: int | None = None,
+    ) -> int:
+        """Persist a metric snapshot as a condition row.
+
+        Metric rows use ``row_type`` = *metric_type* (e.g.
+        ``wave_metric``, ``worker_metric``, ``store_metric``,
+        ``decision_point``).  The JSON blob goes into ``fact``.
+        These rows are excluded from research queries
+        (``consider_for_use = FALSE``) but queryable for dashboards.
+
+        Args:
+            metric_type: Row type tag (``wave_metric``, etc.).
+            data: Arbitrary JSON-serialisable metric payload.
+            angle: Metric category or worker angle.
+            source_model: Model that produced the measured output.
+            source_run: Run identifier for cross-run comparison.
+            iteration: Wave number (0 for run-level metrics).
+            parent_id: Optional link to the entity being measured.
+
+        Returns:
+            The condition ID of the new metric row.
+        """
+        fact_json = json.dumps(data, default=str)
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            cid = self._next_id
+            self._next_id += 1
+            self.conn.execute(
+                """INSERT INTO conditions
+                   (id, fact, source_type, row_type,
+                    consider_for_use, angle, created_at,
+                    iteration, parent_id, source_model, source_run)
+                   VALUES (?, ?, 'observability', ?, FALSE, ?, ?, ?, ?, ?, ?)""",
+                [
+                    cid, fact_json, metric_type,
+                    angle, now, iteration, parent_id,
+                    source_model, source_run,
+                ],
+            )
+        logger.debug(
+            "metric_type=<%s>, angle=<%s>, iteration=<%d> | emitted metric #%d",
+            metric_type, angle, iteration, cid,
+        )
+        return cid
+
+    def store_health_snapshot(
+        self,
+        *,
+        source_run: str = "",
+        iteration: int = 0,
+    ) -> dict[str, Any]:
+        """Query the store's own health and persist as a ``store_metric`` row.
+
+        Returns the health data dict (also stored as a metric row).
+        """
+        with self._lock:
+            total = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions"
+            ).fetchone()[0]
+            active = self.conn.execute(
+                "SELECT COUNT(*) FROM conditions WHERE consider_for_use = TRUE"
+            ).fetchone()[0]
+            obsolete = total - active
+
+            rows_by_type = {}
+            for row_type, cnt in self.conn.execute(
+                "SELECT row_type, COUNT(*) FROM conditions GROUP BY row_type"
+            ).fetchall():
+                rows_by_type[row_type] = cnt
+
+            rows_by_angle = {}
+            for ang, cnt in self.conn.execute(
+                "SELECT angle, COUNT(*) FROM conditions "
+                "WHERE consider_for_use = TRUE GROUP BY angle"
+            ).fetchall():
+                rows_by_angle[ang] = cnt
+
+        data = {
+            "total_rows": total,
+            "active_rows": active,
+            "obsolete_rows": obsolete,
+            "rows_by_type": rows_by_type,
+            "rows_by_angle": rows_by_angle,
+        }
+        self.emit_metric(
+            "store_metric", data,
+            source_run=source_run, iteration=iteration,
+        )
+        return data
 
     # ------------------------------------------------------------------
     # Query methods
