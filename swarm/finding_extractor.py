@@ -227,7 +227,7 @@ def store_extracted_findings(
 
     for f in findings:
         try:
-            store.add_condition(
+            store.admit(
                 fact=f.fact,
                 row_type="finding",
                 source_type=f.source_type,
@@ -236,7 +236,6 @@ def store_extracted_findings(
                 iteration=iteration,
                 source_model=source_model,
                 source_run=source_run,
-                user_query="",
             )
             stored += 1
         except Exception as exc:
@@ -279,7 +278,7 @@ def store_worker_transcript(
         iteration: Wave number.
     """
     try:
-        store.add_condition(
+        store.admit(
             fact=transcript,
             row_type="worker_transcript",
             source_type="worker_reasoning",
@@ -288,7 +287,6 @@ def store_worker_transcript(
             iteration=iteration,
             source_model=source_model,
             source_run=source_run,
-            user_query="",
         )
 
         logger.info(
