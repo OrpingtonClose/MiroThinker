@@ -999,37 +999,331 @@ Note: 360-1440 runs was based on faster per-run times with simpler architecture.
 
 ---
 
-## Implementation Phases (Mapped to GitHub Issues)
+## Progressive Engineering Plan
 
-### Phase 1: Foundation (Issues #183, #184, #190, #191, #192)
-Remove truncation, make workers tool-free, clean up corpus fingerprinting, convergence fix, source provenance. These are prerequisites — mostly already implemented on PR #181.
+### Why Not a Flat Backlog
 
-### Phase 2: Hook Observer + Data Package (Issues #194, NEW)
-Implement the Strands hook observer (`worker_observer.py`) and the data package builder (`data_package.py`). Workers receive structured research briefs instead of raw prompt stuffing.
+The previous implementation phases (#183–#200) were a rag-tag wishlist: 18 issues assuming the entire architecture is correct and just needs building. Three issues contradicted each other (#183 vs #184), three were redundant (#183→#199, #196→#198, #189 irrelevant for local runs), and zero addressed testing, monitoring, error handling, or proof-of-concept validation.
 
-### Phase 3: Session Proxy + Clone Registration (Issues #185, #197)
-Build the session proxy (`session_proxy.py`), implement clone registration flow, configure Flock to route through the proxy with per-clone model names.
+The architecture is a **hypothesis**, not a specification. Each major decision — tool-free workers, cloned contexts, QR ontology — could be wrong. The plan must be structured as a series of **instrumented experiments** where each stage produces measurements that determine what comes next.
 
-### Phase 4: Catalogue Operations (Issues #186, #196)
-Implement claim extraction, disaggregation, relevance scoring, semantic dedup, and cross-domain connection discovery — all driven by cloned contexts via Flock SQL.
+This is cone-of-probability engineering: wide uncertainty at the start, narrowing at each stage as measurements constrain what's actually true about the system.
 
-### Phase 5: RAG Graduation (Issue #183 extended)
-Implement the keyword → clone-scored → cross-expert RAG graduation path. Integrate existing `rag.py` for wave 2 bootstrap, Flock-based scoring for wave 3+.
+### The Observability Layer (Foundation for Everything)
 
-### Phase 6: Compaction + Store Management (Issue #186)
-Two-phase compaction with audit trail. Periodic execution. Store growth monitoring.
+Observability is not a separate feature. It is the backbone of the engineering plan. Every stage is instrumented BEFORE it's considered done. "Done" = implemented + instrumented + run + measured + decision made.
 
-### Phase 7: 24-Hour Continuity (Issues #187, #188, #189, #193, #195)
-Cross-run clone persistence, rolling knowledge summaries as clone seeds, 150MB corpus streaming, API key safety, report generation from summaries.
+#### Metrics as Store Rows
 
-### Phase 8: Serendipity Integration (Issue #196)
-Route existing Flock template battery through cloned contexts. Transition from generic to expert-driven serendipity.
+Metrics go into the ConditionStore itself. The store monitors itself. No external system required.
 
-### Phase 9: QR Ontology + Graph-Structured Retrieval (NEW)
-Expand `row_type` values to include QR entity types (theme, code, codeGroup, memo, researchQuestion). Implement relationship typing in clone catalogue operations. Rewrite data package assembly as graph traversal queries. Research question decomposition at run start. Theme emergence after wave 2+.
+```sql
+-- Wave-level aggregates (one row per wave per run)
+INSERT INTO conditions (row_type, fact, angle, source_run, iteration)
+VALUES ('wave_metric', '{
+  "findings_new": 47,
+  "findings_total": 312,
+  "unique_concepts_new": 23,
+  "store_rows_total": 8420,
+  "store_rows_by_type": {"finding": 312, "raw": 600, "atom": 1205, ...},
+  "context_tokens_avg": 18400,
+  "context_tokens_max": 29100,
+  "info_gain": 0.14,
+  "phase_times_s": {"assembly": 32, "reasoning": 95, "catalogue": 180},
+  "errors": [],
+  "hedging_density": 0.08
+}', 'system', 'run_20260416_1200', 3);
+```
 
-### Phase 10: Unleashed Clone Research (NEW)
-Implement doubt extraction from worker transcripts. Build clone-with-tools agent factory. Trigger logic (high-uncertainty detection, gap density, convergence stall). Budget enforcement (max tool calls, max doubts per wave). Add § 8 FRESH EVIDENCE to data package structure.
+```sql
+-- Worker-level metrics (one row per worker per wave)
+INSERT INTO conditions (row_type, fact, angle, source_model, source_run, iteration)
+VALUES ('worker_metric', '{
+  "input_tokens": 22400,
+  "output_tokens": 3100,
+  "unique_concepts": 15,
+  "hedging_count": 3,
+  "hedging_phrases": ["uncertain about", "insufficient evidence", "likely but"],
+  "response_quality_proxy": 0.72
+}', 'insulin_timing', 'qwen3.5-32b', 'run_20260416_1200', 3);
+```
+
+```sql
+-- Store health snapshot (one row per wave)
+INSERT INTO conditions (row_type, fact, angle, source_run, iteration)
+VALUES ('store_metric', '{
+  "total_rows": 8420,
+  "active_rows": 7200,
+  "obsolete_rows": 1220,
+  "rows_by_type": {"finding": 312, "raw": 600, "atom": 1205, "theme": 8, ...},
+  "rows_by_angle": {"insulin_timing": 1800, "hematology": 1650, ...},
+  "edge_count": {"supports": 45, "contradicts": 12, "answers": 23},
+  "growth_rate_per_wave": 340,
+  "estimated_rows_at_24h": 490000
+}', 'system', 'run_20260416_1200', 3);
+```
+
+```sql
+-- Decision points (cone-of-probability audit trail)
+INSERT INTO conditions (row_type, fact, angle, source_run)
+VALUES ('decision_point', '{
+  "stage": 2,
+  "question": "Does clone relevance outperform keyword RAG?",
+  "evidence": {"clone_precision": 0.87, "keyword_precision": 0.62, "n_samples": 50},
+  "decision": "proceed_with_clones",
+  "alternative_if_failed": "invest_in_embedding_similarity",
+  "timestamp": "2026-04-16T14:30:00Z"
+}', 'system_meta', 'run_20260416_1400');
+```
+
+#### Dashboard Queries
+
+The ConditionStore IS the dashboard. Simple SQL for any metric:
+
+```sql
+-- Quality trajectory: is the system still learning?
+SELECT iteration as wave,
+       json_extract(fact, '$.info_gain')::FLOAT as info_gain,
+       json_extract(fact, '$.findings_new')::INT as new_findings,
+       json_extract(fact, '$.unique_concepts_new')::INT as new_concepts
+FROM conditions
+WHERE row_type = 'wave_metric' AND source_run = ?
+ORDER BY iteration;
+
+-- Store growth: when do we need compaction?
+SELECT iteration as wave,
+       json_extract(fact, '$.total_rows')::INT as total_rows,
+       json_extract(fact, '$.growth_rate_per_wave')::INT as growth_rate
+FROM conditions
+WHERE row_type = 'store_metric' AND source_run = ?
+ORDER BY iteration;
+
+-- Cross-run improvement: are later runs better?
+SELECT source_run,
+       AVG(json_extract(fact, '$.info_gain')::FLOAT) as avg_info_gain,
+       SUM(json_extract(fact, '$.findings_new')::INT) as total_findings
+FROM conditions
+WHERE row_type = 'wave_metric'
+GROUP BY source_run
+ORDER BY source_run;
+
+-- Alert: quality degradation (info_gain dropping below threshold)
+SELECT iteration, json_extract(fact, '$.info_gain')::FLOAT as ig
+FROM conditions
+WHERE row_type = 'wave_metric' AND source_run = ?
+  AND json_extract(fact, '$.info_gain')::FLOAT < 0.05;
+```
+
+#### Existing Metrics to Preserve
+
+`SwarmMetrics` and `MCPSwarmMetrics` already track: `total_llm_calls`, `phase_times`, `worker_input/output_chars`, `gossip_info_gain`, `findings_per_wave`, `convergence_reason`, `degradations`. The observability layer persists these to the store (currently they exist only in memory) and adds: store health, edge counts, hedging density, unique concept tracking, cross-run comparison.
+
+---
+
+### Stage 0: Instrument + Baseline
+
+**Goal:** Persist metrics. Run the CURRENT system. Capture baseline measurements.
+
+**Work:**
+- Add `row_type='wave_metric'` / `worker_metric` / `store_metric` emission to `mcp_engine.py` at end of each wave
+- Persist existing `MCPSwarmMetrics` fields as JSON in metric rows
+- Add store health snapshot (row counts by type, growth rate)
+- Merge already-implemented fixes: #190 (fingerprinting), #191 (convergence), #192 (provenance)
+- Run current system against the 96K corpus. 3-5 waves.
+
+**Measures:**
+- Findings per wave (are workers producing anything useful?)
+- Context token usage per worker (how close to overflow?)
+- Store growth rate (rows/wave)
+- Phase timing breakdown (where does time go?)
+- Angle orthogonality (are angles actually different?)
+- Information gain trajectory (diminishing returns?)
+
+**Decision criteria:**
+- IF context overflow is the dominant problem → Stage 1 focuses on context management
+- IF angle quality is the dominant problem → Stage 1 focuses on angle derivation
+- IF workers aren't producing findings → Stage 1 focuses on prompt engineering
+- IF everything works reasonably → skip Stage 1, go to Stage 2
+
+**Issues:** NEW (observability layer), merge #190, #191, #192
+
+---
+
+### Stage 1: Fix Observable Bottlenecks
+
+**Goal:** Fix the top bottleneck identified by Stage 0 metrics.
+
+**Work** (conditional on Stage 0 results):
+- IF angles: #187 — prompt-derived angle extraction with validation (detect overlap, reject position-based splits)
+- IF corpus: #188 — 150MB streaming ingestion
+- IF context: Context budget analysis — what's eating the window? Tool overhead? Redundant material?
+
+**Measures:** Same as Stage 0, plus delta from baseline.
+
+**Decision criteria:**
+- Re-run system. Compare metrics to Stage 0 baseline.
+- IF the fix improved the dominant metric by >20% → proceed to Stage 2
+- IF the fix didn't help → investigate deeper, try alternative approach
+
+**Issues:** #187 and/or #188 (based on Stage 0 data)
+
+---
+
+### Stage 2: Prove the Clone Pattern (Minimal)
+
+**Goal:** Answer ONE question: does a cloned worker context produce better relevance judgments than keyword RAG?
+
+**Work:**
+- Build session proxy (#197) — ~100 lines of FastAPI
+- Run 1 worker through 1 wave (normal flow)
+- Clone the worker's conversation, register with proxy
+- Run 50 test Flock queries: same query through clone AND through keyword scoring
+- Human-judge or systematic comparison of which results are more relevant
+
+**Measures:**
+- Clone relevance precision vs keyword precision (on same queries)
+- vLLM prefix cache hit rate (is caching actually working?)
+- Latency: clone-scored query vs keyword query
+- Cost: tokens consumed by clone queries
+
+**Decision criteria:**
+- IF clone precision > keyword precision by ≥15% → proceed to Stage 3
+- IF clone precision ≤ keyword precision → the architecture's core bet is wrong. Pivot: invest in embedding similarity instead of clones. Revisit tool-free workers (maybe workers WITH better tools is the right path)
+- IF prefix caching doesn't work → clone pattern is too expensive. Investigate alternatives (rolling distillation as context, not full conversation)
+
+**Issues:** #197, NEW (clone PoC test)
+
+**This is the critical fork.** Everything in stages 3-6 depends on clones being better than keywords. If they're not, the entire architecture changes direction. This is why you test it BEFORE building tool-free workers, data packages, QR ontology, etc.
+
+---
+
+### Stage 3: Tool-Free Workers + Hook Observer
+
+**Goal:** Answer: do tool-free workers with curated data packages produce better output than tool-calling workers?
+
+**Prerequisite:** Stage 2 passed (clones work).
+
+**Work:**
+- #184 — Tool-free worker factory (remove tools, accept data package as prompt)
+- #194 — Hook observer (transcript capture at `AfterInvocationEvent`, NOT per-turn extraction)
+- NEW — Data package builder (basic: 7 sections, flat retrieval for now, no graph)
+- A/B test: run same corpus/angles with BOTH architectures (current + new)
+
+**Measures:**
+- Output quality: unique concepts, analytical depth (hedging inversely correlated)
+- Information gain per wave: tool-free vs tool-calling
+- Context efficiency: what fraction of context window is productive reasoning vs tool overhead?
+- Worker failure rate: does either architecture produce empty/garbage outputs?
+
+**Decision criteria:**
+- IF tool-free ≥ tool-calling on quality AND better on context efficiency → full commit to tool-free
+- IF tool-free is worse → hybrid approach: keep search tools, use clones only for catalogue operations. Revise remaining stages.
+- IF tool-free is equal → prefer tool-free (simpler, cleaner, enables clone pattern)
+
+**Issues:** #184, #194, NEW (data package builder), NEW (A/B test)
+
+---
+
+### Stage 4: Graph Ontology (Incremental)
+
+**Goal:** Does graph-structured retrieval produce better data packages than flat retrieval?
+
+**Prerequisite:** Stage 3 passed (tool-free workers work).
+
+**Work:**
+- #185 — Full cloned context as Flock backend (all workers, all waves)
+- #198 — QR ontology, **but only 3 relationship types first**: `supports`, `contradicts`, `answers`
+- #199 — Graph-structured data package assembly (replace flat queries with edge traversal)
+- Clone catalogue prompt: "HOW does this relate?" instead of "is this relevant?"
+
+**Measures:**
+- Graph density: edges per wave, edges per finding (is the graph filling in?)
+- Retrieval precision: does graph traversal select better material than flat retrieval?
+- Data package quality: worker output quality delta with graph-assembled vs flat-assembled packages
+- Catalogue cost: LLM calls for relationship typing vs binary relevance scoring
+
+**Decision criteria:**
+- IF graph density > 0.5 edges/finding AND retrieval precision improves → add more relationship types (triangulates_with, compares, reflects_on)
+- IF graph is sparse (< 0.2 edges/finding) → clone is not producing useful typed edges. Simplify: binary relevance with embedding pre-filter instead
+- IF catalogue cost is prohibitive → reduce typing granularity (supports/contradicts/other instead of 11 types)
+
+**Issues:** #185, #198 (scoped to 3 types), #199
+
+---
+
+### Stage 5: 24-Hour Scale
+
+**Goal:** Run the full pipeline continuously for 24 hours against the 150MB corpus.
+
+**Prerequisite:** Stages 0-4 passed.
+
+**Work:**
+- #188 — 150MB corpus streaming ingestion (if not done in Stage 1)
+- #193 — Rolling knowledge summaries (prevent context overflow across waves)
+- #195 — Report from summaries (prevent report overflow)
+- NEW — Error handling: vLLM crash recovery, DuckDB corruption protection, worker timeout, session proxy reconnection
+- NEW — Graceful degradation: if a GPU goes down, redistribute workers. If a clone query times out, fall back to keyword.
+
+**Measures:**
+- Stability: errors per hour, worker failure rate over 24h
+- Quality trajectory: does info_gain plateau, degrade, or stay steady?
+- Store growth: actual growth rate vs projected. When (if ever) is compaction needed?
+- Clone cache efficiency: prefix cache hit rate over time (does it degrade as conversations grow?)
+- Resource utilization: GPU memory, DuckDB file size, session proxy memory
+
+**Decision criteria:**
+- IF stable for 24h with steady quality → done. System works.
+- IF quality degrades after N hours → investigate cause (store noise? clone overflow? angle exhaustion?)
+- IF store growth exceeds projections → trigger Stage 6 compaction
+- IF clone cache degrades → trigger rolling distillation
+
+**Issues:** #188 (if deferred), #193, #195, NEW (error handling), NEW (graceful degradation)
+
+---
+
+### Stage 6: On-Demand (Only If Metrics Warrant)
+
+These are NOT planned work. They trigger ONLY when Stage 5 metrics show a specific need.
+
+| Feature | Trigger Condition | Issue |
+|---|---|---|
+| Compaction | `store_metric` shows >500K rows or growth_rate > 1000/wave | #186 |
+| Unleashed clones | `worker_metric` shows high hedging_density AND `store_metric` shows many unanswered researchQuestions | #200 |
+| Full QR ontology (11 types) | Stage 4 shows 3 types are insufficient for retrieval quality | #198 extended |
+| Serendipity via clones | Cross-domain `triangulates_with` edges are rare despite diverse angles | Serendipity battery routing |
+| API key safety | System makes external API calls (only relevant if unleashed clones use web search) | #189 |
+
+---
+
+### Issue Disposition
+
+| Issue | Status | Reason |
+|---|---|---|
+| #183 | **CLOSE** | Subsumed by #184 (delete tools) + #199 (graph retrieval). Workers don't have tools to truncate. |
+| #184 | **KEEP** — Stage 3 | Tool-free workers. Core experiment. |
+| #185 | **KEEP** — Stage 4 | Full clone-as-Flock-backend. Depends on Stage 2 proving clones work. |
+| #186 | **DEFER** — Stage 6 on-demand | Compaction is premature at 30-60 runs. Only if store_metric triggers. |
+| #187 | **KEEP** — Stage 1 | Angle derivation. Likely the first bottleneck. |
+| #188 | **KEEP** — Stage 1 or 5 | 150MB streaming. Infrastructure prerequisite. |
+| #189 | **CLOSE** | Irrelevant for local-only H200 runs. Reopen only if unleashed clones (#200) make external API calls. |
+| #190 | **MERGE** — Stage 0 | Already implemented. Quick win. |
+| #191 | **MERGE** — Stage 0 | Already implemented. Needs update after #184. |
+| #192 | **MERGE** — Stage 0 | Already implemented. Quick win. |
+| #193 | **KEEP** — Stage 5 | Rolling summaries. Needed for 24h scale, not for core pipeline proof. |
+| #194 | **KEEP** — Stage 3 | Hook observer. Clarified: transcript capture, NOT finding extraction. |
+| #195 | **KEEP** — Stage 5 | Report from summaries. End-of-pipeline polish. |
+| #196 | **CLOSE** | Subsumed by #198. The `triangulates_with` relationship type IS the cross-domain connection. |
+| #197 | **KEEP** — Stage 2 | Session proxy. First thing built. Enables the critical fork test. |
+| #198 | **KEEP** — Stage 4 (scoped) | QR ontology. Start with 3 types, expand based on metrics. |
+| #199 | **KEEP** — Stage 4 | Graph-structured assembly. Depends on #198 working. |
+| #200 | **DEFER** — Stage 6 on-demand | Unleashed clones. Only if gap density warrants. |
+
+**New issues needed:**
+- Observability layer (Stage 0) — metric rows in ConditionStore
+- Clone PoC test (Stage 2) — 1 worker, 1 clone, 50 Flock queries, human comparison
+- Data package builder (Stage 3) — `data_package.py` with 7-section structure
+- A/B test framework (Stage 3) — run both architectures, compare metrics
+- Error handling + graceful degradation (Stage 5) — crash recovery, fallbacks, timeouts
 
 ---
 
