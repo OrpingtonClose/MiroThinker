@@ -402,6 +402,64 @@ async def _search_mojeek(query: str, num_results: int = 8) -> list[dict[str, str
         return []
 
 
+async def _search_duckduckgo(query: str, num_results: int = 8) -> list[dict[str, str]]:
+    """Search DuckDuckGo HTML (no API key required).
+
+    Uses the DuckDuckGo HTML endpoint which is free and does not require
+    an API key.  Results are parsed from the HTML response.
+
+    Args:
+        query: Search query string.
+        num_results: Maximum results to return.
+
+    Returns:
+        List of search result dicts.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+            resp = await client.get(
+                "https://html.duckduckgo.com/html/",
+                params={"q": query},
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                },
+            )
+            resp.raise_for_status()
+            text = resp.text
+
+            results: list[dict[str, str]] = []
+            # Parse result blocks from the HTML
+            blocks = re.findall(
+                r'class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?'
+                r'class="result__snippet"[^>]*>(.*?)</(?:a|td|div)',
+                text,
+                re.DOTALL,
+            )
+            for href, title_html, snippet_html in blocks[:num_results]:
+                title = re.sub(r"<[^>]+>", "", title_html).strip()
+                snippet = re.sub(r"<[^>]+>", "", snippet_html).strip()
+                # DDG wraps URLs in a redirect — extract the actual URL
+                url = href
+                uddg_match = re.search(r"uddg=([^&]+)", href)
+                if uddg_match:
+                    from urllib.parse import unquote
+                    url = unquote(uddg_match.group(1))
+                if title or snippet:
+                    results.append({
+                        "title": title,
+                        "url": url,
+                        "snippet": snippet,
+                        "source": "duckduckgo",
+                    })
+            return results
+    except Exception as exc:
+        logger.warning("error=<%s> | duckduckgo search failed", exc)
+        return []
+
+
 async def _search_arxiv(query: str, num_results: int = 5) -> list[dict[str, str]]:
     """Search arXiv for preprints."""
     sanitised = query.encode("ascii", errors="replace").decode("ascii")
@@ -873,8 +931,8 @@ def _get_available_search_fns() -> list[Any]:
         fns.append(_search_mojeek)
     if _KAGI_API_KEY:
         fns.append(_search_kagi)
-    # DuckDuckGo is always available (no API key needed) — add as fallback
-    # if we have fewer than 2 APIs
+    # DuckDuckGo is always available (no API key needed) — ensures at
+    # least one search function exists even with zero configured keys
     if len(fns) < 2:
-        fns.append(_search_brave if _BRAVE_API_KEY else _search_mojeek)
+        fns.append(_search_duckduckgo)
     return fns
