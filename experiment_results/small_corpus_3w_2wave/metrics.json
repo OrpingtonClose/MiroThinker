@@ -1,0 +1,218 @@
+{
+  "experiment": "small_corpus_3w_2wave",
+  "description": "3 workers, 2 waves, quarter corpus. Tests behavior with minimal data \u2014 does the architecture degrade gracefully?",
+  "config": {
+    "max_workers": 3,
+    "max_waves": 2,
+    "convergence_threshold": 3,
+    "temperature": 0.3,
+    "model": "gpt-4o-mini",
+    "enable_serendipity_wave": false,
+    "corpus_slice": "quarter",
+    "corpus_chars": 7112
+  },
+  "metrics": {
+    "total_elapsed_s": 107.6,
+    "total_waves": 2,
+    "total_findings_stored": 43,
+    "total_tool_calls_engine": 0,
+    "total_tool_calls_store": 78,
+    "findings_per_wave": [
+      7,
+      5
+    ],
+    "convergence_reason": "max waves (2) reached",
+    "phase_times": {
+      "ingestion": 3.7,
+      "wave_1": 38.6,
+      "wave_2": 44.4,
+      "report": 21.0
+    }
+  },
+  "store_analysis": {
+    "total_findings": 43,
+    "tool_call_breakdown": [
+      {
+        "tool": "worker_0_wave_2/get_peer_insights",
+        "count": 8
+      },
+      {
+        "tool": "worker_1_wave_1/search_corpus",
+        "count": 8
+      },
+      {
+        "tool": "worker_0_wave_1/search_corpus",
+        "count": 8
+      },
+      {
+        "tool": "worker_0_wave_1/get_peer_insights",
+        "count": 8
+      },
+      {
+        "tool": "worker_0_wave_2/search_corpus",
+        "count": 8
+      },
+      {
+        "tool": "worker_2_wave_1/store_finding",
+        "count": 5
+      },
+      {
+        "tool": "worker_2_wave_2/store_finding",
+        "count": 5
+      },
+      {
+        "tool": "worker_1_wave_1/get_peer_insights",
+        "count": 2
+      },
+      {
+        "tool": "worker_1_wave_1/store_finding",
+        "count": 2
+      },
+      {
+        "tool": "worker_2_wave_2/get_peer_insights",
+        "count": 2
+      },
+      {
+        "tool": "worker_2_wave_1/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_1_wave_2/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_2_wave_2/search_corpus",
+        "count": 2
+      },
+      {
+        "tool": "worker_2_wave_2/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_1_wave_1/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_2_wave_1/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_0_wave_2/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_2/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_1/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_2/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_0_wave_1/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_2/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_0_wave_1/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_0_wave_2/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_2/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_1/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_1/get_research_gaps",
+        "count": 1
+      }
+    ],
+    "angle_distribution": [
+      {
+        "angle": "trenbolone",
+        "count": 17,
+        "avg_confidence": 0.735
+      },
+      {
+        "angle": "bodybuilding cycle protocol",
+        "count": 16,
+        "avg_confidence": 0.5
+      },
+      {
+        "angle": "testosterone",
+        "count": 10,
+        "avg_confidence": 0.58
+      }
+    ],
+    "worker_findings": [
+      {
+        "worker": "",
+        "count": 12
+      }
+    ]
+  },
+  "report_chars": 6226,
+  "angles_detected": [
+    "bodybuilding cycle protocol",
+    "testosterone",
+    "trenbolone"
+  ],
+  "events": [
+    {
+      "type": "swarm_phase",
+      "phase": "ingestion_complete",
+      "workers": 3,
+      "angles": [
+        "bodybuilding cycle protocol",
+        "testosterone",
+        "trenbolone"
+      ]
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_1_start",
+      "wave": 1
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_1_complete",
+      "wave": 1,
+      "new_findings": 7,
+      "total_findings": 38,
+      "elapsed_s": 38.6
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_2_start",
+      "wave": 2
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_2_complete",
+      "wave": 2,
+      "new_findings": 5,
+      "total_findings": 43,
+      "elapsed_s": 44.4
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "complete",
+      "total_elapsed_s": 107.6,
+      "total_findings": 43
+    }
+  ]
+}

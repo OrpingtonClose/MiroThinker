@@ -1,0 +1,438 @@
+{
+  "experiment": "full_config_5w_3wave_seren",
+  "description": "5 workers, 3 waves, serendipity, default threshold. The intended production configuration.",
+  "config": {
+    "max_workers": 5,
+    "max_waves": 3,
+    "convergence_threshold": 5,
+    "temperature": 0.3,
+    "model": "gpt-4o-mini",
+    "enable_serendipity_wave": true,
+    "corpus_slice": "full",
+    "corpus_chars": 28451
+  },
+  "metrics": {
+    "total_elapsed_s": 268.4,
+    "total_waves": 3,
+    "total_findings_stored": 192,
+    "total_tool_calls_engine": 0,
+    "total_tool_calls_store": 209,
+    "findings_per_wave": [
+      42,
+      22,
+      14
+    ],
+    "convergence_reason": "max waves (3) reached",
+    "phase_times": {
+      "ingestion": 4.4,
+      "wave_1": 65.5,
+      "wave_2": 54.3,
+      "wave_3": 89.8,
+      "serendipity": 25.9,
+      "report": 28.6
+    }
+  },
+  "store_analysis": {
+    "total_findings": 196,
+    "tool_call_breakdown": [
+      {
+        "tool": "worker_0_wave_3/store_finding",
+        "count": 10
+      },
+      {
+        "tool": "worker_4_wave_2/store_finding",
+        "count": 10
+      },
+      {
+        "tool": "worker_0_wave_1/store_finding",
+        "count": 10
+      },
+      {
+        "tool": "worker_2_wave_1/store_finding",
+        "count": 10
+      },
+      {
+        "tool": "worker_4_wave_1/store_finding",
+        "count": 10
+      },
+      {
+        "tool": "worker_1_wave_1/store_finding",
+        "count": 8
+      },
+      {
+        "tool": "worker_3_wave_1/search_corpus",
+        "count": 7
+      },
+      {
+        "tool": "worker_4_wave_2/get_peer_insights",
+        "count": 7
+      },
+      {
+        "tool": "worker_0_wave_3/get_peer_insights",
+        "count": 7
+      },
+      {
+        "tool": "worker_2_wave_1/get_peer_insights",
+        "count": 7
+      },
+      {
+        "tool": "worker_0_wave_2/store_finding",
+        "count": 7
+      },
+      {
+        "tool": "worker_0_wave_3/search_corpus",
+        "count": 7
+      },
+      {
+        "tool": "worker_0_wave_2/get_peer_insights",
+        "count": 7
+      },
+      {
+        "tool": "worker_2_wave_1/search_corpus",
+        "count": 7
+      },
+      {
+        "tool": "worker_0_wave_2/search_corpus",
+        "count": 7
+      },
+      {
+        "tool": "worker_4_wave_2/search_corpus",
+        "count": 7
+      },
+      {
+        "tool": "worker_1_wave_2/store_finding",
+        "count": 5
+      },
+      {
+        "tool": "worker_3_wave_3/store_finding",
+        "count": 4
+      },
+      {
+        "tool": "serendipity/store_finding",
+        "count": 4
+      },
+      {
+        "tool": "worker_3_wave_1/store_finding",
+        "count": 4
+      },
+      {
+        "tool": "worker_0_wave_3/get_corpus_section",
+        "count": 3
+      },
+      {
+        "tool": "worker_0_wave_2/get_corpus_section",
+        "count": 3
+      },
+      {
+        "tool": "worker_0_wave_1/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_2_wave_1/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_3_wave_1/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_3_wave_3/search_corpus",
+        "count": 2
+      },
+      {
+        "tool": "worker_2_wave_2/search_corpus",
+        "count": 2
+      },
+      {
+        "tool": "worker_4_wave_3/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_4_wave_1/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_1_wave_3/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_3_wave_3/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "serendipity/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_3/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_1/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_1/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_2/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_4_wave_3/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_3/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_3/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_4_wave_1/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_0_wave_1/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_2/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_2/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_2/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_4_wave_2/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_2/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_4_wave_3/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_2/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_4_wave_1/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_4_wave_1/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_3/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_0_wave_1/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_0_wave_1/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_1/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_2/check_contradictions",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_2/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_3/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_3/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "serendipity/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_4_wave_2/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_2/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_2/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_3/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_1/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_1/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_1/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_2/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_2/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_3/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_4_wave_3/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "serendipity/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_3/search_corpus",
+        "count": 1
+      }
+    ],
+    "angle_distribution": [
+      {
+        "angle": "insulin",
+        "count": 115,
+        "avg_confidence": 0.591
+      },
+      {
+        "angle": "growth hormone (part 2)",
+        "count": 27,
+        "avg_confidence": 0.794
+      },
+      {
+        "angle": "trenbolone",
+        "count": 18,
+        "avg_confidence": 0.714
+      },
+      {
+        "angle": "growth hormone",
+        "count": 17,
+        "avg_confidence": 0.688
+      },
+      {
+        "angle": "testosterone",
+        "count": 15,
+        "avg_confidence": 0.807
+      },
+      {
+        "angle": "cross-domain connections",
+        "count": 4,
+        "avg_confidence": 0.9
+      }
+    ],
+    "worker_findings": [
+      {
+        "worker": "",
+        "count": 82
+      }
+    ]
+  },
+  "report_chars": 5330,
+  "angles_detected": [
+    "insulin",
+    "testosterone",
+    "trenbolone",
+    "growth hormone",
+    "growth hormone (part 2)"
+  ],
+  "events": [
+    {
+      "type": "swarm_phase",
+      "phase": "ingestion_complete",
+      "workers": 5,
+      "angles": [
+        "insulin",
+        "testosterone",
+        "trenbolone",
+        "growth hormone",
+        "growth hormone (part 2)"
+      ]
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_1_start",
+      "wave": 1
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_1_complete",
+      "wave": 1,
+      "new_findings": 42,
+      "total_findings": 156,
+      "elapsed_s": 65.5
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_2_start",
+      "wave": 2
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_2_complete",
+      "wave": 2,
+      "new_findings": 22,
+      "total_findings": 178,
+      "elapsed_s": 54.3
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_3_start",
+      "wave": 3
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_3_complete",
+      "wave": 3,
+      "new_findings": 14,
+      "total_findings": 192,
+      "elapsed_s": 89.8
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "serendipity_complete",
+      "elapsed_s": 25.9
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "complete",
+      "total_elapsed_s": 268.4,
+      "total_findings": 192
+    }
+  ]
+}

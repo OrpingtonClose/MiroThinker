@@ -1,0 +1,425 @@
+{
+  "experiment": "preset_angles_5w_3wave",
+  "description": "5 workers, 3 waves, PRESET angles from h200_test/angles.py. Tests whether explicit angle definitions fix the catch-all problem seen in auto-detected angles.",
+  "config": {
+    "max_workers": 5,
+    "max_waves": 3,
+    "convergence_threshold": 5,
+    "temperature": 0.3,
+    "model": "gpt-4o-mini",
+    "enable_serendipity_wave": true,
+    "corpus_slice": "full",
+    "corpus_chars": 28451
+  },
+  "metrics": {
+    "total_elapsed_s": 171.0,
+    "total_waves": 3,
+    "total_findings_stored": 177,
+    "total_tool_calls_engine": 0,
+    "total_tool_calls_store": 205,
+    "findings_per_wave": [
+      31,
+      17,
+      15
+    ],
+    "convergence_reason": "max waves (3) reached",
+    "phase_times": {
+      "ingestion": 2.3,
+      "wave_1": 42.5,
+      "wave_2": 45.7,
+      "wave_3": 41.2,
+      "serendipity": 16.8,
+      "report": 22.4
+    }
+  },
+  "store_analysis": {
+    "total_findings": 177,
+    "tool_call_breakdown": [
+      {
+        "tool": "worker_0_wave_1/store_finding",
+        "count": 10
+      },
+      {
+        "tool": "worker_4_wave_1/store_finding",
+        "count": 8
+      },
+      {
+        "tool": "worker_2_wave_2/get_peer_insights",
+        "count": 8
+      },
+      {
+        "tool": "worker_4_wave_1/search_corpus",
+        "count": 8
+      },
+      {
+        "tool": "worker_0_wave_3/store_finding",
+        "count": 8
+      },
+      {
+        "tool": "worker_2_wave_2/search_corpus",
+        "count": 8
+      },
+      {
+        "tool": "worker_1_wave_3/search_corpus",
+        "count": 8
+      },
+      {
+        "tool": "worker_1_wave_2/get_peer_insights",
+        "count": 8
+      },
+      {
+        "tool": "worker_1_wave_1/store_finding",
+        "count": 8
+      },
+      {
+        "tool": "worker_1_wave_2/search_corpus",
+        "count": 8
+      },
+      {
+        "tool": "worker_1_wave_1/get_peer_insights",
+        "count": 8
+      },
+      {
+        "tool": "worker_1_wave_1/search_corpus",
+        "count": 8
+      },
+      {
+        "tool": "worker_1_wave_3/get_peer_insights",
+        "count": 8
+      },
+      {
+        "tool": "worker_4_wave_1/get_peer_insights",
+        "count": 8
+      },
+      {
+        "tool": "worker_1_wave_3/store_finding",
+        "count": 7
+      },
+      {
+        "tool": "worker_3_wave_2/store_finding",
+        "count": 6
+      },
+      {
+        "tool": "worker_2_wave_2/store_finding",
+        "count": 6
+      },
+      {
+        "tool": "worker_0_wave_2/store_finding",
+        "count": 5
+      },
+      {
+        "tool": "worker_3_wave_1/store_finding",
+        "count": 5
+      },
+      {
+        "tool": "worker_0_wave_3/get_corpus_section",
+        "count": 3
+      },
+      {
+        "tool": "worker_2_wave_2/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_0_wave_3/search_corpus",
+        "count": 2
+      },
+      {
+        "tool": "worker_4_wave_1/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_2_wave_1/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_4_wave_2/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_4_wave_3/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_3_wave_1/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_0_wave_2/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_0_wave_1/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_4_wave_2/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_3/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_0_wave_1/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_0_wave_1/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_1/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_0_wave_2/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_3/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "serendipity/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_1/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_1/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_2/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_2/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_2/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_3/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "serendipity/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_1/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_1/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_3/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_0_wave_3/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_3/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "serendipity/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_0_wave_2/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_2/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_0_wave_2/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_4_wave_3/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_3/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_4_wave_3/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_3/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_2/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_1/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_4_wave_2/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_3/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_4_wave_3/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_3/check_contradictions",
+        "count": 1
+      },
+      {
+        "tool": "serendipity/check_contradictions",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_1/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_3/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_2/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_0_wave_1/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_4_wave_2/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_3_wave_3/check_contradictions",
+        "count": 1
+      }
+    ],
+    "angle_distribution": [
+      {
+        "angle": "Insulin & GH protocols \u2014 Milos Sarcev framework",
+        "count": 111,
+        "avg_confidence": 0.574
+      },
+      {
+        "angle": "Micronutrient interactions \u2014 compound synergies",
+        "count": 20,
+        "avg_confidence": 0.675
+      },
+      {
+        "angle": "Testosterone & Trenbolone pharmacokinetics",
+        "count": 17,
+        "avg_confidence": 0.718
+      },
+      {
+        "angle": "Ramping strategy & phase periodization",
+        "count": 15,
+        "avg_confidence": 0.687
+      },
+      {
+        "angle": "Ancillaries & health marker management",
+        "count": 14,
+        "avg_confidence": 0.643
+      }
+    ],
+    "worker_findings": [
+      {
+        "worker": "",
+        "count": 63
+      }
+    ]
+  },
+  "report_chars": 5468,
+  "angles_detected": [
+    "Insulin & GH protocols \u2014 Milos Sarcev framework",
+    "Testosterone & Trenbolone pharmacokinetics",
+    "Ancillaries & health marker management",
+    "Micronutrient interactions \u2014 compound synergies",
+    "Ramping strategy & phase periodization"
+  ],
+  "events": [
+    {
+      "type": "swarm_phase",
+      "phase": "ingestion_complete",
+      "workers": 5,
+      "angles": [
+        "Insulin & GH protocols \u2014 Milos Sarcev framework",
+        "Testosterone & Trenbolone pharmacokinetics",
+        "Ancillaries & health marker management",
+        "Micronutrient interactions \u2014 compound synergies",
+        "Ramping strategy & phase periodization"
+      ]
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_1_start",
+      "wave": 1
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_1_complete",
+      "wave": 1,
+      "new_findings": 31,
+      "total_findings": 145,
+      "elapsed_s": 42.5
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_2_start",
+      "wave": 2
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_2_complete",
+      "wave": 2,
+      "new_findings": 17,
+      "total_findings": 162,
+      "elapsed_s": 45.7
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_3_start",
+      "wave": 3
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_3_complete",
+      "wave": 3,
+      "new_findings": 15,
+      "total_findings": 177,
+      "elapsed_s": 41.2
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "serendipity_complete",
+      "elapsed_s": 16.8
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "complete",
+      "total_elapsed_s": 171.0,
+      "total_findings": 177
+    }
+  ]
+}

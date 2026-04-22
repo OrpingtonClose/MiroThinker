@@ -1,0 +1,289 @@
+{
+  "experiment": "strict_convergence_3w_4wave",
+  "description": "3 workers, 4 waves, convergence_threshold=10. Tests whether a stricter threshold causes early stopping and saves calls.",
+  "config": {
+    "max_workers": 3,
+    "max_waves": 4,
+    "convergence_threshold": 10,
+    "temperature": 0.3,
+    "model": "gpt-4o-mini",
+    "enable_serendipity_wave": false,
+    "corpus_slice": "full",
+    "corpus_chars": 28451
+  },
+  "metrics": {
+    "total_elapsed_s": 203.9,
+    "total_waves": 3,
+    "total_findings_stored": 146,
+    "total_tool_calls_engine": 0,
+    "total_tool_calls_store": 115,
+    "findings_per_wave": [
+      13,
+      14,
+      5
+    ],
+    "convergence_reason": "converged at wave 3: 5 new findings < threshold 10",
+    "phase_times": {
+      "ingestion": 4.2,
+      "wave_1": 58.9,
+      "wave_2": 53.0,
+      "wave_3": 64.9,
+      "report": 22.9
+    }
+  },
+  "store_analysis": {
+    "total_findings": 146,
+    "tool_call_breakdown": [
+      {
+        "tool": "worker_0_wave_1/search_corpus",
+        "count": 8
+      },
+      {
+        "tool": "worker_0_wave_1/get_peer_insights",
+        "count": 8
+      },
+      {
+        "tool": "worker_0_wave_2/store_finding",
+        "count": 8
+      },
+      {
+        "tool": "worker_0_wave_3/search_corpus",
+        "count": 7
+      },
+      {
+        "tool": "worker_0_wave_3/get_peer_insights",
+        "count": 7
+      },
+      {
+        "tool": "worker_0_wave_2/get_peer_insights",
+        "count": 7
+      },
+      {
+        "tool": "worker_2_wave_1/store_finding",
+        "count": 7
+      },
+      {
+        "tool": "worker_0_wave_2/search_corpus",
+        "count": 7
+      },
+      {
+        "tool": "worker_1_wave_1/store_finding",
+        "count": 6
+      },
+      {
+        "tool": "worker_2_wave_2/store_finding",
+        "count": 6
+      },
+      {
+        "tool": "worker_0_wave_3/store_finding",
+        "count": 5
+      },
+      {
+        "tool": "worker_0_wave_3/get_corpus_section",
+        "count": 3
+      },
+      {
+        "tool": "worker_0_wave_2/get_corpus_section",
+        "count": 3
+      },
+      {
+        "tool": "worker_2_wave_3/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_1_wave_3/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_1_wave_2/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_0_wave_1/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_2_wave_1/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_0_wave_3/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_3/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_0_wave_1/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_3/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_2/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_3/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_1/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_1/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_1/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_2/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_2/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_2/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_3/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_3/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_1/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_1/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_2/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_1/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_1/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_2/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_2/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_0_wave_2/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_3/get_research_gaps",
+        "count": 1
+      }
+    ],
+    "angle_distribution": [
+      {
+        "angle": "bodybuilding cycle protocol",
+        "count": 117,
+        "avg_confidence": 0.533
+      },
+      {
+        "angle": "trenbolone",
+        "count": 21,
+        "avg_confidence": 0.7
+      },
+      {
+        "angle": "testosterone",
+        "count": 8,
+        "avg_confidence": 0.756
+      }
+    ],
+    "worker_findings": [
+      {
+        "worker": "",
+        "count": 32
+      }
+    ]
+  },
+  "report_chars": 5117,
+  "angles_detected": [
+    "bodybuilding cycle protocol",
+    "testosterone",
+    "trenbolone"
+  ],
+  "events": [
+    {
+      "type": "swarm_phase",
+      "phase": "ingestion_complete",
+      "workers": 3,
+      "angles": [
+        "bodybuilding cycle protocol",
+        "testosterone",
+        "trenbolone"
+      ]
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_1_start",
+      "wave": 1
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_1_complete",
+      "wave": 1,
+      "new_findings": 13,
+      "total_findings": 127,
+      "elapsed_s": 58.9
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_2_start",
+      "wave": 2
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_2_complete",
+      "wave": 2,
+      "new_findings": 14,
+      "total_findings": 141,
+      "elapsed_s": 53.0
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_3_start",
+      "wave": 3
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_3_complete",
+      "wave": 3,
+      "new_findings": 5,
+      "total_findings": 146,
+      "elapsed_s": 64.9
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "complete",
+      "total_elapsed_s": 203.9,
+      "total_findings": 146
+    }
+  ]
+}

@@ -1,0 +1,210 @@
+{
+  "experiment": "baseline_3w_2wave",
+  "description": "Baseline: 3 workers, 2 waves, default convergence. Establishes minimum viable configuration.",
+  "config": {
+    "max_workers": 3,
+    "max_waves": 2,
+    "convergence_threshold": 3,
+    "temperature": 0.3,
+    "model": "gpt-4o-mini",
+    "enable_serendipity_wave": false,
+    "corpus_slice": "full",
+    "corpus_chars": 28451
+  },
+  "metrics": {
+    "total_elapsed_s": 184.3,
+    "total_waves": 2,
+    "total_findings_stored": 151,
+    "total_tool_calls_engine": 0,
+    "total_tool_calls_store": 79,
+    "findings_per_wave": [
+      17,
+      20
+    ],
+    "convergence_reason": "max waves (2) reached",
+    "phase_times": {
+      "ingestion": 16.0,
+      "wave_1": 78.9,
+      "wave_2": 63.5,
+      "report": 25.9
+    }
+  },
+  "store_analysis": {
+    "total_findings": 151,
+    "tool_call_breakdown": [
+      {
+        "tool": "worker_2_wave_1/store_finding",
+        "count": 10
+      },
+      {
+        "tool": "worker_1_wave_2/store_finding",
+        "count": 8
+      },
+      {
+        "tool": "worker_0_wave_2/search_corpus",
+        "count": 7
+      },
+      {
+        "tool": "worker_1_wave_1/store_finding",
+        "count": 7
+      },
+      {
+        "tool": "worker_0_wave_2/get_peer_insights",
+        "count": 7
+      },
+      {
+        "tool": "worker_0_wave_2/store_finding",
+        "count": 6
+      },
+      {
+        "tool": "worker_2_wave_2/store_finding",
+        "count": 6
+      },
+      {
+        "tool": "worker_2_wave_1/get_peer_insights",
+        "count": 4
+      },
+      {
+        "tool": "worker_2_wave_1/search_corpus",
+        "count": 4
+      },
+      {
+        "tool": "worker_0_wave_2/get_corpus_section",
+        "count": 3
+      },
+      {
+        "tool": "worker_0_wave_1/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_2_wave_1/get_corpus_section",
+        "count": 2
+      },
+      {
+        "tool": "worker_2_wave_2/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_1/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_1/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_2/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_1/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_2/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_2/search_corpus",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_2/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_2/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_1_wave_1/get_peer_insights",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_2/get_corpus_section",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_2/get_research_gaps",
+        "count": 1
+      },
+      {
+        "tool": "worker_2_wave_1/get_research_gaps",
+        "count": 1
+      }
+    ],
+    "angle_distribution": [
+      {
+        "angle": "bodybuilding cycle protocol",
+        "count": 110,
+        "avg_confidence": 0.518
+      },
+      {
+        "angle": "trenbolone",
+        "count": 24,
+        "avg_confidence": 0.735
+      },
+      {
+        "angle": "testosterone",
+        "count": 17,
+        "avg_confidence": 0.741
+      }
+    ],
+    "worker_findings": [
+      {
+        "worker": "",
+        "count": 37
+      }
+    ]
+  },
+  "report_chars": 5766,
+  "angles_detected": [
+    "bodybuilding cycle protocol",
+    "testosterone",
+    "trenbolone"
+  ],
+  "events": [
+    {
+      "type": "swarm_phase",
+      "phase": "ingestion_complete",
+      "workers": 3,
+      "angles": [
+        "bodybuilding cycle protocol",
+        "testosterone",
+        "trenbolone"
+      ]
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_1_start",
+      "wave": 1
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_1_complete",
+      "wave": 1,
+      "new_findings": 17,
+      "total_findings": 131,
+      "elapsed_s": 78.9
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_2_start",
+      "wave": 2
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_2_complete",
+      "wave": 2,
+      "new_findings": 20,
+      "total_findings": 151,
+      "elapsed_s": 63.5
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "complete",
+      "total_elapsed_s": 184.3,
+      "total_findings": 151
+    }
+  ]
+}
