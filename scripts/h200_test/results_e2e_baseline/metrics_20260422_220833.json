@@ -1,0 +1,49 @@
+{
+  "prompt": "Milos Sarcev insulin protocol for bodybuilding in the context of taking insulin, hgh and trenbolone based cycles with full complexity breakdown between all food related nutrients, supplements and PEDs",
+  "engine": "mcp",
+  "model": "meta-llama/llama-3.1-8b-instruct",
+  "api_base": "https://openrouter.ai/api/v1",
+  "max_tokens": 8192,
+  "temperature": 0.3,
+  "convergence_threshold": 5,
+  "max_workers": 8,
+  "max_waves": 3,
+  "serendipity_enabled": true,
+  "rolling_summaries_enabled": true,
+  "compact_every_n_waves": 3,
+  "required_angles": [],
+  "total_elapsed_s": 1727.8653610449983,
+  "total_waves": 3,
+  "total_findings_stored": 669,
+  "total_tool_calls": 0,
+  "findings_per_wave": [
+    199,
+    217,
+    220
+  ],
+  "phase_times": {
+    "ingestion": 7.114647807997244,
+    "wave_1_pkg": 0.0007562109967693686,
+    "wave_1": 431.0789283779959,
+    "wave_2_pkg": 0.06489107399829663,
+    "wave_2": 448.2957228250016,
+    "wave_3_pkg": 0.09355253999819979,
+    "wave_3": 532.3300056509979,
+    "compact_wave_3": 82.53581767900323,
+    "serendipity": 152.9231617760015,
+    "summaries": 0.0700668229983421,
+    "report": 73.38146380100079
+  },
+  "convergence_reason": "max waves (3) reached",
+  "angles_detected": [
+    "Milos Sarcev Insulin Protocol",
+    "Bodybuilding with Insulin",
+    "Insulin Timing and Nutrient Partitioning Strategies",
+    "Food and Nutrient Breakdown",
+    "Supplements and PEDs in Bodybuilding",
+    "Hematological Effects of Anabolic Compounds",
+    "Growth Hormone and IGF-1 Cascade Dynamics",
+    "Growth Hormone and IGF-1 Cascade Dynamics (part 2)"
+  ],
+  "report_chars": 6331
+}
