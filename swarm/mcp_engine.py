@@ -181,28 +181,32 @@ class MCPSwarmEngine:
 
     async def synthesize(
         self,
-        corpus: str,
+        corpus: str | None,
         query: str,
         on_event: Callable[[dict], Awaitable[None]] | None = None,
     ) -> MCPSwarmResult:
         """Run the MCP swarm pipeline with tool-free workers.
 
-        0. Check corpus fingerprint (skip re-ingestion if already seen)
-        1. Ingest corpus into ConditionStore (only if new)
-        2. Detect angles and assign sections
-        3. For each wave:
-           a. Build data packages (§1-§7) per worker
+        0. Acquire corpus if none provided (external data acquisition)
+        1. Check corpus fingerprint (skip re-ingestion if already seen)
+        2. Ingest corpus into ConditionStore (only if new)
+        3. Detect angles and assign sections
+        4. For each wave:
+           a. Build data packages (§1-§8) per worker
            b. Dispatch tool-free workers in parallel
            c. Extract findings from worker output
            d. Store transcripts + findings
-           e. Check convergence
-        4. Compact store periodically
-        5. Generate rolling summaries
-        6. Run serendipity wave (tool-free)
-        7. Generate report from store
+           e. Run Research Organizer (clone-based gap resolution)
+           f. Check convergence
+        5. Compact store periodically
+        6. Generate rolling summaries
+        7. Run serendipity wave (tool-free)
+        8. Generate report from store
 
         Args:
-            corpus: Full text corpus to synthesize.
+            corpus: Full text corpus to synthesize.  When None, the
+                engine acquires a corpus from external sources using
+                the corpus builder.
             query: The user's research query.
             on_event: Optional async callback for progress events.
 
@@ -220,6 +224,34 @@ class MCPSwarmEngine:
                     await on_event(event)
                 except Exception:
                     pass
+
+        # ── Phase -1: Corpus acquisition (when no files attached) ────
+        if not corpus:
+            from swarm.corpus_builder import build_corpus
+
+            await _emit({
+                "type": "swarm_phase",
+                "phase": "corpus_acquisition_start",
+            })
+
+            acq_start = time.monotonic()
+            logger.info("query=<%s> | no corpus provided, acquiring from external sources", query[:100])
+
+            corpus = await build_corpus(query, self.complete)
+            acq_time = time.monotonic() - acq_start
+
+            metrics.phase_times["corpus_acquisition"] = acq_time
+            logger.info(
+                "corpus_chars=<%d>, elapsed_s=<%.1f> | corpus acquisition complete",
+                len(corpus), acq_time,
+            )
+
+            await _emit({
+                "type": "swarm_phase",
+                "phase": "corpus_acquisition_complete",
+                "corpus_chars": len(corpus),
+                "elapsed_s": round(acq_time, 1),
+            })
 
         # ── Phase 0: Corpus ingestion (with fingerprint check) ───────
         phase_start = time.monotonic()
@@ -523,6 +555,54 @@ class MCPSwarmEngine:
                 except Exception as exc:
                     logger.warning(
                         "wave=<%d>, error=<%s> | worker metric emission failed",
+                        wave, exc,
+                    )
+
+            # ── Research Organizer: clone-based gap resolution ────
+            # After each wave, the Research Organizer reads all worker
+            # transcripts, extracts doubts/gaps, and spawns tool-armed
+            # clones to resolve them.  Clone findings are stored as
+            # source_type='clone_research' and appear in next wave's
+            # data packages as §8 FRESH EVIDENCE.
+            successful_results = [
+                r for r in results
+                if isinstance(r, dict) and r.get("status") == "success"
+            ]
+            if successful_results and wave < config.max_waves:
+                try:
+                    from swarm.research_organizer import run_research_organizer
+
+                    ro_start = time.monotonic()
+                    clone_results = await run_research_organizer(
+                        store=self.store,
+                        worker_results=successful_results,
+                        wave=wave,
+                        run_id=config.source_run or run_id,
+                        complete=self.complete,
+                    )
+                    ro_time = time.monotonic() - ro_start
+
+                    clone_findings = sum(
+                        len(cr.findings) for cr in clone_results
+                    )
+                    metrics.phase_times[f"research_organizer_wave_{wave}"] = ro_time
+
+                    if clone_results:
+                        logger.info(
+                            "wave=<%d>, clones=<%d>, clone_findings=<%d>, "
+                            "elapsed_s=<%.1f> | research organizer complete",
+                            wave, len(clone_results), clone_findings, ro_time,
+                        )
+                        await _emit({
+                            "type": "swarm_phase",
+                            "phase": f"research_organizer_wave_{wave}",
+                            "clones": len(clone_results),
+                            "clone_findings": clone_findings,
+                            "elapsed_s": round(ro_time, 1),
+                        })
+                except Exception as exc:
+                    logger.warning(
+                        "wave=<%d>, error=<%s> | research organizer failed, continuing",
                         wave, exc,
                     )
 

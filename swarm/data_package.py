@@ -17,6 +17,7 @@ Structure:
     § 5  CHALLENGES           — expert-informed dissent from other angles
     § 6  RESEARCH GAPS        — identified gaps and unanswered questions
     § 7  PREVIOUS OUTPUT      — worker's prior wave analysis for continuity
+    § 8  FRESH EVIDENCE       — clone research resolving worker doubts
 
 Wave behavior:
     Wave 1: Only §2 populated (bootstrap from raw corpus)
@@ -55,6 +56,7 @@ class DataPackage:
         challenges: §5 — expert-informed dissent from other angles.
         research_gaps: §6 — identified gaps and unanswered questions.
         previous_output: §7 — worker's prior wave analysis.
+        fresh_evidence: §8 — clone research resolving worker doubts.
     """
 
     angle: str
@@ -68,6 +70,7 @@ class DataPackage:
     challenges: str = ""
     research_gaps: str = ""
     previous_output: str = ""
+    fresh_evidence: str = ""
 
     def render(self, query: str) -> str:
         """Render the data package as a structured prompt for the worker.
@@ -161,6 +164,14 @@ class DataPackage:
                 f"{self.previous_output}\n"
             )
 
+        if self.fresh_evidence:
+            sections.append(
+                f"{'─' * 40}\n"
+                f"§ 8  FRESH EVIDENCE (clone research results)\n"
+                f"{'─' * 40}\n"
+                f"{self.fresh_evidence}\n"
+            )
+
         sections.append(
             f"\n{'═' * 60}\n"
             f"INSTRUCTIONS: You are a {self.angle} specialist. Analyze "
@@ -247,6 +258,10 @@ def build_data_packages(
             # § 7: PREVIOUS OUTPUT
             pkg.previous_output = prior_outputs.get(angle, "")
 
+        if wave >= 2:
+            # § 8: FRESH EVIDENCE — clone research from previous wave
+            pkg.fresh_evidence = _get_fresh_evidence(store, angle, wave)
+
         if wave >= 3:
             # § 4: CROSS-DOMAIN CONNECTIONS
             pkg.cross_domain = _get_cross_domain_connections(store, angle)
@@ -260,7 +275,7 @@ def build_data_packages(
             sum(1 for s in [
                 pkg.knowledge_state, pkg.corpus_material, pkg.hive_findings,
                 pkg.cross_domain, pkg.challenges, pkg.research_gaps,
-                pkg.previous_output,
+                pkg.previous_output, pkg.fresh_evidence,
             ] if s),
         )
 
@@ -551,3 +566,71 @@ def _get_challenges(
             angle, exc,
         )
         return ""
+
+
+def _get_fresh_evidence(
+    store: "ConditionStore",
+    angle: str,
+    wave: int,
+) -> str:
+    """Get fresh evidence from clone research for this angle.
+
+    Retrieves clone_research findings stored during the previous wave's
+    Research Organizer run.  These are presented as doubt-resolution
+    pairs in §8 of the data package.
+
+    Args:
+        store: The shared ConditionStore.
+        angle: Research angle.
+        wave: Current wave number (looks for evidence from wave-1).
+
+    Returns:
+        Formatted fresh evidence string, or empty if no clone
+        research exists for this angle.
+    """
+    try:
+        with store._lock:
+            rows = store.conn.execute(
+                """SELECT fact, confidence, user_query, source_ref
+                   FROM conditions
+                   WHERE source_type = 'clone_research'
+                     AND angle = ?
+                     AND iteration = ?
+                   ORDER BY confidence DESC
+                   LIMIT 10""",
+                [angle, wave - 1],
+            ).fetchall()
+    except Exception as exc:
+        logger.debug(
+            "angle=<%s>, wave=<%d>, error=<%s> | "
+            "failed to retrieve clone research findings",
+            angle, wave, exc,
+        )
+        return ""
+
+    if not rows:
+        return ""
+
+    lines = [
+        "Your clone-researcher investigated specific doubts from your "
+        "previous analysis. Here's what it found:\n"
+    ]
+
+    for row in rows:
+        fact = row[0]
+        confidence = row[1]
+        doubt = row[2] or "unspecified doubt"
+        source = row[3] or "clone research"
+        conf_label = "HIGH" if confidence >= 0.8 else "MEDIUM" if confidence >= 0.5 else "LOW"
+        lines.append(f"DOUBT: {doubt}")
+        lines.append(f"EVIDENCE ({conf_label} confidence): {fact}")
+        lines.append(f"SOURCE: {source}")
+        lines.append("")
+
+    lines.append(
+        "Integrate this evidence into your analysis. Where it confirms "
+        "your prior reasoning, strengthen your claims. Where it "
+        "contradicts, revise."
+    )
+
+    return "\n".join(lines)
