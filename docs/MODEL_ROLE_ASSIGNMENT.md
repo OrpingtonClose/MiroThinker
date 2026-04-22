@@ -86,11 +86,13 @@ Report                  11. Report Generator         1 call, VERY LONG O
 
 | Model | Total Params | Active Params | Context | KV Efficiency | Abliteration | Provider |
 |-------|-------------|--------------|---------|---------------|-------------|----------|
-| Ling-2.5-1T | 1T | 63B | 256K→1M (YaRN) | Hybrid linear (excellent) | Base uncensored (abliterated pending) | inclusionAI |
+| Ling-2.5-1T | 1T | 63B | 256K→1M (YaRN) | Hybrid linear (excellent) | huihui-ai Ling-V2 collection (classic) | inclusionAI |
+| Ring-2.5-1T | 1T | 63B | 128K→256K (YaRN) | Hybrid linear (excellent) | **Not yet abliterated** | inclusionAI |
 | GLM-5.1 | 754B | 40B | 200K+ | Standard MoE | huihui-ai abliterated GGUF | huihui-ai |
 | Qwen3.5-397B-A17B | 397B | 17B | 262K→1M | Standard MoE | huihui-ai abliterated | huihui-ai |
 | Qwen3-235B-A22B | 235B | 22B | 262K→1M | Standard MoE | huihui-ai abliterated | huihui-ai |
 | Qwen3.5-122B-A10B | 122B | 10B | 128K+ | Standard MoE | HauhauCS Aggressive | HauhauCS |
+| Ling-2.6-Flash | 104B | 7.4B | 128K+ | Standard MoE | **Not yet abliterated** (released Apr 22 2026) | inclusionAI |
 | GPT-OSS 120B | 120B | ~12-50B | 128K+ | Full MoE | huihui-ai + HauhauCS | Multiple |
 | Qwen2.5-72B | 72B | 72B (dense) | 128K→1M | N/A (dense) | huihui-ai abliterated | huihui-ai |
 | Kimi-Linear-48B-A3B | 48B | 3B | **1M native** | **75% KV savings** | huihui-ai abliterated | huihui-ai |
@@ -102,6 +104,91 @@ Report                  11. Report Generator         1 call, VERY LONG O
 | Qwen2.5-14B-1M | 14B | 14B (dense) | **1M native** | N/A (dense) | huihui-ai + Heretic (richardyoung) | Multiple |
 | Qwen3.5-9B | 9B | 9B (dense) | 128K+ | N/A (dense) | HauhauCS + DavidAU Heretic | Multiple |
 | Nemotron3-Nano-4B | 4B | ~3.2B | 1M (Mamba state) | **Fixed state** (near-zero KV) | HauhauCS Aggressive | HauhauCS |
+
+### Ling/Ring Family (inclusionAI / Ant Group)
+
+The Ling/Ring family represents the current frontier for hybrid linear
+attention at trillion scale.  Three models form a coherent stack:
+
+**Ling-2.5-1T** (released February 16, 2026)
+- Architecture: 1T total / 63B active MoE with hybrid linear attention
+  (1:7 ratio of MLA + Lightning Linear Attention)
+- Context: 256K native → 1M via YaRN
+- Pre-trained on 29T tokens
+- KV efficiency: 10× reduction in memory access overhead, 3× throughput
+  gain vs standard attention for sequences >32K
+- Agentic RL training: compatible with Claude Code, OpenCode, OpenClaw
+- Abliteration status: huihui-ai has a
+  [Ling-V2-abliterated collection](https://huggingface.co/collections/huihui-ai/ling-v2-abliterated)
+  (classic orthogonal method).  Heretic/ARA variants do not yet exist.
+- HuggingFace: [inclusionAI/Ling-2.5-1T](https://huggingface.co/inclusionAI/Ling-2.5-1T)
+- SGLang deployment: requires `lmsysorg/sglang:nightly-dev-20260213-a0ebaa64`
+  Docker image for H200/B200
+
+**Ring-2.5-1T** (released February 16, 2026)
+- Same architecture as Ling-2.5-1T but trained as a **reasoning/thinking
+  model** with dense rewards for rigorous reasoning process feedback
+- Context: 128K → 256K via YaRN (shorter than Ling — reasoning chains
+  consume output tokens, so the context budget shifts toward generation)
+- IMO 2025 and CMO 2025 gold medal level performance
+- Supports XML-style tool calling (function calling)
+- Abliteration status: **NOT yet abliterated by any provider.**  This is
+  a blocker for uncensored research domains.
+- HuggingFace: [inclusionAI/Ring-2.5-1T](https://huggingface.co/inclusionAI/Ring-2.5-1T)
+- Best for: single-shot deep analytical calls (report generation, angle
+  detection) where reasoning depth matters more than context breadth
+
+**Ling-2.6-Flash** (released April 22, 2026 — 6 days ago)
+- Architecture: 104B total / 7.4B active sparse MoE
+- Context: 128K+
+- Optimized for agent applications and token efficiency
+- 340 tokens/second on 4× H20 (inference speed)
+- 86% cost reduction vs predecessors per Artificial Analysis benchmarks
+- Intelligence Index: 26 (with only 15M output tokens — efficient)
+- Pricing (API): $0.10/M input, $0.30/M output tokens
+- Abliteration status: **NOT yet abliterated.**  Given the recency
+  (April 22), expect huihui-ai within weeks.
+- Best for: Tier D roles — hundreds of short structured calls where
+  speed and cost matter.  7.4B active is more capable than Nemotron3-Nano
+  (3.2B) while remaining ultra-fast.
+
+**Older family members (for reference):**
+- Ring-1T (October 2025): First trillion-parameter reasoning model.
+  64K → 128K context.  Superseded by Ring-2.5-1T.
+- Ring-flash-2.0 / Ring-mini-2.0 (September 2025): Smaller reasoning
+  variants.  Superseded by Ling-2.6-Flash for non-reasoning tasks.
+- Ling-V2 (October 2025): Previous generation.  huihui-ai abliterated
+  variants exist and are battle-tested.
+
+**Ling/Ring family fit in the swarm:**
+
+| Role | Model | Rationale |
+|------|-------|-----------|
+| Workers (Tier A) | Ling-2.5-1T | 63B active + 1M context + hybrid linear = deepest reasoning over massive data packages |
+| Report Generator (Tier B) | Ring-2.5-1T | Reasoning variant, IMO gold — ideal for deep analytical synthesis. 256K context sufficient for curated findings. |
+| Angle Detector (Tier B) | Ring-2.5-1T | Deep reasoning on single call, structured output |
+| Research Organizer (Tier B) | Ring-2.5-1T | Strategic planning needs analytical depth |
+| Tier D (all) | Ling-2.6-Flash | 7.4B active, 340 tok/s, agent-optimized. Replaces GPT-OSS 20B and Nemotron3-Nano for extractor/cataloguer/compactor/summarizer |
+
+**Critical caveats:**
+
+1. **VRAM:** Ling-2.5-1T Q4 at 1M context needs ~550 GB.  That is 4×
+   H200 for ONE instance.  You cannot run 6 parallel workers — you
+   would need 24 GPUs.  Compare Kimi-Linear at 45 GB per worker.
+
+2. **Ring context is only 256K** — Kimi-Linear's native 1M is strictly
+   better for the worker role where seeing everything matters.
+
+3. **Abliteration gap:** Ring-2.5-1T has NO abliterated version.
+   Ling-2.5-1T has huihui-ai classic but no Heretic.  Ling-2.6-Flash
+   is too new (6 days old) for any community abliteration.
+
+4. **Practical recommendation:** Use Kimi-Linear for workers (1M, 1 GPU
+   each), Ring-2.5-1T for report/angle/organizer (when abliterated),
+   Ling-2.6-Flash for Tier D (when abliterated).  Ling-2.5-1T stays
+   in reserve until GPU count justifies 550 GB per instance.
+
+---
 
 ### Claude Reasoning Distills (abliterated)
 
@@ -392,6 +479,7 @@ CONTEXT NEED     BEST ARCHITECTURE              CANDIDATE MODELS
 ────────────     ─────────────────────────────  ────────────────────────
 1M native        Hybrid linear attention         Kimi-Linear-48B-A3B
                  (KDA + MLA)                     Ling-2.5-1T (linear layers)
+                                                 Ring-2.5-1T (linear, reasoning)
                                                  Nemotron3-Nano-4B (Mamba)
 
 1M via YaRN      Standard MoE + YaRN scaling     Qwen3-235B-A22B
@@ -404,6 +492,7 @@ CONTEXT NEED     BEST ARCHITECTURE              CANDIDATE MODELS
 200K native      Standard MoE                    GLM-5.1
 
 128K native      Various                         GPT-OSS 20B/120B
+                                                 Ling-2.6-Flash (7.4B active)
                                                  Qwen3.5-27B
                                                  Gemma-4-31B
 ```
@@ -523,6 +612,8 @@ Rule of thumb for 1M context:
     GPT-OSS 20B Q4 at 128K: ~12 GB weights + ~3 GB KV = 15 GB
     Nemotron3-Nano-4B Q4 at 1M: ~5 GB weights + ~2 GB KV = 7 GB
     Ling-2.5-1T Q4 at 1M: ~500 GB weights + ~50 GB KV = 550 GB
+    Ring-2.5-1T Q4 at 256K: ~500 GB weights + ~12 GB KV = 512 GB
+    Ling-2.6-Flash Q4 at 128K: ~52 GB weights + ~3 GB KV = 55 GB
 ```
 
 **8×H200 (140 GB each = 1120 GB total):**
@@ -557,17 +648,27 @@ you know that hematology produces better findings with 10B-active
 models while insulin_timing needs maximum context.
 
 **Reserve Configuration 3b (Giant Hybrid)** for the report generation
-call when Ling-2.5-1T abliterated drops from huihui-ai.  63B active
+call when Ring-2.5-1T abliterated drops.  63B active reasoning model
 for report synthesis would be transformative — but only worth the
-VRAM cost for that single call.
+VRAM cost for that single call.  Ring is preferred over Ling for this
+role because the reasoning training produces deeper analytical output.
+
+**Watch Ling-2.6-Flash** for Tier D replacement.  At 7.4B active with
+340 tok/s, it would replace both GPT-OSS 20B and Nemotron3-Nano-4B
+for structured extraction/classification tasks once abliterated.  At
+~55 GB it fits comfortably alongside workers on a single H200.
 
 ---
 
 ## Monthly Re-Evaluation Triggers
 
-- [ ] huihui-ai releases Ling-2.5-1T abliterated → immediately test for report generation
+- [ ] huihui-ai releases Ling-2.5-1T abliterated → already available (Ling-V2 collection, classic method). Test for workers if VRAM permits (550 GB per instance).
+- [ ] Community releases Ring-2.5-1T abliterated → **HIGH PRIORITY** — immediately test for report generation + angle detection (63B reasoning model, IMO gold level)
+- [ ] huihui-ai releases Ling-2.6-Flash abliterated → immediately test as Tier D replacement (extractor, cataloguer, compactor, summarizer). 7.4B active at 340 tok/s would be best-in-class for structured tasks.
 - [ ] DavidAU/grimjim release Heretic variant of Kimi-Linear → test for workers (Heretic + 1M context would be ideal)
+- [ ] DavidAU/grimjim release Heretic variant of Ring-2.5-1T → test for report generation (Heretic + reasoning training = maximum analytical depth)
 - [ ] New hybrid-linear attention models appear → evaluate as worker candidates
-- [ ] vLLM improves multi-model serving → enables heterogeneous workers more practically
+- [ ] vLLM/SGLang improves multi-model serving → enables heterogeneous workers more practically
 - [ ] Community reports on which abliteration method preserves medical/pharmacology knowledge best
 - [ ] New Claude reasoning distills with Heretic abliteration → test for clone researchers
+- [ ] Ling-2.7 or Ring-2.6 family drops → evaluate context length, active params, abliteration availability
