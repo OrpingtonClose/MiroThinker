@@ -332,6 +332,38 @@ def main() -> None:
         "--waves", type=int, default=3,
         help="Max worker waves for MCP engine (default: 3)",
     )
+    parser.add_argument(
+        "--model", default="",
+        help="Model name served by vLLM (overrides SWARM_WORKER_MODEL env var)",
+    )
+    parser.add_argument(
+        "--api-base", default="",
+        help="vLLM API base URL (overrides SWARM_API_BASE env var)",
+    )
+    parser.add_argument(
+        "--api-key", default="not-needed",
+        help="API key for endpoint (default: not-needed for local vLLM)",
+    )
+    parser.add_argument(
+        "--max-tokens", type=int, default=4096,
+        help="Max tokens per worker LLM response (default: 4096)",
+    )
+    parser.add_argument(
+        "--temperature", type=float, default=0.3,
+        help="Sampling temperature for workers (default: 0.3)",
+    )
+    parser.add_argument(
+        "--convergence-threshold", type=int, default=5,
+        help="Stop when new findings per wave drops below this (default: 5)",
+    )
+    parser.add_argument(
+        "--report-max-tokens", type=int, default=8192,
+        help="Max tokens for final report generation (default: 8192)",
+    )
+    parser.add_argument(
+        "--no-serendipity", action="store_true",
+        help="Disable the serendipity cross-domain wave",
+    )
 
     args = parser.parse_args()
 
@@ -393,26 +425,31 @@ def main() -> None:
         if store is None:
             store = ConditionStore(db_path="mcp_swarm.duckdb")
 
-        api_base = _get_api_base()
-        default_model = _get_model("SWARM_WORKER_MODEL", "huihui-ai/Qwen3.5-32B-abliterated")
+        api_base = args.api_base or _get_api_base()
+        default_model = args.model or _get_model(
+            "SWARM_WORKER_MODEL", "huihui-ai/Qwen3.5-32B-abliterated",
+        )
 
         mcp_config = MCPSwarmConfig(
             max_workers=config.max_workers,
             max_waves=args.waves,
+            convergence_threshold=args.convergence_threshold,
             api_base=api_base,
             model=default_model,
-            max_tokens=config.worker_max_tokens,
-            temperature=config.worker_temperature,
+            api_key=args.api_key,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
             required_angles=list(REQUIRED_ANGLE_LABELS),
-            enable_serendipity_wave=True,
+            report_max_tokens=args.report_max_tokens,
+            enable_serendipity_wave=not args.no_serendipity,
         )
 
         # The MCP engine needs a simple completion function for
         # angle detection and report generation (non-agent calls)
         complete_fn = make_complete_fn(
             "SWARM_WORKER_MODEL", default_model,
-            max_tokens=config.worker_max_tokens,
-            temperature=config.worker_temperature,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
         )
 
         engine = MCPSwarmEngine(
@@ -439,6 +476,15 @@ def main() -> None:
             with open(metrics_path, "w") as f:
                 json.dump({
                     "engine": "mcp",
+                    "model": default_model,
+                    "api_base": api_base,
+                    "max_tokens": args.max_tokens,
+                    "temperature": args.temperature,
+                    "convergence_threshold": args.convergence_threshold,
+                    "max_workers": config.max_workers,
+                    "max_waves": args.waves,
+                    "report_max_tokens": args.report_max_tokens,
+                    "serendipity_enabled": not args.no_serendipity,
                     "total_elapsed_s": result.metrics.total_elapsed_s,
                     "total_waves": result.metrics.total_waves,
                     "total_findings_stored": result.metrics.total_findings_stored,
@@ -453,6 +499,12 @@ def main() -> None:
             print(f"\n{'═' * 60}")
             print(f"  MCP SWARM TEST COMPLETE")
             print(f"{'═' * 60}")
+            print(f"  Model:              {default_model}")
+            print(f"  API base:           {api_base}")
+            print(f"  Temperature:        {args.temperature}")
+            print(f"  Max tokens:         {args.max_tokens}")
+            print(f"  Convergence:        {args.convergence_threshold}")
+            print(f"  Serendipity:        {not args.no_serendipity}")
             print(f"  Elapsed:            {result.metrics.total_elapsed_s:.1f}s")
             print(f"  Waves:              {result.metrics.total_waves}")
             print(f"  Findings stored:    {result.metrics.total_findings_stored}")
