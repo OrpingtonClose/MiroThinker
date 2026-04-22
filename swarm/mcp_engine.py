@@ -113,6 +113,8 @@ class MCPSwarmConfig:
         compact_every_n_waves: Run store compaction after this many waves.
         enable_rolling_summaries: Generate knowledge briefings after waves.
         report_max_chars: Max prompt chars for report generation.
+        worker_timeout_s: Per-worker timeout in seconds (default 600).
+            Workers that exceed this are cancelled so the wave can proceed.
     """
 
     max_workers: int = 7
@@ -132,6 +134,7 @@ class MCPSwarmConfig:
     compact_every_n_waves: int = 3
     enable_rolling_summaries: bool = True
     report_max_chars: int = 24000
+    worker_timeout_s: float = 600.0
 
 
 class MCPSwarmEngine:
@@ -208,16 +211,25 @@ class MCPSwarmEngine:
         )
 
         # Detect angles (always needed for worker assignment)
+        # Wrapped defensively — if LLM-based angle detection fails,
+        # fall back to section titles so the run continues.
         required_angles = list(config.required_angles)
-        if not required_angles:
-            required_angles = await extract_required_angles(
-                query, self.complete,
-            )
+        try:
+            if not required_angles:
+                required_angles = await extract_required_angles(
+                    query, self.complete,
+                )
 
-        detected_angles = await detect_angles_via_llm(
-            corpus, query, self.complete,
-            max_angles=config.max_workers,
-        )
+            detected_angles = await detect_angles_via_llm(
+                corpus, query, self.complete,
+                max_angles=config.max_workers,
+            )
+        except Exception as exc:
+            logger.warning(
+                "error=<%s> | angle detection failed, falling back to section titles",
+                exc,
+            )
+            detected_angles = None
 
         angles = merge_angles(
             detected=detected_angles or [s.title for s in sections[:config.max_workers]],
@@ -324,21 +336,36 @@ class MCPSwarmEngine:
                 )
                 agents.append((agent, a))
 
-            # Run all workers in parallel
+            # Run all workers in parallel with timeout protection.
+            # A hung worker (e.g. dead LLM connection) must not block the
+            # entire wave.  asyncio.wait_for raises TimeoutError which
+            # asyncio.gather captures via return_exceptions=True.
+            timeout = config.worker_timeout_s
             tasks = [
-                run_worker_agent(
-                    agent=agent,
-                    angle=a.angle,
-                    worker_id=f"worker_{a.worker_id}_wave_{wave}",
-                    query=query,
+                asyncio.wait_for(
+                    run_worker_agent(
+                        agent=agent,
+                        angle=a.angle,
+                        worker_id=f"worker_{a.worker_id}_wave_{wave}",
+                        query=query,
+                    ),
+                    timeout=timeout,
                 )
                 for agent, a in agents
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Collect results
+            # Collect results — exceptions (including TimeoutError) are
+            # logged and skipped so the wave continues with partial data.
             wave_tool_calls = 0
-            for r in results:
+            for idx, r in enumerate(results):
+                if isinstance(r, asyncio.TimeoutError):
+                    worker_angle = assignments[idx].angle if idx < len(assignments) else "unknown"
+                    logger.warning(
+                        "wave=<%d>, angle=<%s>, timeout_s=<%.0f> | worker timed out",
+                        wave, worker_angle, timeout,
+                    )
+                    continue
                 if isinstance(r, Exception):
                     logger.warning("wave=<%d> | worker failed: %s", wave, r)
                     continue
@@ -466,46 +493,56 @@ class MCPSwarmEngine:
         metrics.total_waves = wave if config.max_waves > 0 else 0
 
         # ── Serendipity wave (optional) ──────────────────────────────
+        # Wrapped defensively — serendipity is a bonus phase.  A crash
+        # here must not abort the run or prevent report generation.
         if config.enable_serendipity_wave and len(assignments) >= 2:
             phase_start = time.monotonic()
+            try:
+                # Build angle list for targeted cross-domain search
+                angle_list = ", ".join(a.angle for a in assignments)
 
-            # Build angle list for targeted cross-domain search
-            angle_list = ", ".join(a.angle for a in assignments)
+                serendipity_agent = create_worker_agent(
+                    store=self.store,
+                    angle="cross-domain connections",
+                    worker_id="serendipity",
+                    query=query,
+                    api_base=config.api_base,
+                    model=config.model,
+                    api_key=config.api_key,
+                    max_tokens=config.max_tokens,
+                    temperature=0.5,  # slightly higher for creativity
+                    phase="serendipity",
+                    max_return_chars=config.max_return_chars,
+                    source_model=config.source_model or config.model,
+                    source_run=config.source_run or run_id,
+                )
 
-            serendipity_agent = create_worker_agent(
-                store=self.store,
-                angle="cross-domain connections",
-                worker_id="serendipity",
-                query=query,
-                api_base=config.api_base,
-                model=config.model,
-                api_key=config.api_key,
-                max_tokens=config.max_tokens,
-                temperature=0.5,  # slightly higher for creativity
-                phase="serendipity",
-                max_return_chars=config.max_return_chars,
-                source_model=config.source_model or config.model,
-                source_run=config.source_run or run_id,
-            )
-
-            serendipity_result = await run_worker_agent(
-                agent=serendipity_agent,
-                angle="cross-domain connections",
-                worker_id="serendipity",
-                query=(
-                    f"Your job is to find CROSS-DOMAIN CONNECTIONS that no single "
-                    f"specialist would see. The research angles are: {angle_list}. "
-                    f"Use find_connections to discover interactions between angle pairs. "
-                    f"Use get_peer_insights and search_corpus to find where different "
-                    f"specialists' findings interact, compound, or contradict in "
-                    f"unexpected ways. Look for: compound interactions (e.g. iron + "
-                    f"trenbolone hematocrit), nutrient-drug interactions, timing "
-                    f"dependencies, dose-response relationships that span multiple "
-                    f"domains. Store every cross-domain connection as a finding with "
-                    f"store_finding. Research query: {query}"
-                ),
-            )
-            metrics.worker_results.append(serendipity_result)
+                serendipity_result = await asyncio.wait_for(
+                    run_worker_agent(
+                        agent=serendipity_agent,
+                        angle="cross-domain connections",
+                        worker_id="serendipity",
+                        query=(
+                            f"Your job is to find CROSS-DOMAIN CONNECTIONS that no single "
+                            f"specialist would see. The research angles are: {angle_list}. "
+                            f"Use find_connections to discover interactions between angle pairs. "
+                            f"Use get_peer_insights and search_corpus to find where different "
+                            f"specialists' findings interact, compound, or contradict in "
+                            f"unexpected ways. Look for: compound interactions (e.g. iron + "
+                            f"trenbolone hematocrit), nutrient-drug interactions, timing "
+                            f"dependencies, dose-response relationships that span multiple "
+                            f"domains. Store every cross-domain connection as a finding with "
+                            f"store_finding. Research query: {query}"
+                        ),
+                    ),
+                    timeout=config.worker_timeout_s,
+                )
+                metrics.worker_results.append(serendipity_result)
+            except Exception as exc:
+                logger.warning(
+                    "error=<%s> | serendipity wave failed, continuing to report",
+                    exc,
+                )
             metrics.phase_times["serendipity"] = time.monotonic() - phase_start
 
             await _emit({
@@ -515,14 +552,35 @@ class MCPSwarmEngine:
             })
 
         # ── Rolling summaries (optional) ─────────────────────────────
+        # Summaries are nice-to-have.  A failure must not block report.
         if config.enable_rolling_summaries:
             phase_start = time.monotonic()
-            await self._generate_rolling_summaries(assignments)
+            try:
+                await self._generate_rolling_summaries(assignments)
+            except Exception as exc:
+                logger.warning(
+                    "error=<%s> | rolling summaries failed, continuing to report",
+                    exc,
+                )
             metrics.phase_times["summaries"] = time.monotonic() - phase_start
 
         # ── Report generation ────────────────────────────────────────
+        # Report generation is critical but should not crash the entire
+        # run — return a partial report on failure so metrics and store
+        # data are still available.
         phase_start = time.monotonic()
-        report = await self._generate_report(query, assignments)
+        try:
+            report = await self._generate_report(query, assignments)
+        except Exception as exc:
+            logger.error(
+                "error=<%s> | report generation failed, returning store summary",
+                exc,
+            )
+            report = (
+                f"(report generation failed: {exc})\n\n"
+                f"Store contains {metrics.total_findings_stored} findings "
+                f"across {len(assignments)} angles after {metrics.total_waves} waves."
+            )
         metrics.phase_times["report"] = time.monotonic() - phase_start
         metrics.total_elapsed_s = time.monotonic() - t0
 
@@ -534,35 +592,40 @@ class MCPSwarmEngine:
         })
 
         # ── Run-level observability ──────────────────────────────────
-        # Store health snapshot (rows by type/angle)
-        self.store.store_health_snapshot(
-            source_run=run_id,
-            iteration=metrics.total_waves,
-        )
+        # Observability is best-effort — never let it crash the return.
+        try:
+            self.store.store_health_snapshot(
+                source_run=run_id,
+                iteration=metrics.total_waves,
+            )
 
-        # Emit run-level summary metric
-        self.store.emit_metric(
-            "run_metric",
-            {
-                "total_workers": metrics.total_workers,
-                "total_waves": metrics.total_waves,
-                "total_findings_stored": metrics.total_findings_stored,
-                "total_tool_calls": metrics.total_tool_calls,
-                "findings_per_wave": metrics.findings_per_wave,
-                "phase_times": metrics.phase_times,
-                "total_elapsed_s": round(metrics.total_elapsed_s, 1),
-                "convergence_reason": metrics.convergence_reason,
-                "angles": [a.angle for a in assignments],
-                "corpus_chars": len(corpus),
-            },
-            source_model=config.model,
-            source_run=run_id,
-        )
+            self.store.emit_metric(
+                "run_metric",
+                {
+                    "total_workers": metrics.total_workers,
+                    "total_waves": metrics.total_waves,
+                    "total_findings_stored": metrics.total_findings_stored,
+                    "total_tool_calls": metrics.total_tool_calls,
+                    "findings_per_wave": metrics.findings_per_wave,
+                    "phase_times": metrics.phase_times,
+                    "total_elapsed_s": round(metrics.total_elapsed_s, 1),
+                    "convergence_reason": metrics.convergence_reason,
+                    "angles": [a.angle for a in assignments],
+                    "corpus_chars": len(corpus),
+                },
+                source_model=config.model,
+                source_run=run_id,
+            )
 
-        logger.info(
-            "run_id=<%s>, total_elapsed_s=<%.1f> | observability metrics persisted",
-            run_id, metrics.total_elapsed_s,
-        )
+            logger.info(
+                "run_id=<%s>, total_elapsed_s=<%.1f> | observability metrics persisted",
+                run_id, metrics.total_elapsed_s,
+            )
+        except Exception as exc:
+            logger.warning(
+                "run_id=<%s>, error=<%s> | failed to persist run metrics",
+                run_id, exc,
+            )
 
         return MCPSwarmResult(
             report=report,
