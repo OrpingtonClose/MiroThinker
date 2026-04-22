@@ -324,6 +324,14 @@ def main() -> None:
         "--query", default="",
         help="Override the default swarm query",
     )
+    parser.add_argument(
+        "--engine", choices=["gossip", "mcp"], default="gossip",
+        help="Swarm engine: 'gossip' (original) or 'mcp' (agent-workers with tools)",
+    )
+    parser.add_argument(
+        "--waves", type=int, default=3,
+        help="Max worker waves for MCP engine (default: 3)",
+    )
 
     args = parser.parse_args()
 
@@ -376,18 +384,101 @@ def main() -> None:
         logger.error("no corpus provided — use --corpus, --db, or --enrich")
         sys.exit(1)
 
-    # Use LineageStore backed by ConditionStore if available
-    if store is not None:
-        config.lineage_store = store
-
     query = args.query or get_swarm_query()
 
-    asyncio.run(run_swarm_test(
-        corpus=corpus,
-        query=query,
-        config=config,
-        output_dir=args.output_dir,
-    ))
+    if args.engine == "mcp":
+        # MCP engine: agent-workers with ConditionStore tools
+        from swarm.mcp_engine import MCPSwarmConfig, MCPSwarmEngine
+
+        if store is None:
+            store = ConditionStore(db_path="mcp_swarm.duckdb")
+
+        api_base = _get_api_base()
+        default_model = _get_model("SWARM_WORKER_MODEL", "huihui-ai/Qwen3.5-32B-abliterated")
+
+        mcp_config = MCPSwarmConfig(
+            max_workers=config.max_workers,
+            max_waves=args.waves,
+            api_base=api_base,
+            model=default_model,
+            max_tokens=config.worker_max_tokens,
+            temperature=config.worker_temperature,
+            required_angles=list(REQUIRED_ANGLE_LABELS),
+            enable_serendipity_wave=True,
+        )
+
+        # The MCP engine needs a simple completion function for
+        # angle detection and report generation (non-agent calls)
+        complete_fn = make_complete_fn(
+            "SWARM_WORKER_MODEL", default_model,
+            max_tokens=config.worker_max_tokens,
+            temperature=config.worker_temperature,
+        )
+
+        engine = MCPSwarmEngine(
+            store=store,
+            complete=complete_fn,
+            config=mcp_config,
+        )
+
+        async def _run_mcp() -> None:
+            result = await engine.synthesize(
+                corpus=corpus,
+                query=query,
+            )
+            # Save results
+            output_path = Path(args.output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+
+            report_path = output_path / f"mcp_report_{timestamp}.md"
+            with open(report_path, "w") as f:
+                f.write(result.report)
+
+            metrics_path = output_path / f"mcp_metrics_{timestamp}.json"
+            with open(metrics_path, "w") as f:
+                json.dump({
+                    "engine": "mcp",
+                    "total_elapsed_s": result.metrics.total_elapsed_s,
+                    "total_waves": result.metrics.total_waves,
+                    "total_findings_stored": result.metrics.total_findings_stored,
+                    "total_tool_calls": result.metrics.total_tool_calls,
+                    "findings_per_wave": result.metrics.findings_per_wave,
+                    "phase_times": result.metrics.phase_times,
+                    "convergence_reason": result.metrics.convergence_reason,
+                    "angles_detected": result.angles_detected,
+                    "report_chars": len(result.report),
+                }, f, indent=2)
+
+            print(f"\n{'═' * 60}")
+            print(f"  MCP SWARM TEST COMPLETE")
+            print(f"{'═' * 60}")
+            print(f"  Elapsed:            {result.metrics.total_elapsed_s:.1f}s")
+            print(f"  Waves:              {result.metrics.total_waves}")
+            print(f"  Findings stored:    {result.metrics.total_findings_stored}")
+            print(f"  Tool calls:         {result.metrics.total_tool_calls}")
+            print(f"  Findings/wave:      {result.metrics.findings_per_wave}")
+            print(f"  Convergence:        {result.metrics.convergence_reason}")
+            print(f"  Report:             {len(result.report):,} chars")
+            print(f"  Angles:             {result.angles_detected}")
+            print(f"\n  Output directory:   {output_path.resolve()}")
+            print(f"  Report:             {report_path.name}")
+            print(f"  Metrics:            {metrics_path.name}")
+            print(f"{'═' * 60}\n")
+
+        asyncio.run(_run_mcp())
+    else:
+        # Original gossip engine
+        # Use LineageStore backed by ConditionStore if available
+        if store is not None:
+            config.lineage_store = store
+
+        asyncio.run(run_swarm_test(
+            corpus=corpus,
+            query=query,
+            config=config,
+            output_dir=args.output_dir,
+        ))
 
 
 if __name__ == "__main__":
