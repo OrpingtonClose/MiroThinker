@@ -339,7 +339,7 @@ class MCPSwarmEngine:
         else:
             metrics.convergence_reason = f"max waves ({config.max_waves}) reached"
 
-        metrics.total_waves = wave
+        metrics.total_waves = wave if config.max_waves > 0 else 0
 
         # ── Serendipity wave (optional) ──────────────────────────────
         if config.enable_serendipity_wave and len(assignments) >= 2:

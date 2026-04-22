@@ -37,6 +37,7 @@ Architecture:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -189,9 +190,18 @@ async def run_worker_agent(
     )
 
     try:
-        result = agent(task)
+        # agent(task) is synchronous (Strands Agent.__call__ wraps async
+        # internally).  Run in a thread so asyncio.gather can execute
+        # multiple workers concurrently.
+        result = await asyncio.to_thread(agent, task)
         response_text = str(result)
-        tool_calls = getattr(result, "metrics", {}).get("tool_calls", 0) if hasattr(result, "metrics") else 0
+
+        # Extract tool call count from AgentResult metrics if available.
+        tool_calls = 0
+        if isinstance(result, dict) and "metrics" in result:
+            tool_calls = result["metrics"].get("tool_calls", 0)
+        elif hasattr(result, "metrics") and isinstance(result.metrics, dict):
+            tool_calls = result.metrics.get("tool_calls", 0)
 
         logger.info(
             "worker_id=<%s>, angle=<%s>, response_chars=<%d> | agent worker complete",
