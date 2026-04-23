@@ -86,6 +86,7 @@ class ExtractedFinding:
         confidence: Estimated confidence (0.0-1.0).
         angle: The research angle this finding belongs to.
         source_type: Always 'worker_analysis' for tool-free workers.
+        source_url: URL reference extracted from the worker's reasoning.
         tags: Optional categorization tags.
     """
 
@@ -93,6 +94,7 @@ class ExtractedFinding:
     confidence: float = 0.7
     angle: str = ""
     source_type: str = "worker_analysis"
+    source_url: str = ""
     tags: list[str] = field(default_factory=list)
 
 
@@ -135,12 +137,15 @@ async def extract_findings_llm(
         f"For each claim, provide:\n"
         f"- fact: the specific claim (preserve exact numbers, dosages, citations)\n"
         f"- confidence: 0.0-1.0 (how well-supported is this claim?)\n"
+        f"- source: if the analysis references a URL or [Source: ...] marker, "
+        f"include the URL here. Otherwise omit or leave empty.\n"
         f"- tags: categorization (e.g. 'mechanism', 'dosage', 'timing', "
         f"'interaction', 'gap', 'contradiction')\n\n"
         f"Return ONLY a JSON array of objects. No markdown, no explanation.\n"
         f"Example: [{{"
         f'"fact": "Insulin sensitivity peaks 45 min post-workout", '
         f'"confidence": 0.85, '
+        f'"source": "https://example.com/study", '
         f'"tags": ["timing", "mechanism"]'
         f"}}]\n\n"
         f"JSON array:"
@@ -290,6 +295,7 @@ def store_extracted_findings(
                 fact=f.fact,
                 row_type="finding",
                 source_type=f.source_type,
+                source_url=f.source_url or None,
                 angle=f.angle,
                 confidence=f.confidence,
                 iteration=iteration,
@@ -432,10 +438,16 @@ def _parse_findings_json(
         if isinstance(tags, str):
             tags = [tags]
 
+        source_url = item.get("source", "") or ""
+        # Reject non-URL values the LLM may hallucinate
+        if source_url and not source_url.startswith(("http://", "https://")):
+            source_url = ""
+
         findings.append(ExtractedFinding(
             fact=fact,
             confidence=confidence,
             angle=angle,
+            source_url=source_url,
             tags=tags,
         ))
 
