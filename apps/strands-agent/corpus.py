@@ -1681,6 +1681,9 @@ class ConditionStore:
 
         now = datetime.now(timezone.utc).isoformat()
 
+        # Auto-stamp source_run from current_run (same logic as admit())
+        source_run = self.current_run or ""
+
         # Layer 0: store FULL raw text (no truncation)
         with self._lock:
             raw_id = self._next_id
@@ -1688,9 +1691,9 @@ class ConditionStore:
             self.conn.execute(
                 "INSERT INTO conditions "
                 "(id, fact, source_type, source_ref, row_type, "
-                "consider_for_use, created_at, iteration) "
-                "VALUES (?, ?, ?, ?, 'raw', FALSE, ?, ?)",
-                [raw_id, raw_text, source_type, source_ref, now, iteration],
+                "consider_for_use, created_at, iteration, source_run) "
+                "VALUES (?, ?, ?, ?, 'raw', FALSE, ?, ?, ?)",
+                [raw_id, raw_text, source_type, source_ref, now, iteration, source_run],
             )
 
         # Layer 1: split into paragraph-level chunks
@@ -1709,12 +1712,13 @@ class ConditionStore:
                     "INSERT INTO conditions "
                     "(id, fact, source_type, source_ref, row_type, "
                     "parent_id, consider_for_use, created_at, iteration, "
-                    "expansion_depth, angle) "
-                    "VALUES (?, ?, ?, ?, 'finding', ?, TRUE, ?, ?, ?, ?)",
+                    "expansion_depth, angle, source_run) "
+                    "VALUES (?, ?, ?, ?, 'finding', ?, TRUE, ?, ?, ?, ?, ?)",
                     [
                         chunk_id, para, source_type, source_ref,
                         raw_id, now, iteration, seq,
                         angle or f"iteration_{iteration}",
+                        source_run,
                     ],
                 )
                 chunk_ids.append(chunk_id)

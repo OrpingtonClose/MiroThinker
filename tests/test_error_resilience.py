@@ -76,13 +76,16 @@ TEST_QUERY = "Analyze interactions between insulin, anabolic compounds, and grow
 
 async def _mock_complete(prompt: str) -> str:
     """LLM mock that returns structured but predictable output."""
-    if "research angles" in prompt.lower() or "distinct topics" in prompt.lower():
-        return '["insulin_timing", "hematological_effects", "growth_hormone"]'
-    if "score each" in prompt.lower() or "assignment" in prompt.lower():
+    lower = prompt.lower()
+    if "score each" in lower or "assignment" in lower:
         return '{"scores": [[1,0,0],[0,1,0],[0,0,1]]}'
-    if "report" in prompt.lower():
+    # Report prompts contain "research angles" too — check for report
+    # indicators first so the report branch wins over angle detection.
+    if "compile" in lower or ("report" in lower and "findings" in lower):
         return "Mock synthesis report: insulin + anabolic compound interactions."
-    if "extract" in prompt.lower() and "claims" in prompt.lower():
+    if "research angles" in lower or "distinct topics" in lower:
+        return '["insulin_timing", "hematological_effects", "growth_hormone"]'
+    if "extract" in lower and "claims" in lower:
         return '[{"fact": "Mock finding from extraction", "confidence": 0.8, "tags": ["mock"]}]'
     return "Mock LLM response for testing."
 
@@ -257,7 +260,8 @@ class TestReportCrashReturnsPartial:
         async def _failing_report_complete(prompt: str) -> str:
             nonlocal call_count
             call_count += 1
-            if "report" in prompt.lower() and "comprehensive" in prompt.lower():
+            lower = prompt.lower()
+            if "compile" in lower or ("report" in lower and "findings" in lower):
                 raise RuntimeError("LLM endpoint down!")
             return await _mock_complete(prompt)
 
