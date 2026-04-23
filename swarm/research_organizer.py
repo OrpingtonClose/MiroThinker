@@ -67,7 +67,9 @@ def _safe_substitute(template: str, **kwargs: str) -> str:
     is NOT re-processed.
 
     Placeholders use ``$name`` syntax internally; the caller's
-    ``{name}`` braces are converted automatically.
+    ``{name}`` braces are converted automatically.  Doubled braces
+    ``{{`` / ``}}`` are treated as literal brace escapes and rendered
+    as single ``{`` / ``}`` in the output (matching f-string semantics).
 
     Args:
         template: The prompt template with ``{name}`` placeholders.
@@ -76,9 +78,14 @@ def _safe_substitute(template: str, **kwargs: str) -> str:
     Returns:
         The populated prompt string.
     """
-    # Convert {name} placeholders to $name for string.Template
-    converted = re.sub(r"\{(\w+)\}", r"$\1", template)
-    return string.Template(converted).safe_substitute(**kwargs)
+    # 1. Protect doubled braces from the regex by replacing with sentinels
+    protected = template.replace("{{", "\x00LBRACE\x00").replace("}}", "\x00RBRACE\x00")
+    # 2. Convert {name} placeholders to $name for string.Template
+    converted = re.sub(r"\{(\w+)\}", r"$\1", protected)
+    # 3. Substitute
+    result = string.Template(converted).safe_substitute(**kwargs)
+    # 4. Restore doubled braces as single braces (f-string semantics)
+    return result.replace("\x00LBRACE\x00", "{").replace("\x00RBRACE\x00", "}")
 
 
 # ---------------------------------------------------------------------------

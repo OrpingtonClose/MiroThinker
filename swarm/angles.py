@@ -249,9 +249,65 @@ async def detect_angles_via_llm(
                 a = line[6:].strip().strip("'\"-.•*")
                 if a and len(a) > 2:
                     angles.append(a[:80])
-        return angles[:max_angles]
+        return _dedup_angles(angles)[:max_angles]
     except Exception:
         return []
+
+
+# Pattern that catches "Topic (part 2)", "Topic part 3", "Topic - Part II", etc.
+_PART_SUFFIX_RE = re.compile(
+    r"\s*[-–—]?\s*\(?\s*part\s+\d+\s*\)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _dedup_angles(angles: list[str]) -> list[str]:
+    """Remove duplicate angles, including 'part N' variants.
+
+    If the LLM returns "Topic" and "Topic (part 2)", only the first
+    occurrence is kept.  Also catches substring duplicates where one
+    angle is fully contained in another.
+
+    Args:
+        angles: Raw angle list from LLM.
+
+    Returns:
+        Deduplicated angle list preserving original order.
+    """
+    if not angles:
+        return angles
+
+    # Strip "part N" suffixes to get base names
+    bases: list[str] = []
+    for a in angles:
+        base = _PART_SUFFIX_RE.sub("", a).strip()
+        bases.append(base if base else a)
+
+    seen_bases: set[str] = set()
+    deduped: list[str] = []
+
+    for i, angle in enumerate(angles):
+        base_lower = bases[i].lower()
+
+        # Skip if this base name (ignoring "part N") was already seen
+        if base_lower in seen_bases:
+            continue
+
+        # Skip if this angle is a substring of an already-kept angle
+        # or vice versa (e.g. "Insulin Timing" vs "Insulin Timing and Dosing")
+        is_dup = False
+        for existing_base in seen_bases:
+            if base_lower in existing_base or existing_base in base_lower:
+                is_dup = True
+                break
+        if is_dup:
+            continue
+
+        seen_bases.add(base_lower)
+        # Use the clean base name (without "part N") as the angle
+        deduped.append(bases[i])
+
+    return deduped
 
 
 def _prepare_sections(
