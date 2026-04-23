@@ -994,6 +994,21 @@ class MCPSwarmEngine:
         forum UI, separators), deduplicates across angles, and asks the LLM
         to compose a comprehensive practitioner-grade report.
         """
+        # Extract key entities from the query for relevance boosting.
+        # Findings that mention query entities are more valuable for the
+        # report than generic high-confidence findings.
+        query_words = set(query.lower().split())
+        # Keep only substantive words (>3 chars, skip common words)
+        _STOP_WORDS = {
+            "with", "that", "this", "from", "have", "been", "will",
+            "their", "about", "between", "based", "full", "related",
+            "taking", "context", "breakdown", "complexity",
+        }
+        entity_words = [
+            w for w in query_words
+            if len(w) > 3 and w not in _STOP_WORDS
+        ]
+
         # Gather top findings per angle with quality filtering
         sections: list[str] = []
         all_seen_facts: set[str] = set()
@@ -1010,20 +1025,32 @@ class MCPSwarmEngine:
                        ORDER BY
                          CASE WHEN source_type = 'worker_analysis' THEN 0 ELSE 1 END,
                          confidence DESC
-                       LIMIT 60""",
+                       LIMIT 80""",
                     [a.angle],
                 ).fetchall()
 
             if not rows:
                 continue
 
-            findings: list[str] = []
+            # Score each finding: confidence + entity-match boost + URL boost
+            scored: list[tuple[float, str, float, str | None]] = []
             for fact, conf, src_url, src_type in rows:
-                # Skip garbage
                 if self._is_garbage_finding(fact):
                     continue
+                fact_lower = fact.lower()
+                # Boost for mentioning query entities
+                entity_hits = sum(1 for w in entity_words if w in fact_lower)
+                entity_boost = min(entity_hits * 0.1, 0.3)
+                # Boost for having a source URL
+                url_boost = 0.05 if src_url else 0.0
+                score = conf + entity_boost + url_boost
+                scored.append((score, fact, conf, src_url))
 
-                # Cross-angle dedup: skip if we already have this exact fact
+            # Sort by combined score descending
+            scored.sort(key=lambda x: x[0], reverse=True)
+
+            findings: list[str] = []
+            for score, fact, conf, src_url in scored:
                 fact_key = fact.strip().lower()
                 if fact_key in all_seen_facts:
                     continue
