@@ -146,11 +146,21 @@ async def comprehend_query(
         content = re.sub(r"^```(?:json)?\s*", "", content)
         content = re.sub(r"\s*```$", "", content)
 
-    data = None
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError:
-        pass
+    def _try_parse_json(text: str) -> dict | None:
+        """Attempt to parse JSON, fixing common LLM mistakes."""
+        # Fix Python-style booleans
+        text = re.sub(r'\bTrue\b', 'true', text)
+        text = re.sub(r'\bFalse\b', 'false', text)
+        text = re.sub(r'\bNone\b', 'null', text)
+        # Remove trailing commas before ] or }
+        text = re.sub(r',\s*([}\]])', r'\1', text)
+        try:
+            result = json.loads(text)
+            return result if isinstance(result, dict) else None
+        except json.JSONDecodeError:
+            return None
+
+    data = _try_parse_json(content)
 
     if data is None:
         # LLMs often wrap valid JSON in preamble text; extract the
@@ -158,14 +168,16 @@ async def comprehend_query(
         brace_start = content.find("{")
         brace_end = content.rfind("}")
         if brace_start != -1 and brace_end > brace_start:
-            try:
-                data = json.loads(content[brace_start:brace_end + 1])
+            data = _try_parse_json(content[brace_start:brace_end + 1])
+            if data is not None:
                 logger.debug("query comprehension JSON extracted from preamble")
-            except json.JSONDecodeError:
-                pass
 
     if data is None:
-        logger.warning("query comprehension returned invalid JSON, using fallback")
+        logger.warning(
+            "content_preview=<%s> | query comprehension returned "
+            "invalid JSON, using fallback",
+            content[:300],
+        )
         return _fallback_comprehension(query)
 
     return QueryComprehension(
