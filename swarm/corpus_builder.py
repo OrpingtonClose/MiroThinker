@@ -85,24 +85,16 @@ class CorpusBuilderConfig:
 # ---------------------------------------------------------------------------
 
 _COMPREHENSION_PROMPT = """\
-You are a research analyst. Deeply understand what this query is about \
-— not just the surface words, but the full knowledge territory.
+TASK: Parse the research query below into a JSON object. \
+Output NOTHING except the JSON object — no markdown, no explanation, \
+no commentary before or after the JSON.
 
-Research query: {query}
+QUERY: {query}
 
-Analyze this query and output ONLY valid JSON:
-{
-  "entities": ["every entity, person, substance, concept mentioned or implied"],
-  "domains": ["every knowledge domain this touches — be expansive"],
-  "sub_questions": ["6-10 concrete sub-questions that research needs to answer"],
-  "academic_signals": true/false,
-  "search_queries": [
-    "8-12 specific search queries that would find authoritative content",
-    "include forum queries (site:reddit.com, site:forums.t-nation.com)",
-    "include academic queries (pharmacokinetics, dose-response)",
-    "include practitioner queries (protocol, dosage, timing)"
-  ]
-}"""
+EXAMPLE OUTPUT for query "creatine loading phase effects on ATP":
+{"entities":["creatine","ATP","phosphocreatine"],"domains":["sports nutrition","biochemistry","exercise physiology"],"sub_questions":["What is the optimal creatine loading dose?","How does creatine affect intracellular ATP levels?","What are the ergogenic effects during high-intensity exercise?"],"academic_signals":true,"search_queries":["creatine loading phase protocol dosage","creatine ATP resynthesis mechanism","creatine monohydrate systematic review meta-analysis","site:reddit.com creatine loading results","creatine phosphocreatine shuttle muscle","creatine dose-response curve performance","creatine supplementation body composition RCT","site:forums.t-nation.com creatine loading experience"]}
+
+NOW OUTPUT THE JSON FOR THE QUERY ABOVE. Remember: raw JSON only, no markdown."""
 
 
 @dataclass
