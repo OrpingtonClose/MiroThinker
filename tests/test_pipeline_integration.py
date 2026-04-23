@@ -109,8 +109,7 @@ def _make_config(**overrides) -> MCPSwarmConfig:
         "enable_serendipity_wave": False,
         "enable_rolling_summaries": False,
         "compact_every_n_waves": 0,
-        "max_return_chars": 6000,
-        "report_max_chars": 12000,
+
     }
     defaults.update(overrides)
     return MCPSwarmConfig(**defaults)

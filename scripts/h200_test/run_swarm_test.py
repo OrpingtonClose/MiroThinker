@@ -383,20 +383,12 @@ def main() -> None:
         help="Run identifier for provenance (e.g. run_042)",
     )
     parser.add_argument(
-        "--max-return-chars", type=int, default=6000,
-        help="Hard ceiling on chars any tool call returns (default: 6000)",
-    )
-    parser.add_argument(
         "--compact-every", type=int, default=3,
         help="Run store compaction every N waves (0 = disable, default: 3)",
     )
     parser.add_argument(
         "--no-rolling-summaries", action="store_true",
         help="Disable rolling knowledge summaries between waves",
-    )
-    parser.add_argument(
-        "--report-max-chars", type=int, default=24000,
-        help="Max prompt chars for report generation (default: 24000)",
     )
 
     args = parser.parse_args()
@@ -482,10 +474,8 @@ def main() -> None:
             enable_serendipity_wave=not args.no_serendipity,
             source_model=resolved_source_model,
             source_run=resolved_source_run,
-            max_return_chars=args.max_return_chars,
             compact_every_n_waves=args.compact_every,
             enable_rolling_summaries=not args.no_rolling_summaries,
-            report_max_chars=args.report_max_chars,
         )
 
         # The MCP engine needs a simple completion function for
@@ -531,10 +521,8 @@ def main() -> None:
                     "serendipity_enabled": not args.no_serendipity,
                     "source_model": resolved_source_model,
                     "source_run": resolved_source_run,
-                    "max_return_chars": args.max_return_chars,
                     "compact_every_n_waves": args.compact_every,
                     "rolling_summaries_enabled": not args.no_rolling_summaries,
-                    "report_max_chars": args.report_max_chars,
                     "total_elapsed_s": result.metrics.total_elapsed_s,
                     "total_waves": result.metrics.total_waves,
                     "total_findings_stored": result.metrics.total_findings_stored,
@@ -555,8 +543,6 @@ def main() -> None:
             print(f"  API base:           {api_base}")
             print(f"  Temperature:        {args.temperature}")
             print(f"  Max tokens:         {args.max_tokens}")
-            print(f"  Max return chars:   {args.max_return_chars}")
-            print(f"  Report max chars:   {args.report_max_chars}")
             print(f"  Convergence:        {args.convergence_threshold}")
             print(f"  Serendipity:        {not args.no_serendipity}")
             print(f"  Rolling summaries:  {not args.no_rolling_summaries}")

@@ -1,0 +1,135 @@
+{
+  "prompt": "Milos Sarcev insulin protocol for bodybuilding in the context of taking insulin, hgh and trenbolone based cycles with full complexity breakdown between all food related nutrients, supplements and PEDs",
+  "engine": "mcp",
+  "model": "meta-llama/llama-3.1-8b-instruct",
+  "api_base": "https://openrouter.ai/api/v1",
+  "max_tokens": 8192,
+  "temperature": 0.3,
+  "max_waves": 3,
+  "total_elapsed_s": 1039.8761893019982,
+  "total_waves": 2,
+  "total_findings_stored": 2537,
+  "total_tool_calls": 0,
+  "findings_per_wave": [
+    208,
+    180
+  ],
+  "phase_times": {
+    "corpus_acquisition": 33.1547542010012,
+    "ingestion": 10.743421278995811,
+    "wave_1_pkg": 0.0004637750025722198,
+    "wave_1": 375.91939519199514,
+    "wave_2_pkg": 0.07770810199872358,
+    "research_organizer_wave_1": 0.0006192259970703162,
+    "wave_2": 491.60474145999615,
+    "research_organizer_wave_2": 110.6142619279999,
+    "serendipity": 16.612688499000797,
+    "summaries": 0.06576319199666614,
+    "report": 1.0741193180001574
+  },
+  "convergence_reason": "converged at wave 2: delta -28 vs prev 208 < 5% threshold",
+  "angles_detected": [
+    "Insulin Protocol Development for Bodybuilding",
+    "Effects of Insulin on Body Composition and Aesthetics",
+    "Anabolic Steroid Use in Bodybuilding and its Interaction with Insulin",
+    "Nutrient and Supplement Management for Optimal Insulin Sensitivity and Bodybuild",
+    "Growth Hormone and Insulin Interactions in Bodybuilding",
+    "Risk Assessment and Mitigation Strategies for Insulin Use in Bodybuilding",
+    "Insulin Protocol Development for Bodybuilding (part 2)",
+    "Effects of Insulin on Body Composition and Aesthetics (part 2)"
+  ],
+  "report_chars": 29,
+  "corpus_acquisition_events": [
+    {
+      "type": "swarm_phase",
+      "phase": "corpus_acquisition_start"
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "corpus_acquisition_complete",
+      "corpus_chars": 340020,
+      "elapsed_s": 33.2
+    }
+  ],
+  "research_organizer_events": [
+    {
+      "type": "swarm_phase",
+      "phase": "research_organizer_wave_2",
+      "clones": 4,
+      "clone_findings": 10,
+      "elapsed_s": 110.6
+    }
+  ],
+  "all_events": [
+    {
+      "type": "swarm_phase",
+      "phase": "corpus_acquisition_start"
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "corpus_acquisition_complete",
+      "corpus_chars": 340020,
+      "elapsed_s": 33.2
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "ingestion_complete",
+      "workers": 8,
+      "angles": [
+        "Insulin Protocol Development for Bodybuilding",
+        "Effects of Insulin on Body Composition and Aesthetics",
+        "Anabolic Steroid Use in Bodybuilding and its Interaction with Insulin",
+        "Nutrient and Supplement Management for Optimal Insulin Sensitivity and Bodybuild",
+        "Growth Hormone and Insulin Interactions in Bodybuilding",
+        "Risk Assessment and Mitigation Strategies for Insulin Use in Bodybuilding",
+        "Insulin Protocol Development for Bodybuilding (part 2)",
+        "Effects of Insulin on Body Composition and Aesthetics (part 2)"
+      ],
+      "corpus_skipped": false
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_1_start",
+      "wave": 1
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_1_complete",
+      "wave": 1,
+      "new_findings": 208,
+      "total_findings": 2357,
+      "elapsed_s": 375.9
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_2_start",
+      "wave": 2
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "wave_2_complete",
+      "wave": 2,
+      "new_findings": 180,
+      "total_findings": 2537,
+      "elapsed_s": 491.6
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "research_organizer_wave_2",
+      "clones": 4,
+      "clone_findings": 10,
+      "elapsed_s": 110.6
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "serendipity_complete",
+      "elapsed_s": 16.6
+    },
+    {
+      "type": "swarm_phase",
+      "phase": "complete",
+      "total_elapsed_s": 1039.9,
+      "total_findings": 2537
+    }
+  ]
+}

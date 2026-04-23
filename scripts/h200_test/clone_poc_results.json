@@ -1,0 +1,370 @@
+{
+  "worker_angle": "insulin timing and nutrient partitioning",
+  "worker_output_chars": 4708,
+  "worker_elapsed_s": 15.7,
+  "clone_messages": 3,
+  "num_queries": 50,
+  "clone_precision": 0.42424242424242425,
+  "keyword_precision": 0.0,
+  "clone_recall": 0.9333333333333333,
+  "keyword_recall": 0.0,
+  "clone_wins": 14,
+  "keyword_wins": 18,
+  "ties": 18,
+  "avg_clone_latency_ms": 1038.775306820171,
+  "avg_keyword_latency_ms": 0.08240411974838935,
+  "precision_delta": 0.42424242424242425,
+  "decision": "proceed_stage3",
+  "judgments": [
+    {
+      "query": "Is this finding relevant to growth hormone and IGF-1 protocols?",
+      "finding": "Trenbolone acetate increases erythropoietin (EPO) production, raising hematocrit",
+      "clone_score": 0.2,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to hematological effects and blood management?",
+      "finding": "Aromatization to estradiol occurs via aromatase enzyme \u2014 higher testosterone doses mean more estrogen.",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to oral compounds and hepatoprotection?",
+      "finding": "Nandrolone decanoate at 200-400mg/week increases RBC with fewer androgenic sides.",
+      "clone_score": 0.2,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to testosterone and trenbolone pharmacokinetics?",
+      "finding": "Oxymetholone (Anadrol) at 50-100mg/day is the most potent oral for RBC stimulation.",
+      "clone_score": 0.2,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to insulin timing and nutrient partitioning?",
+      "finding": "Rapid-acting insulin (Humalog/NovoRapid) peaks at 60-90 minutes post-injection.",
+      "clone_score": 0.8,
+      "keyword_score": 0.2,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to oral compounds and hepatoprotection?",
+      "finding": "Aromatization to estradiol occurs via aromatase enzyme \u2014 higher testosterone doses mean more estrogen.",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to hematological effects and blood management?",
+      "finding": "Lantus (glargine) at 10-20 IU/day provides basal insulin coverage for 24 hours.",
+      "clone_score": 0.2,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to hematological effects and blood management?",
+      "finding": "Phase 4 (Weeks 13-16, Radical): Trenbolone at 400mg/week. Insulin at 6-8 IU pre-workout + 6 IU post-workout (Milos advanced protocol). GH at 4 IU/day. All compounds at peak. Expert monitoring required",
+      "clone_score": 0.8,
+      "keyword_score": 0.1,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to growth hormone and IGF-1 protocols?",
+      "finding": "CoQ10 (200-400mg/day) supports cardiovascular function during the oxidative stress of a heavy cycle.",
+      "clone_score": 0.2,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to hematological effects and blood management?",
+      "finding": "Milos Sarcev's framework: insulin timed around training windows, synchronized with GH pulses. Pre-workout 4-6 IU rapid-acting with 50-80g fast carbs. Intra-workout sipping dextrose. Post-workout anoth",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to growth hormone and IGF-1 protocols?",
+      "finding": "Real-world observation: most bodybuilders who run into trouble with insulin are those who escalated dosing too fast without confirming fasting glucose stability.",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": true
+    },
+    {
+      "query": "Is this finding relevant to growth hormone and IGF-1 protocols?",
+      "finding": "GH amplifies insulin's anabolic effects through IGF-1 mediation.",
+      "clone_score": 0.9,
+      "keyword_score": 0.2,
+      "judge_relevant": true
+    },
+    {
+      "query": "Is this finding relevant to testosterone and trenbolone pharmacokinetics?",
+      "finding": "by 15-20% over 8-12 weeks. At 400mg/week, hematocrit commonly reaches 52-54%.",
+      "clone_score": 0.2,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to growth hormone and IGF-1 protocols?",
+      "finding": "Naringin (grapefruit extract) may modestly reduce hematocrit by 2-3 points.",
+      "clone_score": 0.0,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to insulin timing and nutrient partitioning?",
+      "finding": "Cholestasis risk increases with stacking multiple 17-aa orals simultaneously \u2014 never stack turinabol with another oral steroid.",
+      "clone_score": 0.0,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to insulin timing and nutrient partitioning?",
+      "finding": "Omega-3 (4-6g EPA+DHA/day) partially mitigates trenbolone's devastating effect on HDL cholesterol.",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to oral compounds and hepatoprotection?",
+      "finding": "Coach Dave Palumbo protocol: testosterone 750mg/week + trenbolone 400mg/week + insulin 10 IU pre/post-workout + GH 4 IU/day split AM/PM. Total cycle length 16 weeks.",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to oral compounds and hepatoprotection?",
+      "finding": "Milk thistle (silymarin) at 420mg/day shows mixed evidence for liver protection compared to TUDCA.",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": true
+    },
+    {
+      "query": "Is this finding relevant to hematological effects and blood management?",
+      "finding": "Boldenone's long ester means it must be started early in the cycle and will persist 4-6 weeks after last injection.",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to hematological effects and blood management?",
+      "finding": "Trenbolone acetate increases erythropoietin (EPO) production, raising hematocrit",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": true
+    },
+    {
+      "query": "Is this finding relevant to hematological effects and blood management?",
+      "finding": "Turinabol is 17-alpha-alkylated \u2014 hepatotoxic. Limit cycles to 6-8 weeks.",
+      "clone_score": 0.2,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to growth hormone and IGF-1 protocols?",
+      "finding": "Iron supplementation during phlebotomy prevents functional iron deficiency.",
+      "clone_score": 0.0,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to growth hormone and IGF-1 protocols?",
+      "finding": "Vitamin C (1-2g/day) enhances iron absorption \u2014 important during phlebotomy cycles to maintain ferritin.",
+      "clone_score": 0.2,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to growth hormone and IGF-1 protocols?",
+      "finding": "CJC-1295/Ipamorelin combination provides more physiological GH release patterns.",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": true
+    },
+    {
+      "query": "Is this finding relevant to growth hormone and IGF-1 protocols?",
+      "finding": "Trenbolone acetate half-life: 24-72 hours. Enanthate: 5-7 days.",
+      "clone_score": 0.5,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to hematological effects and blood management?",
+      "finding": "Oxymetholone (Anadrol) at 50-100mg/day is the most potent oral for RBC stimulation.",
+      "clone_score": 0.2,
+      "keyword_score": 0.0,
+      "judge_relevant": true
+    },
+    {
+      "query": "Is this finding relevant to hematological effects and blood management?",
+      "finding": "Phase 2 (Weeks 5-8, Moderate): Testosterone increased to 500mg/week. Introduce Milos-style insulin at 2 IU pre-workout only with 30g dextrose. GH increased to 3 IU/day. Add boldenone at 400mg/week (fr",
+      "clone_score": 0.8,
+      "keyword_score": 0.2,
+      "judge_relevant": true
+    },
+    {
+      "query": "Is this finding relevant to growth hormone and IGF-1 protocols?",
+      "finding": "Potassium: insulin drives potassium into cells (intracellular shift). Combined with heavy sweating during training, hypokalemia risk is real. Supplement 99mg potassium with each insulin dose.",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to growth hormone and IGF-1 protocols?",
+      "finding": "Phase 2 (Weeks 5-8, Moderate): Testosterone increased to 500mg/week. Introduce Milos-style insulin at 2 IU pre-workout only with 30g dextrose. GH increased to 3 IU/day. Add boldenone at 400mg/week (fr",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": true
+    },
+    {
+      "query": "Is this finding relevant to insulin timing and nutrient partitioning?",
+      "finding": "Post-workout insulin drives amino acids into muscle tissue via GLUT4 upregulation.",
+      "clone_score": 0.9,
+      "keyword_score": 0.2,
+      "judge_relevant": true
+    },
+    {
+      "query": "Is this finding relevant to growth hormone and IGF-1 protocols?",
+      "finding": "Combined with trenbolone's EPO-driven erythropoiesis, hematocrit can exceed 55% \u2014 dangerous territory.",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to oral compounds and hepatoprotection?",
+      "finding": "\u2014 direct bone marrow stimulation rather than EPO pathway.",
+      "clone_score": 0.0,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to testosterone and trenbolone pharmacokinetics?",
+      "finding": "Boldenone produces ATD (1,4,6-androstatriene-3,17-dione) as a metabolite \u2014 has mild AI properties.",
+      "clone_score": 0.2,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to testosterone and trenbolone pharmacokinetics?",
+      "finding": "Real-world PCT after complex cycle: HCG 1500 IU EOD for 2 weeks starting 2 weeks after last long-ester injection. Then Nolvadex 20mg/day for 6 weeks + Clomid 50mg/day for 4 weeks.",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": true
+    },
+    {
+      "query": "Is this finding relevant to hematological effects and blood management?",
+      "finding": "MK-677 (ibutamoren) at 25mg/day raises GH by 40-60% but causes water retention.",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": true
+    },
+    {
+      "query": "Is this finding relevant to oral compounds and hepatoprotection?",
+      "finding": "Testosterone serves as the anabolic base \u2014 never run trenbolone without adequate testosterone (minimum 200mg/week).",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to oral compounds and hepatoprotection?",
+      "finding": "Phase 3 (Weeks 9-12, Aggressive): Add trenbolone acetate at 200mg/week, ramping to 300mg/week week 11. Add LGD-4033 at 10mg/day. Insulin increased to 4 IU pre-workout + 4 IU post-workout under Milos f",
+      "clone_score": 0.8,
+      "keyword_score": 0.2,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to testosterone and trenbolone pharmacokinetics?",
+      "finding": "Bloodwork cadence: full panel at baseline, 4 weeks in, 8 weeks in, 12 weeks in. Hematocrit, liver enzymes, fasting glucose, lipid panel, prolactin, estradiol, IGF-1.",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": true
+    },
+    {
+      "query": "Is this finding relevant to hematological effects and blood management?",
+      "finding": "Boldenone produces ATD (1,4,6-androstatriene-3,17-dione) as a metabolite \u2014 has mild AI properties.",
+      "clone_score": 0.2,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to insulin timing and nutrient partitioning?",
+      "finding": "Phase 4 (Weeks 13-16, Radical): Trenbolone at 400mg/week. Insulin at 6-8 IU pre-workout + 6 IU post-workout (Milos advanced protocol). GH at 4 IU/day. All compounds at peak. Expert monitoring required",
+      "clone_score": 0.8,
+      "keyword_score": 0.2,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to insulin timing and nutrient partitioning?",
+      "finding": "Milos emphasizes: start conservative at 2 IU pre-workout only. Add post-workout after 2 weeks if glucose stable. Never exceed 10 IU per shot without years of experience. Fasting glucose must stay belo",
+      "clone_score": 0.9,
+      "keyword_score": 0.0,
+      "judge_relevant": true
+    },
+    {
+      "query": "Is this finding relevant to hematological effects and blood management?",
+      "finding": "GH at doses above 6 IU/day commonly causes carpal tunnel syndrome and joint pain.",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to insulin timing and nutrient partitioning?",
+      "finding": "Bloodwork cadence: full panel at baseline, 4 weeks in, 8 weeks in, 12 weeks in. Hematocrit, liver enzymes, fasting glucose, lipid panel, prolactin, estradiol, IGF-1.",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": true
+    },
+    {
+      "query": "Is this finding relevant to oral compounds and hepatoprotection?",
+      "finding": "Competition prep modification: trenbolone dose increased to 600mg/week final 8 weeks, insulin reduced to pre-workout only (post-workout dropped to prevent water retention).",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to growth hormone and IGF-1 protocols?",
+      "finding": "Omega-3 (4-6g EPA+DHA/day) partially mitigates trenbolone's devastating effect on HDL cholesterol.",
+      "clone_score": 0.2,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to insulin timing and nutrient partitioning?",
+      "finding": "Phase 1 (Weeks 1-4, Conservative): Testosterone enanthate 300mg/week + GH 2 IU/day AM. Optional turinabol 40mg/day weeks 1-6. Establish bloodwork baselines week 0 and 4. No insulin. Learn GH timing an",
+      "clone_score": 0.8,
+      "keyword_score": 0.4,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to growth hormone and IGF-1 protocols?",
+      "finding": "Phase 3 (Weeks 9-12, Aggressive): Add trenbolone acetate at 200mg/week, ramping to 300mg/week week 11. Add LGD-4033 at 10mg/day. Insulin increased to 4 IU pre-workout + 4 IU post-workout under Milos f",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to testosterone and trenbolone pharmacokinetics?",
+      "finding": "Regular phlebotomy (500mL every 8 weeks) manages polycythemia.",
+      "clone_score": 0.2,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    },
+    {
+      "query": "Is this finding relevant to insulin timing and nutrient partitioning?",
+      "finding": "GH-induced lipolysis peaks at 3-4 hours post-injection \u2014 fasted morning dosing optimal.",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": true
+    },
+    {
+      "query": "Is this finding relevant to hematological effects and blood management?",
+      "finding": "Actovegin at 200-400mg IV or 600-1200mg oral improves muscle recovery and aerobic capacity.",
+      "clone_score": 0.8,
+      "keyword_score": 0.0,
+      "judge_relevant": false
+    }
+  ]
+}

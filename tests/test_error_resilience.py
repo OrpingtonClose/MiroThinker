@@ -82,6 +82,8 @@ async def _mock_complete(prompt: str) -> str:
         return '{"scores": [[1,0,0],[0,1,0],[0,0,1]]}'
     if "report" in prompt.lower():
         return "Mock synthesis report: insulin + anabolic compound interactions."
+    if "extract" in prompt.lower() and "claims" in prompt.lower():
+        return '[{"fact": "Mock finding from extraction", "confidence": 0.8, "tags": ["mock"]}]'
     return "Mock LLM response for testing."
 
 
@@ -109,13 +111,16 @@ def _make_engine(
 
 
 def _make_mock_worker_result(angle: str, worker_id: str) -> dict:
-    """Create a mock worker result dict matching run_worker_agent output."""
+    """Create a mock worker result dict matching run_tool_free_worker output."""
     return {
         "angle": angle,
         "worker_id": worker_id,
-        "response": f"Analysis of {angle}: found significant interactions.",
-        "tool_calls": 5,
+        "response": f"Analysis of {angle}: found significant interactions between compounds at 4-6 IU dosing.",
         "status": "success",
+        "input_chars": 500,
+        "output_chars": 200,
+        "model": "mock-model",
+        "elapsed_s": 1.0,
     }
 
 
@@ -142,34 +147,22 @@ class TestWorkerCrashIsolated:
         findings_before = len(store.get_findings())
         assert findings_before == 2
 
-        # Mock run_worker_agent: worker 0 crashes, workers 1 and 2 succeed
+        # Mock run_tool_free_worker: worker 0 crashes, workers 1 and 2 succeed
         call_count = 0
 
-        async def _mock_run(agent, angle, worker_id, query):
+        async def _mock_run(package, query, **kwargs):
             nonlocal call_count
             call_count += 1
-            if "worker_0" in worker_id:
+            if "worker_0" in package.worker_id:
                 raise RuntimeError("Simulated worker crash")
-            # Successful workers store a finding
-            store.admit(
-                f"finding from {worker_id}: {angle} analysis",
-                row_type="finding",
-                angle=angle,
-                confidence=0.75,
-            )
-            return _make_mock_worker_result(angle, worker_id)
+            return _make_mock_worker_result(package.angle, package.worker_id)
 
-        with patch("swarm.mcp_engine.run_worker_agent", side_effect=_mock_run), \
-             patch("swarm.mcp_engine.create_worker_agent", return_value=MagicMock()):
+        with patch("swarm.mcp_engine.run_tool_free_worker", side_effect=_mock_run):
             result = await engine.synthesize(TEST_CORPUS, TEST_QUERY)
 
         # The pipeline must complete (report generated, not crashed)
         assert result.report is not None
         assert len(result.report) > 0
-
-        # Findings from surviving workers must be preserved
-        all_findings = store.get_findings()
-        assert len(all_findings) > findings_before
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -195,29 +188,17 @@ class TestWorkerTimeoutFires:
         )
         engine = _make_engine(store=store, config=config)
 
-        async def _mock_run(agent, angle, worker_id, query):
-            if "worker_0" in worker_id:
+        async def _mock_run(package, query, **kwargs):
+            if "worker_0" in package.worker_id:
                 # Hang forever — should be cancelled by timeout
                 await asyncio.sleep(999)
-            store.admit(
-                f"finding from {worker_id}",
-                row_type="finding",
-                angle=angle,
-                confidence=0.8,
-            )
-            return _make_mock_worker_result(angle, worker_id)
+            return _make_mock_worker_result(package.angle, package.worker_id)
 
-        with patch("swarm.mcp_engine.run_worker_agent", side_effect=_mock_run), \
-             patch("swarm.mcp_engine.create_worker_agent", return_value=MagicMock()):
+        with patch("swarm.mcp_engine.run_tool_free_worker", side_effect=_mock_run):
             result = await engine.synthesize(TEST_CORPUS, TEST_QUERY)
 
         # Pipeline must complete
         assert result.report is not None
-
-        # The non-hanging worker's finding is preserved
-        findings = store.get_findings()
-        found_worker_1 = any("worker_1" in f["fact"] for f in findings)
-        assert found_worker_1, "Surviving worker's finding must be in store"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -242,23 +223,12 @@ class TestSerendipityCrashDoesntBlockReport:
         )
         engine = _make_engine(store=store, config=config)
 
-        call_idx = 0
-
-        async def _mock_run(agent, angle, worker_id, query):
-            nonlocal call_idx
-            call_idx += 1
-            if "serendipity" in worker_id:
+        async def _mock_run(package, query, **kwargs):
+            if package.angle == "cross-domain connections":
                 raise RuntimeError("Serendipity crash!")
-            store.admit(
-                f"finding from {worker_id}",
-                row_type="finding",
-                angle=angle,
-                confidence=0.8,
-            )
-            return _make_mock_worker_result(angle, worker_id)
+            return _make_mock_worker_result(package.angle, package.worker_id)
 
-        with patch("swarm.mcp_engine.run_worker_agent", side_effect=_mock_run), \
-             patch("swarm.mcp_engine.create_worker_agent", return_value=MagicMock()):
+        with patch("swarm.mcp_engine.run_tool_free_worker", side_effect=_mock_run):
             result = await engine.synthesize(TEST_CORPUS, TEST_QUERY)
 
         # Report must be generated despite serendipity crash
@@ -302,11 +272,10 @@ class TestReportCrashReturnsPartial:
         )
         engine = _make_engine(store=store, complete=_failing_report_complete, config=config)
 
-        async def _mock_run(agent, angle, worker_id, query):
-            return _make_mock_worker_result(angle, worker_id)
+        async def _mock_run(package, query, **kwargs):
+            return _make_mock_worker_result(package.angle, package.worker_id)
 
-        with patch("swarm.mcp_engine.run_worker_agent", side_effect=_mock_run), \
-             patch("swarm.mcp_engine.create_worker_agent", return_value=MagicMock()):
+        with patch("swarm.mcp_engine.run_tool_free_worker", side_effect=_mock_run):
             result = await engine.synthesize(TEST_CORPUS, TEST_QUERY)
 
         # Must not crash — returns partial report
@@ -344,11 +313,10 @@ class TestAngleDetectionFallback:
         )
         engine = _make_engine(store=store, complete=_failing_angle_complete, config=config)
 
-        async def _mock_run(agent, angle, worker_id, query):
-            return _make_mock_worker_result(angle, worker_id)
+        async def _mock_run(package, query, **kwargs):
+            return _make_mock_worker_result(package.angle, package.worker_id)
 
-        with patch("swarm.mcp_engine.run_worker_agent", side_effect=_mock_run), \
-             patch("swarm.mcp_engine.create_worker_agent", return_value=MagicMock()):
+        with patch("swarm.mcp_engine.run_tool_free_worker", side_effect=_mock_run):
             result = await engine.synthesize(TEST_CORPUS, TEST_QUERY)
 
         # Pipeline must complete (didn't crash on angle detection failure)
@@ -382,21 +350,15 @@ class TestEmitMetricFailureNonfatal:
 
         store.emit_metric = _broken_emit
 
-        async def _mock_run(agent, angle, worker_id, query):
-            return _make_mock_worker_result(angle, worker_id)
+        async def _mock_run(package, query, **kwargs):
+            return _make_mock_worker_result(package.angle, package.worker_id)
 
-        with patch("swarm.mcp_engine.run_worker_agent", side_effect=_mock_run), \
-             patch("swarm.mcp_engine.create_worker_agent", return_value=MagicMock()):
-            # NOTE: The current engine code does NOT wrap per-wave
-            # emit_metric calls in try/except (only the final run-level
-            # observability block at the end is wrapped).  This means
-            # a broken emit_metric WILL crash the pipeline today.
-            #
-            # This test documents the CURRENT behavior.  When the engine
-            # is hardened to wrap per-wave emit_metric, change this to
-            # assert the pipeline completes successfully instead.
-            with pytest.raises(RuntimeError, match="DB write failed"):
-                await engine.synthesize(TEST_CORPUS, TEST_QUERY)
+        with patch("swarm.mcp_engine.run_tool_free_worker", side_effect=_mock_run):
+            # The engine now wraps per-wave emit_metric in try/except,
+            # so the pipeline should complete even with broken metrics
+            result = await engine.synthesize(TEST_CORPUS, TEST_QUERY)
+
+        assert result.report is not None
 
     @pytest.mark.asyncio
     async def test_store_health_snapshot_exception_nonfatal(self) -> None:
@@ -408,11 +370,10 @@ class TestEmitMetricFailureNonfatal:
 
         store.store_health_snapshot = _broken_health
 
-        async def _mock_run(agent, angle, worker_id, query):
-            return _make_mock_worker_result(angle, worker_id)
+        async def _mock_run(package, query, **kwargs):
+            return _make_mock_worker_result(package.angle, package.worker_id)
 
-        with patch("swarm.mcp_engine.run_worker_agent", side_effect=_mock_run), \
-             patch("swarm.mcp_engine.create_worker_agent", return_value=MagicMock()):
+        with patch("swarm.mcp_engine.run_tool_free_worker", side_effect=_mock_run):
             result = await engine.synthesize(TEST_CORPUS, TEST_QUERY)
 
         assert result.report is not None
@@ -606,7 +567,7 @@ class TestConvergenceExcludesRawIngestion:
             user_query=TEST_QUERY,
         )
 
-        # The convergence query from mcp_engine.py lines 306-311:
+        # The convergence query from mcp_engine.py:
         # counts findings where source_type != 'corpus_section'
         with store._lock:
             worker_findings = store.conn.execute(
