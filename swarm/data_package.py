@@ -225,7 +225,7 @@ def build_data_packages(
         Wave 3+: All 7 sections
 
     When incremental=True (default), wave 2+ packages deliver deltas:
-        - §2 corpus material omitted (worker already has it from wave 1)
+        - §2 corpus material always included (workers are stateless)
         - §3 hive findings limited to NEW cross-angle findings since last wave
         - A delta header summarizes what changed since the last wave
 
