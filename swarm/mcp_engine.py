@@ -1233,6 +1233,51 @@ class MCPSwarmEngine:
         # Strip fabricated fold-change numbers like "by 0.9-fold"
         report = re.sub(r"\s+by\s+[\d.]+\s*-\s*fold", "", report)
 
+        # Strip fabricated academic citations like "(Katz et al., 2018)"
+        # or "[1] Author, A., et al. (Year)." that the LLM invents.
+        # Only strip if the citation doesn't contain a real URL.
+        report = re.sub(
+            r"\s*\([A-Z][a-z]+(?:\s+et\s+al\.?)?,\s*\d{4}\)", "", report
+        )
+
+        # Strip numbered reference lines with fabricated journal citations
+        # e.g., "[1] Katz, A., et al. (2018). Title. Journal, Vol, Pages."
+        report = re.sub(
+            r"^\[\d+\]\s+[A-Z][a-z]+,.*?(?:Journal|Biochem|Endocrin|"
+            r"Molecular|Medicine|Biology|Metabolism|Physiology).*$",
+            "",
+            report,
+            flags=re.MULTILINE,
+        )
+
+        # Strip parenthetical finding echoes where the LLM copies the
+        # entire finding text inside parentheses after the claim
+        report = re.sub(
+            r"\s*\([^)]{50,}\)",
+            "",
+            report,
+        )
+
+        # Strip orphaned numbered references that are just finding text
+        # repeated verbatim, not actual URLs. Lines like:
+        # "[5] The combination of trenbolone and insulin can lead to..."
+        report = re.sub(
+            r"^\[\d+\]\s+(?!https?://)[A-Z].*$",
+            "",
+            report,
+            flags=re.MULTILINE,
+        )
+
+        # Clean up empty references section left after stripping
+        report = re.sub(
+            r"\*\*References\*\*\s*\n(?:\s*\n)+(?=\*\*|$)",
+            "",
+            report,
+        )
+
+        # Collapse triple+ blank lines to double
+        report = re.sub(r"\n{3,}", "\n\n", report)
+
         # Post-process: deduplicate repeated sentences across sections.
         # Small models (8B) often repeat the same filler sentence in
         # multiple sections.  We keep the first occurrence and remove
