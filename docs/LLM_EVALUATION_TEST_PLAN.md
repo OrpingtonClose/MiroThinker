@@ -391,26 +391,169 @@ For models viable as Flock drivers (high-volume SQL+LLM):
 
 ---
 
-## Phase 4: Local/Downloadable Model Testing (optional, 2-4 hours, ~$5-20 VM rental)
+## Phase 4: Local Model Testing on H200 (2-4 hours, $0 API cost)
 
-**Purpose:** Test abliterated open models that guarantee no censorship.
+**Purpose:** Test abliterated open models on local hardware — zero cost, zero censorship,
+zero rate limits. Every run is free after the one-time model download.
 
-### Infrastructure
-- Rent 1× H100 80GB on Vast.ai (VAST_AI_API_KEY available)
-- Install vLLM, download model weights
-- Expose OpenAI-compatible API endpoint
-- Point MiroThinker's `api_base` at the VM
+### Current Hardware: 1× H200 (140 GB VRAM)
 
-### Models to Test
-| Model | Size | Context | Why |
+VRAM budget per model (including KV cache and framework overhead):
+
+| Model Class | Quantization | Weights | KV Cache Budget | Fits? |
+|---|---|---|---|---|
+| 70B dense | FP8 | ~70 GB | ~65 GB (32K ctx) | **Yes — sweet spot** |
+| 70B dense | INT8 | ~70 GB | ~65 GB | Yes |
+| 70B dense | FP16 | ~140 GB | ~0 GB | Barely — no KV room |
+| 70B dense | Q4 | ~35 GB | ~100 GB (long ctx!) | Yes — room for 2nd model |
+| 235B MoE (22B active) | INT4/AWQ | ~118 GB | ~18 GB (8K ctx only) | **Tight but yes** |
+| 235B MoE (22B active) | FP8 | ~235 GB | — | No |
+| 405B dense | INT4 | ~203 GB | — | **No** — need 2+ GPUs |
+| 35B MoE (3B active) | FP16 | ~70 GB | ~65 GB | Yes |
+| 8B dense | FP16 | ~16 GB | ~120 GB (massive ctx) | Yes — flock driver |
+
+### Target Hardware: 8× H200 (1.12 TB VRAM total)
+
+| Config | GPU Allocation | Models Served | Purpose |
 |---|---|---|---|
-| Llama-4-Maverick-abliterated | 17B×128E | 1M | Massive MoE, abliterated = guaranteed uncensored |
-| Qwen3-235B-A22B | 22B active | 128K | Strong reasoning, Chinese origin = different censorship profile |
-| Hermes-3-Llama-3.1-70B | 70B | 128K | NousResearch uncensored fine-tune |
-| Mistral-Large-abliterated | varies | 128K | If available — Mistral's reasoning + removed safety |
+| Quality-first | 4 GPU TP=4: 405B FP8, 4× 1 GPU: 70B FP8 | 1× orchestrator + 4× workers | Apex reasoning + parallel workers |
+| Throughput-first | 8× 1 GPU: 70B FP8 each | 8× workers | Maximum parallelism (8 topics simultaneously) |
+| Balanced | 2 GPU TP=2: 235B FP8, 2 GPU TP=2: 235B FP8, 4× 1 GPU: 70B FP8 | 2× orchestrator/report + 4× workers | Quality + parallelism |
+| Research fleet | 6× 1 GPU: 70B variants (different abliterations), 2× 1 GPU: 8B flock | 6 different 70B models | Blind spot comparison |
 
-### Test Protocol
-Same as Phase 2 but on local VM. Run T1 + T2 (baseline + tren deep dive) to establish quality floor.
+### Available Abliterated Models
+
+| Model | HuggingFace ID | Params | Abliteration | VRAM (FP8) | Notes |
+|---|---|---|---|---|---|
+| Hermes-3-405B-Uncensored | `nicoboss/Hermes-3-Llama-3.1-405B-Uncensored` | 405B | Full uncensor finetune | ~405 GB | 8× H200 only (TP=4+) |
+| Qwen3-235B-A22B-abliterated | `huihui-ai/Huihui-Qwen3-235B-A22B-Instruct-abliterated` | 235B (22B active) | Abliterated | ~118 GB (INT4) | Fits 1× H200 at INT4 |
+| Llama-3.3-70B-abliterated | `huihui-ai/Llama-3.3-70B-Instruct-abliterated` | 70B | Abliterated | ~70 GB | **Primary worker candidate** |
+| Hermes-3-Llama-3.1-70B | `NousResearch/Hermes-3-Llama-3.1-70B` | 70B | Uncensored fine-tune | ~70 GB | NousResearch quality |
+| Qwen3.5-35B-A3B-abliterated | `huihui-ai/Huihui-Qwen3.5-35B-A3B-abliterated` | 35B (3B active) | Abliterated | ~70 GB (FP16) | Fast MoE — flock candidate |
+| Qwen3-4B-abliterated | `huihui-ai/Qwen3-4B-abliterated` | 4B | Abliterated | ~8 GB | Flock / concurrent with 70B |
+| Qwen3.6-35B-A3B | `Qwen/Qwen3.6-35B-A3B` | 35B (3B active) | Base (not abliterated) | ~70 GB | May be uncensored with research framing |
+
+### 1× H200 Configurations (current hardware)
+
+#### Config L1: Single 70B FP8 — Simplest, Proven Quality
+
+```bash
+vllm serve huihui-ai/Llama-3.3-70B-Instruct-abliterated \
+  --dtype float8_e4m3fn \
+  --max-model-len 32768 \
+  --gpu-memory-utilization 0.92 \
+  --port 8000 \
+  --api-key local-test
+```
+
+- **VRAM:** ~75 GB weights + framework, ~60 GB for KV cache (32K context)
+- **Throughput:** ~30-50 tok/s single request, ~80-120 tok/s with continuous batching
+- **Use:** Worker + orchestrator (single model does everything)
+- **Run plan:** 48 topics sequentially, ~2-4 min each = ~2-3h total
+- **Hybrid option:** Use Claude API for orchestrator, local 70B for workers only
+
+#### Config L2: 70B Q4 + 4B FP16 — Worker + Flock Simultaneously
+
+```bash
+# Terminal 1: Main worker (70B quantized, leaves room for second model)
+vllm serve huihui-ai/Llama-3.3-70B-Instruct-abliterated \
+  --quantization awq \
+  --max-model-len 16384 \
+  --gpu-memory-utilization 0.35 \
+  --port 8000 \
+  --api-key local-test
+
+# Terminal 2: Flock driver (tiny model, fast)
+vllm serve huihui-ai/Qwen3-4B-abliterated \
+  --dtype float16 \
+  --max-model-len 4096 \
+  --gpu-memory-utilization 0.12 \
+  --port 8001 \
+  --api-key local-test
+```
+
+- **VRAM:** 70B Q4 ~43 GB + 4B FP16 ~10 GB = ~53 GB, leaves ~85 GB for KV cache
+- **Use:** Swarm workers hit port 8000, flock relevance queries hit port 8001
+- **Advantage:** Flock queries don't block research — both models serve concurrently
+
+#### Config L3: Qwen3-235B MoE INT4 — Maximum Local Quality
+
+```bash
+vllm serve huihui-ai/Huihui-Qwen3-235B-A22B-Instruct-abliterated \
+  --quantization awq \
+  --max-model-len 8192 \
+  --gpu-memory-utilization 0.92 \
+  --port 8000 \
+  --api-key local-test
+```
+
+- **VRAM:** ~125 GB weights, ~12 GB for KV cache (8K context only)
+- **Throughput:** ~15-25 tok/s (MoE, only 22B active per token)
+- **Context limitation:** 8K is tight — data packages must be compact
+- **Use:** Highest quality local abliterated reasoning. Test on A1 baseline to compare vs 70B.
+
+#### Config L4: Model Comparison Fleet — Same Topic, Different Models
+
+Run A1 (Milos Insulin baseline) sequentially with each model to compare findings quality:
+
+```bash
+# Round 1: Llama-3.3-70B abliterated
+vllm serve huihui-ai/Llama-3.3-70B-Instruct-abliterated --dtype float8_e4m3fn ...
+# → run A1, save results, stop server
+
+# Round 2: Hermes-3-Llama-3.1-70B (NousResearch)
+vllm serve NousResearch/Hermes-3-Llama-3.1-70B --dtype float8_e4m3fn ...
+# → run A1, save results, stop server
+
+# Round 3: Qwen3-235B-A22B abliterated (INT4)
+vllm serve huihui-ai/Huihui-Qwen3-235B-A22B-Instruct-abliterated --quantization awq ...
+# → run A1, save results, stop server
+
+# Round 4: Qwen3.6-35B-A3B (base, test if research framing bypasses)
+vllm serve Qwen/Qwen3.6-35B-A3B --dtype float16 ...
+# → run A1, save results, stop server
+```
+
+- **Purpose:** Compare findings count, angle diversity, convergence speed, report quality
+- **Duration:** ~4h (download + serve + run × 4 models)
+
+### Swarm Engine Integration
+
+The swarm engine needs zero code changes for local models. MCPSwarmConfig already supports:
+
+```python
+config = MCPSwarmConfig(
+    api_base="http://localhost:8000/v1",  # vLLM endpoint
+    model="huihui-ai/Llama-3.3-70B-Instruct-abliterated",
+    api_key="local-test",
+    # For hybrid (local workers + Claude orchestrator):
+    model_map={
+        "__orchestrator__": "claude-opus-4-7",  # hits Anthropic API
+        "__report__": "claude-opus-4-7",
+    },
+)
+```
+
+### Local vs API Comparison Matrix
+
+| Factor | API (Wave 1-5) | Local 1× H200 | Local 8× H200 (endstate) |
+|---|---|---|---|
+| Cost per run | $0.30-5.00 | $0 | $0 |
+| Rate limits | 60 RPM (DeepSeek) | None | None |
+| Censorship | Must test each | Abliterated = guaranteed | Guaranteed |
+| Worker tok/s | 50-200 (provider-dependent) | ~30-50 (70B FP8) | ~240-400 (8× 70B) |
+| Max parallelism | ~6-8 (rate limited) | 1-2 models | 8+ models |
+| Context window | 128K-2M | 8K-32K (VRAM dependent) | 32K-128K |
+| Model download | N/A | ~30-60 min (one-time) | ~30-60 min (one-time) |
+| Quality ceiling | Frontier (GPT-5, Claude Opus) | 70B abliterated | 405B abliterated |
+
+### Test Protocol (Local)
+
+Same as Phase 2 swarm metrics but additionally measure:
+- **Inference throughput:** tok/s for worker calls and orchestrator calls
+- **VRAM utilization:** peak VRAM during swarm run (continuous batching pressure)
+- **Quality delta vs API:** compare findings count + report quality for A1 on local 70B vs API DeepSeek V3
+- **Abliteration effectiveness:** any residual refusals on direct PED content?
 
 ---
 
@@ -447,16 +590,25 @@ Compile all results into `docs/MODEL_REGISTRY.md`:
 
 ## Execution Timeline
 
-| Phase | Duration | Est. Cost | Prerequisite |
-|---|---|---|---|
-| Phase 1: Pre-screen | 30 min | ~$2 | API keys (all available) |
-| Phase 2: Full swarm runs | 2-4 hours | ~$20-50 | Phase 1 results |
-| Phase 3: Role-pair tests | 1-2 hours | ~$10-20 | Phase 2 top models |
-| Phase 4: Local models | 2-4 hours | ~$5-20 VM | Optional, Phase 1 |
-| Phase 5: Registry | 30 min | $0 | All phases |
+| Phase | Duration | Est. Cost | Hardware | Prerequisite |
+|---|---|---|---|---|
+| Phase 1: Pre-screen | 30 min | ~$2 | Any (API only) | API keys (all available) |
+| Phase 2: Full swarm runs | 6-8 hours | ~$33 | 140 GB RAM (API parallelism) | Phase 1 results |
+| Phase 3: Role-pair tests | 1-2 hours | ~$10-20 | Any (API only) | Phase 2 top models |
+| Phase 4: Local H200 | 2-4 hours | $0 | 1× H200 (140 GB VRAM) | Model downloads |
+| Phase 5: Registry | 30 min | $0 | Any | All phases |
 
-**Total estimated cost: $37-92**
-**Total estimated time: 6-11 hours**
+**API path total: ~$45-55, ~10h**
+**Local H200 path total: $0 + ~$5 Claude orchestrator, ~4h**
+**Hybrid path (recommended): ~$10-15, ~6h** — Claude orchestrator + local workers
+
+### 8× H200 Endstate Timeline
+
+With 8× H200 (1.12 TB VRAM), Phase 2 and 4 merge into a single local execution:
+- 48 topics × 8 parallel 70B workers = 6 batches × ~20 min = **~2h total**
+- All cross-validation runs: ~1h (swap models, re-run key topics)
+- Orchestrator comparison: ~30 min
+- **Total endstate: ~4h for full evaluation, $0 + electricity**
 
 ---
 
