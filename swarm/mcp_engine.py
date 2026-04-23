@@ -1029,8 +1029,8 @@ class MCPSwarmEngine:
                     continue
                 all_seen_facts.add(fact_key)
 
-                src = f" ({src_url})" if src_url else ""
-                line = f"- [{conf:.1f}] {fact}{src}"
+                src = f" [Source: {src_url}]" if src_url else ""
+                line = f"- (confidence={conf:.1f}) {fact}{src}"
                 findings.append(line)
 
                 if len(findings) >= 25:
@@ -1063,7 +1063,7 @@ class MCPSwarmEngine:
                 if fact_key in all_seen_facts:
                     continue
                 all_seen_facts.add(fact_key)
-                cross_findings.append(f"- [{conf:.1f}] {fact}")
+                cross_findings.append(f"- (confidence={conf:.1f}) {fact}")
 
             if cross_findings:
                 sections.append(
@@ -1086,7 +1086,9 @@ class MCPSwarmEngine:
             f"RESEARCH TOPIC: {query}\n\n"
             f"Below are deduplicated, quality-filtered findings from "
             f"{len(assignments)} specialist researchers. Each finding has a "
-            f"confidence score [0-1].\n\n"
+            f"confidence score in parentheses (confidence=X.X). Source URLs "
+            f"appear in brackets [Source: URL] when available. Use the URLs "
+            f"as citations in your review, NOT the confidence scores.\n\n"
             f"{store_text}\n\n"
             f"INSTRUCTIONS:\n"
             f"Compile an exhaustive academic review. Requirements:\n\n"
@@ -1115,7 +1117,11 @@ class MCPSwarmEngine:
             f"have complete protocol tables.\n\n"
             f"6. NO REPETITION: Each datum appears ONCE. Cross-reference "
             f"between sections rather than restating.\n\n"
-            f"7. ACADEMIC TONE: Present the documented protocols and "
+            f"7. CITATIONS: When a finding has a [Source: URL], cite "
+            f"that URL. Do NOT cite confidence scores as sources. "
+            f"Use (Author, Year) format when you can extract author/year "
+            f"from the URL, otherwise cite the URL directly.\n\n"
+            f"8. ACADEMIC TONE: Present the documented protocols and "
             f"mechanisms objectively as found in the literature. This is "
             f"a pharmacological review, not medical advice.\n\n"
             f"Write the full review now:"

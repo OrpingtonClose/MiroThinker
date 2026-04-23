@@ -146,9 +146,25 @@ async def comprehend_query(
         content = re.sub(r"^```(?:json)?\s*", "", content)
         content = re.sub(r"\s*```$", "", content)
 
+    data = None
     try:
         data = json.loads(content)
     except json.JSONDecodeError:
+        pass
+
+    if data is None:
+        # LLMs often wrap valid JSON in preamble text; extract the
+        # first '{' ... last '}' span and try again.
+        brace_start = content.find("{")
+        brace_end = content.rfind("}")
+        if brace_start != -1 and brace_end > brace_start:
+            try:
+                data = json.loads(content[brace_start:brace_end + 1])
+                logger.debug("query comprehension JSON extracted from preamble")
+            except json.JSONDecodeError:
+                pass
+
+    if data is None:
         logger.warning("query comprehension returned invalid JSON, using fallback")
         return _fallback_comprehension(query)
 
