@@ -25,11 +25,11 @@ Wave behavior:
     Wave 3+: All 7 sections populated (full expert mode)
 
 Incremental mode (wave 2+):
-    When incremental=True, the data package delivers DELTAS instead of
-    full rebuilds.  §2 is omitted (worker already has raw corpus from
-    wave 1).  §3 delivers only NEW cross-angle findings since the
-    previous wave.  A delta header summarizes what changed.  This
-    reduces context from ~450K to ~180K by wave 3 (65% reduction).
+    When incremental=True, the data package delivers DELTAS for cross-
+    angle sections.  §2 corpus material is always included because
+    workers are stateless (each wave is a fresh LLM call).  §3 delivers
+    only NEW cross-angle findings since the previous wave.  A delta
+    header summarizes what changed.
 """
 
 from __future__ import annotations
@@ -268,7 +268,7 @@ def build_data_packages(
         if use_incremental:
             # Incremental mode: deliver delta, not full rebuild
             _build_incremental_package(
-                pkg, store, angle, wave, prior_outputs,
+                pkg, store, a, angle, wave, prior_outputs,
                 lineage_entries,
             )
         else:
@@ -354,6 +354,7 @@ def _build_full_package(
 def _build_incremental_package(
     pkg: DataPackage,
     store: "ConditionStore",
+    assignment: Any,
     angle: str,
     wave: int,
     prior_outputs: dict[str, str],
@@ -361,10 +362,13 @@ def _build_incremental_package(
 ) -> None:
     """Populate a DataPackage with incremental delta content.
 
-    Delivers only what changed since the previous wave.  The worker
-    already has raw corpus material from wave 1 and its own prior
-    reasoning from §7.  This function delivers:
+    Delivers deltas for hive findings and clone evidence, but always
+    includes §2 corpus material because workers are stateless — each
+    wave is a fresh single-shot LLM call with no conversation history.
+
+    Sections delivered:
         - §1 knowledge state (rolling summary, always fresh)
+        - §2 corpus material (always — workers are stateless)
         - §3 NEW hive findings since last wave only
         - §4/§5 cross-domain + challenges (if wave 3+)
         - §6 research gaps
@@ -375,6 +379,7 @@ def _build_incremental_package(
     Args:
         pkg: DataPackage to populate.
         store: The shared ConditionStore.
+        assignment: WorkerAssignment with raw_content.
         angle: Research angle.
         wave: Current wave number.
         prior_outputs: Map of angle to previous wave output text.
@@ -385,7 +390,9 @@ def _build_incremental_package(
     # § 1: KNOWLEDGE STATE — always deliver (it's a rolling summary)
     pkg.knowledge_state = _get_knowledge_state(store, angle)
 
-    # § 2: OMIT corpus material — worker already has it from wave 1
+    # § 2: CORPUS MATERIAL — always include (workers are stateless,
+    # each wave is a fresh LLM call with no conversation history)
+    pkg.corpus_material = assignment.raw_content
 
     # § 3: FROM THE HIVE — only NEW cross-angle findings since last wave
     pkg.hive_findings = _get_hive_delta(store, angle, since_wave)
@@ -421,8 +428,7 @@ def _build_incremental_package(
             f"Since your last wave: {new_own} new findings in your angle, "
             f"{new_cross} new findings across all angles. "
             f"Total active findings in store: {total_active}. "
-            f"Your raw corpus material from wave 1 is still in your "
-            f"conversation history — build on your prior analysis."
+            f"Build on your prior analysis with the new evidence below."
         )
     except Exception as exc:
         logger.debug(
@@ -431,8 +437,7 @@ def _build_incremental_package(
         )
         pkg.delta_header = (
             f"This is an incremental update for wave {wave}. "
-            f"Your corpus material from wave 1 is still in your "
-            f"conversation — build on your prior analysis."
+            f"Build on your prior analysis with the new evidence below."
         )
 
 
