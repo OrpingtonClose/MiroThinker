@@ -706,6 +706,18 @@ class ConditionStore:
     # (data_package.py, mcp_engine.py, research_organizer.py) MUST use
     # these instead of raw conn.execute() against conditions.
 
+    # Allowed tokens in order_by clauses to prevent SQL injection.
+    _ORDER_BY_ALLOW_RE = re.compile(
+        r"^[a-zA-Z_]+(?:\s+(?:ASC|DESC))?(?:\s*,\s*[a-zA-Z_]+(?:\s+(?:ASC|DESC))?)*$"
+    )
+    # Allow CASE expressions that only reference safe column names.
+    _ORDER_BY_CASE_RE = re.compile(
+        r"^(?:CASE\s+WHEN\s+[a-zA-Z_]+\s*=\s*'[a-zA-Z_]+'\s+THEN\s+\d+\s+"
+        r"(?:WHEN\s+[a-zA-Z_]+\s*=\s*'[a-zA-Z_]+'\s+THEN\s+\d+\s+)*"
+        r"ELSE\s+\d+\s+END"
+        r"(?:\s*,\s*[a-zA-Z_]+(?:\s+(?:ASC|DESC))?)*)\s*$"
+    )
+
     def get_top_findings(
         self,
         angle: str | None = None,
@@ -725,11 +737,14 @@ class ConditionStore:
             limit: Maximum results.
             min_length: Minimum fact length in characters.
             exclude_source_types: Source types to exclude.
-            order_by: SQL ORDER BY clause.
+            order_by: SQL ORDER BY clause (validated against allowlist).
             cross_run: If True, skip run filtering.
 
         Returns:
             List of (fact, confidence, source_url, source_type) tuples.
+
+        Raises:
+            ValueError: If order_by contains disallowed SQL tokens.
         """
         run_sql = self._run_sql(cross_run=cross_run)
         params: list[Any] = []
@@ -754,6 +769,13 @@ class ConditionStore:
             params.extend(exclude_source_types)
 
         params.extend(self._run_params(cross_run=cross_run))
+
+        # Validate order_by to prevent SQL injection
+        if not (
+            self._ORDER_BY_ALLOW_RE.match(order_by)
+            or self._ORDER_BY_CASE_RE.match(order_by)
+        ):
+            raise ValueError(f"disallowed order_by clause: {order_by!r}")
 
         where = " AND ".join(where_parts) + run_sql
         sql = f"""SELECT fact, confidence, source_url, source_type
@@ -1163,19 +1185,15 @@ class ConditionStore:
             Count of matching rows.
         """
         run_sql = self._run_sql(cross_run=cross_run)
-        params: list[Any] = [angle]
+        params: list[Any] = [row_type, angle]
         params.extend(self._run_params(cross_run=cross_run))
-
-        where = f"row_type = ? AND angle = ?"
-        params_full = [row_type, angle]
-        params_full.extend(self._run_params(cross_run=cross_run))
 
         sql = f"""SELECT COUNT(*) FROM conditions
                   WHERE row_type = ? AND angle = ?
                   {run_sql}"""
 
         with self._lock:
-            return self.conn.execute(sql, params_full).fetchone()[0]
+            return self.conn.execute(sql, params).fetchone()[0]
 
     def get_corpus_page(
         self,

@@ -318,11 +318,19 @@ def _dedup_angles(angles: list[str]) -> list[str]:
         if base_lower in seen_bases:
             continue
 
-        # Skip if this angle is a substring of an already-kept angle
-        # or vice versa (e.g. "Insulin Timing" vs "Insulin Timing and Dosing")
+        # Skip if this angle overlaps heavily with an already-kept angle.
+        # Use word-set Jaccard similarity instead of raw substring to avoid
+        # dropping distinct specializations (e.g. "GH Protocols" vs
+        # "GH Protocols and Insulin Synergy" share only 2/5 words).
         is_dup = False
+        base_words = set(base_lower.split())
         for existing_base in seen_bases:
-            if base_lower in existing_base or existing_base in base_lower:
+            existing_words = set(existing_base.split())
+            union = base_words | existing_words
+            if not union:
+                continue
+            jaccard = len(base_words & existing_words) / len(union)
+            if jaccard >= 0.8:
                 is_dup = True
                 break
         if is_dup:
