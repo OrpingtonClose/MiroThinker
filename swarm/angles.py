@@ -215,10 +215,24 @@ async def detect_angles_via_llm(
 
     Falls back to structural section titles if LLM fails.
     """
-    # Use a generous corpus preview for angle detection — local models
-    # have large context windows and need enough material to identify
-    # underrepresented topics.
-    corpus_preview = corpus[:30000]
+    # Sample across the corpus instead of just the first N chars.
+    # Web-scraped corpora often start with navigation junk that drowns
+    # out actual research content.  Taking evenly-spaced chunks from
+    # the full corpus gives the LLM a representative view.
+    _PREVIEW_BUDGET = 30000
+    _CHUNK_SIZE = 5000
+    _NUM_CHUNKS = _PREVIEW_BUDGET // _CHUNK_SIZE  # 6 chunks
+
+    if len(corpus) <= _PREVIEW_BUDGET:
+        corpus_preview = corpus
+    else:
+        # Take evenly-spaced chunks across the corpus
+        step = max(1, (len(corpus) - _CHUNK_SIZE) // (_NUM_CHUNKS - 1))
+        chunks: list[str] = []
+        for i in range(_NUM_CHUNKS):
+            start = min(i * step, len(corpus) - _CHUNK_SIZE)
+            chunks.append(corpus[start : start + _CHUNK_SIZE])
+        corpus_preview = "\n\n[...]\n\n".join(chunks)
 
     prompt = (
         "You are a research strategist. Your task: given the USER QUERY and "

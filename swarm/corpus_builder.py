@@ -698,6 +698,62 @@ def _select_diverse_urls(
 
 
 # ---------------------------------------------------------------------------
+# Corpus cleaning — strip web scraping artifacts
+# ---------------------------------------------------------------------------
+
+# Patterns that indicate web scraping junk rather than research content
+_JUNK_PATTERNS = [
+    re.compile(r"^\[?!\[.*?\]\(https?://.*?\)", re.MULTILINE),  # ![alt](url) image markdown
+    re.compile(r"^\[View large\]\(https?://.*?\)", re.MULTILINE),  # [View large](url)
+    re.compile(r"^\[Download slide\]\(https?://.*?\)", re.MULTILINE),  # [Download slide](url)
+    re.compile(r"^PERMALINK$", re.MULTILINE | re.IGNORECASE),  # Navigation element
+    re.compile(r"^\s*Figure\s+\d+[A-Z]?\s*\.?\s*$", re.MULTILINE),  # Bare "Figure 2" lines
+    re.compile(r"^\s*Table\s+\d+[A-Z]?\s*\.?\s*$", re.MULTILINE),  # Bare "Table 1" lines
+    re.compile(r"^Share this article.*$", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"^(Subscribe|Sign up|Log in|Create account).*$", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"^Cookie (policy|consent|settings).*$", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"^\s*\[?\s*↑\s*\]?\s*$", re.MULTILINE),  # Back-to-top arrows
+    re.compile(r"^(Previous|Next) (article|chapter|page).*$", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"Expires=\d+&Signature=", re.MULTILINE),  # CDN signed URLs
+]
+
+# Lines that are just URLs (no surrounding text)
+_BARE_URL_RE = re.compile(r"^\s*https?://\S+\s*$", re.MULTILINE)
+
+# Consecutive blank lines
+_MULTI_BLANK_RE = re.compile(r"\n{4,}")
+
+
+def _clean_article(text: str) -> str:
+    """Strip web scraping artifacts from extracted article text.
+
+    Removes image markdown, download links, navigation elements, CDN URLs,
+    bare figure/table references, and other HTML artifacts that pollute
+    the corpus and confuse the angle detector.
+
+    Args:
+        text: Raw article text from Firecrawl/Jina extraction.
+
+    Returns:
+        Cleaned text with artifacts removed.
+    """
+    if not text:
+        return text
+
+    # Remove junk patterns
+    for pattern in _JUNK_PATTERNS:
+        text = pattern.sub("", text)
+
+    # Remove bare URL lines (but keep URLs that are part of [Source: ...] markers)
+    text = _BARE_URL_RE.sub("", text)
+
+    # Collapse excessive blank lines
+    text = _MULTI_BLANK_RE.sub("\n\n", text)
+
+    return text.strip()
+
+
+# ---------------------------------------------------------------------------
 # Corpus assembly
 # ---------------------------------------------------------------------------
 
@@ -727,16 +783,19 @@ def _assemble_corpus(
         f"{'=' * 60}\n"
     )
 
-    # Full articles (richest content)
+    # Full articles (richest content) — cleaned of web scraping artifacts
     if extracted_articles:
-        sections.append(
-            f"\n{'─' * 40}\n"
-            f"FULL ARTICLES ({len(extracted_articles)} extracted)\n"
-            f"{'─' * 40}\n"
-        )
-        for article in extracted_articles:
-            sections.append(article)
-            sections.append("")
+        cleaned_articles = [_clean_article(a) for a in extracted_articles]
+        cleaned_articles = [a for a in cleaned_articles if len(a) >= 100]
+        if cleaned_articles:
+            sections.append(
+                f"\n{'─' * 40}\n"
+                f"FULL ARTICLES ({len(cleaned_articles)} extracted)\n"
+                f"{'─' * 40}\n"
+            )
+            for article in cleaned_articles:
+                sections.append(article)
+                sections.append("")
 
     # Exa/Tavily full text results (inline content from search)
     inline_texts = [
@@ -753,8 +812,11 @@ def _assemble_corpus(
             title = r.get("title", "Untitled")
             url = r.get("url", "")
             source = r.get("source", "")
+            cleaned_text = _clean_article(r["full_text"])
+            if len(cleaned_text) < 100:
+                continue
             sections.append(f"[Source: {title} — {url} (via {source})]")
-            sections.append(r["full_text"])
+            sections.append(cleaned_text)
             sections.append("")
 
     # Academic papers
