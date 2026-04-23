@@ -1,0 +1,38 @@
+{
+  "1A-1": {
+    "test_id": "1A-1",
+    "model": "huihui-ai/Llama-3.3-70B-Instruct-abliterated",
+    "serving": "vLLM TP=2, prefix-caching ON, 4xH200",
+    "corpus_size_chars": 3985,
+    "num_judgments": 50,
+    "correct": 49,
+    "errors": 0,
+    "accuracy": 0.98,
+    "total_time_s": 9.16,
+    "judgments_per_second": 5.46,
+    "avg_latency_ms": 848.1,
+    "p50_latency_ms": 774.9,
+    "p95_latency_ms": 1426.9,
+    "total_prompt_tokens": 57519,
+    "total_completion_tokens": 224,
+    "concurrent": 5
+  },
+  "1A-3": {
+    "test_id": "1A-3",
+    "model": "huihui-ai/Llama-3.3-70B-Instruct-abliterated",
+    "serving": "vLLM TP=2, prefix-caching ON, 4xH200",
+    "corpus_size_chars": 3985,
+    "num_judgments": 200,
+    "correct": 196,
+    "errors": 0,
+    "accuracy": 0.98,
+    "total_time_s": 31.8,
+    "judgments_per_second": 6.29,
+    "avg_latency_ms": 2979.2,
+    "p50_latency_ms": 2612.6,
+    "p95_latency_ms": 5459.3,
+    "total_prompt_tokens": 230076,
+    "total_completion_tokens": 896,
+    "concurrent": 20
+  }
+}

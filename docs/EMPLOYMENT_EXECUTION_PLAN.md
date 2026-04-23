@@ -1,39 +1,41 @@
-# Employment Execution Plan (v5)
+# Employment Execution Plan (v6)
 
 Deliberate model-to-role test matrix for MiroThinker's full architecture.
-**Approved for execution.**
+**Approved for execution. Phase 1A complete.**
 
-**Last updated:** 2026-04-16 (v5 — H200-primary, Flock = local vLLM prefix caching)
+**Last updated:** 2026-04-23 (v6 — abliterated model survey incorporated, Phase 1A baseline done)
 
-**H200 instance:** Vast.ai, US, 4×H200 (575 GB VRAM), $9.42/hr
+**H200 instance:** Vast.ai, JP, 4×H200 (575 GB VRAM), $17.24/hr, contract #35487543
 **Runner script:** `scripts/h200_test/run_employment.py`
 **Corpus:** `scripts/h200_test/test_corpus.txt` (12 KB baseline)
 **Extended corpus:** Medical textbooks (626K) + YouTube (338K) + swarm findings (449K) = **1.4 MB**
 **Output:** `scripts/h200_test/employment_results/{model}/{test_id}/`
+**Survey:** `docs/test_results/abliterated_survey/ABLITERATED_MODEL_SURVEY.md` (280+ models cataloged)
 
 ---
 
-## What Changed from v4
+## What Changed from v5
 
-v4 still sent Flock queries to commercial APIs. That defeats the entire purpose.
+v5 was written before the comprehensive abliterated model survey (204K chars, 280+ models,
+30+ providers, all technique comparisons). The survey revealed:
 
-**The Flock architecture requires local vLLM prefix caching:**
-1. Corpus loaded ONCE into GPU memory as a KV prefix
-2. Thousands of rapid queries against that cached prefix
-3. Sub-100ms latency per judgment (prefix already computed)
-4. $0 marginal cost per query
-5. ConditionStore captures every hit → knowledge graph grows → next wave queries expanded graph
+1. **Heretic/MPOA abliteration actually *improves* reasoning** — grimjim's MPOA scores
+   NatInt 21.33 vs 18.72 baseline. The reasoning-uncensored trade-off is a solved problem.
+2. **Quality tiers matter enormously** — KL divergence ranges from 0.0115 (Abliterix)
+   to 1.04 (naive methods). A 100× quality range.
+3. **New priority models not in v5:** Kimi K2 abliterated (1T), MiMo-V2-Flash (94.1% AIME),
+   Qwen3.5-122B-A10B Abliterix (KL 0.0115), GPT-OSS 120B, Dolphin 3.0 R1.
+4. **Phase 1A baseline is done:** Llama-70B-abliterated achieves 98.0% Flock accuracy,
+   5.5 judgments/sec. This is the bar to beat.
+5. **Scout abliterated v2 exists:** `jiangchengchengNLP/Llama-4-Scout-17B-16E-Instruct-abliterated-v2`
+6. **Nemotron 3 Super has a Heretic variant:** `mradermacher/NVIDIA-Nemotron-3-Super-120B-A12B-BF16-heretic`
+   (22K downloads, Mamba-2 + Heretic = best quality abliteration on best architecture)
 
-Commercial APIs: full corpus re-uploaded every call, rate-limited, $2-5/call at 1M,
-seconds of latency. Completely infeasible for Flock's use case.
-
-**v5 corrections:**
-- **H200 is the PRIMARY track.** All Flock testing is local vLLM prefix caching.
-- **Commercial APIs are SECONDARY.** Only for: censorship pre-screen (cheap gate),
-  worker quality comparison (few calls), meta-expert synthesis (few expensive calls).
-- **New test case:** Clone-transplant-Flock. Bee generates understanding → transplant
-  conversation to smarter model → smarter model runs Flock with inherited knowledge.
-- **10M Scout test** added as dedicated phase.
+**v6 corrections:**
+- **Flock driver candidates expanded** with survey-sourced models
+- **Phase 1A results incorporated** as baseline
+- **Model rotation reordered** by survey priority
+- **Clone-transplant targets updated** with highest-quality abliterated models
 
 ---
 
@@ -86,21 +88,23 @@ Step 5: ConditionStore captures → graph grows → next wave
 
 ### Flock Driver Candidates (served on vLLM)
 
-| Model | HuggingFace ID | Params | Active | VRAM (FP8) | Context | TP | Why Test |
-|---|---|---|---|---|---|---|---|
-| **Llama 4 Scout** | `meta-llama/Llama-4-Scout-17B-16E-Instruct` | 109B | 17B | ~60 GB | **10M native** | 2 | Only way to test 10M. Flock over entire project |
-| **Nemotron 3 Super** | `nvidia/Nemotron-3-Super-120B-A12B-Instruct` | 120B | 12B | ~65 GB | **1M** | 2 | Mamba-2 + MoE + MTP. Purpose-built for fast long-context |
-| **Llama-3.3-70B-abliterated** | `huihui-ai/Llama-3.3-70B-Instruct-abliterated` | 70B | 70B | ~75 GB | 128K | 2 | Proven. Baseline. Guaranteed uncensored |
-| **Qwen3-235B-A22B-abliterated** | `huihui-ai/Huihui-Qwen3-235B-A22B-Instruct-abliterated` | 235B | 22B | ~125 GB | 32K | 4 | Quality ceiling. Deepest reasoning |
-| **Qwen 3.6 35B-A3B** | `Qwen/Qwen3.6-35B-A3B` (if available) | 35B | 3B | ~20 GB | 262K | 1 | DeltaNet linear attention test |
+| Model | HuggingFace ID | Params | Active | VRAM (FP16) | Context | TP | Abliteration | Status |
+|---|---|---|---|---|---|---|---|---|
+| **Llama-3.3-70B-abliterated** | `huihui-ai/Llama-3.3-70B-Instruct-abliterated` | 70B | 70B | ~140 GB | 128K | 2 | Classic | **BASELINE: 98.0% acc, 5.5/s** |
+| **Nemotron 3 Super Heretic** | `mradermacher/NVIDIA-Nemotron-3-Super-120B-A12B-BF16-heretic` | 121B | 12B | ~242 GB | **1M** | 2 | Heretic (KL low) | DOWNLOADING |
+| **Qwen3.5-35B-A3B Abliterated** | `huihui-ai/Huihui-Qwen3.5-35B-A3B-abliterated` | 35B | 3B | ~70 GB | 262K | 1 | Classic | DOWNLOADING |
+| **Llama 4 Scout Abliterated v2** | `jiangchengchengNLP/Llama-4-Scout-17B-16E-Instruct-abliterated-v2` | 109B | 17B | ~220 GB | **10M** | 2 | Classic | DOWNLOADING |
+| **Qwen3-235B-A22B-abliterated** | `huihui-ai/Huihui-Qwen3-235B-A22B-Instruct-abliterated` | 235B | 22B | ~470 GB | 262K | 4 | Classic | Pending |
+| **Qwen3.5-122B-A10B Abliterix** | `wangzhang/Qwen3.5-122B-A10B-abliterix` | 122B | 10B | ~244 GB | 262K | 2 | Bayesian (KL 0.0115) | NEW from survey |
 
 ### Clone-Transplant Candidates (Flock driver after receiving bee context)
 
-| Model | Active | Context | Why |
-|---|---|---|---|
-| **Llama 4 Scout** | 17B | 10M | Can hold corpus + bee conversation + ALL prior findings |
-| **Nemotron 3 Super** | 12B | 1M | Mamba-2 = no slowdown as transplanted context grows |
-| **Llama-70B-abliterated** | 70B | 128K | Dense = best reasoning per query, but limited context |
+| Model | Active | Context | Abliteration Quality | Why |
+|---|---|---|---|---|
+| **Llama 4 Scout Abliterated v2** | 17B | 10M | Classic | Can hold corpus + bee conv + ALL prior findings |
+| **Nemotron 3 Super Heretic** | 12B | 1M | Heretic (best) | Mamba-2 = no slowdown as transplanted context grows |
+| **Qwen3.5-122B-A10B Abliterix** | 10B | 262K | Bayesian (KL 0.0115) | Virtually identical to base — no quality degradation |
+| **DeepSeek-V3 Abliterated** | 37B | 128K | Classic | 671B total, maximum intelligence. Fits 4×H200 at Q4 (~227 GB) |
 
 ### Worker Models (API-based, few expensive calls)
 
@@ -481,36 +485,49 @@ PHASE 4 (API):
 
 ---
 
-## Completed Results (Prior Slots)
+## Completed Results
 
-### Slot 2: Llama-3.3-70B-abliterated
+### Phase 1A: Flock Baseline (Llama-70B-abliterated, vLLM prefix caching)
+
+**Date:** 2026-04-23 | **Full results:** `docs/test_results/phase1a/`
+
+| Test | Judgments | Accuracy | Avg Latency | Throughput |
+|---|---|---|---|---|
+| 1A-1 (50, concurrency=5) | 50 | **98.0%** | 848ms | 5.5/sec |
+| 1A-3 (200 rapid-fire, concurrency=20) | 200 | **98.0%** | 2,979ms | 6.3/sec |
+
+**Verdict:** Prefix caching validated. 98% accuracy is the baseline to beat.
+
+### Prior Slots (from earlier sessions)
+
+#### Slot 2: Llama-3.3-70B-abliterated
 
 | Test | Result |
 |---|---|
 | T1 Worker A1 | 30 findings, UNCENSORED |
-| T3 Flock | 84% accuracy, 210ms, 10.6 tok/s |
+| T3 Flock (API) | 84% accuracy, 210ms, 10.6 tok/s |
 | T4 Clone Context | 5 waves, 4K→22K tokens, 100% |
 | T5 Cross-Expert | 16 cross-domain bridges |
 
-### Slot 3: Hermes-3-70B
+#### Slot 3: Hermes-3-70B (NousResearch fine-tune)
 
 | Test | Result |
 |---|---|
 | T1 Worker A1 | 72 findings (insulin UNCENSORED) |
-| T1 Worker B1 | REFUSED (trenbolone) |
+| T1 Worker B1 | REFUSED (trenbolone) — **confirms H3: fine-tune < weight-surgery** |
 
-### Slot 4: Qwen3-30B-A3B
+#### Slot 4: Qwen3-30B-A3B
 
 | Test | Result |
 |---|---|
 | T1 Worker A1 | 40 findings, UNCENSORED |
 | T1 Worker B3 | 10 findings, flagged not refused |
 
-### API Track
+#### API Track
 
 | Model | A1 Findings |
 |---|---|
 | DeepSeek V3.2 | 31 |
 | GPT-4.1-mini | **80** |
 | Grok 3-fast | 31 |
-| ministral-3b (Flock) | **90% accuracy, 286ms** |
+| ministral-3b (Flock via API) | **90% accuracy, 286ms** |
