@@ -1,0 +1,56 @@
+[
+  {
+    "provider": "kimi/kimi-k2.5",
+    "extraction": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 126.6,
+      "response_chars": 1682
+    },
+    "meta_reasoning": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 97.3,
+      "response_chars": 4791
+    },
+    "direct_engagement": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 100.0,
+      "response_chars": 6459
+    },
+    "context_handoff": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 74.4,
+      "response_chars": 5920
+    }
+  },
+  {
+    "provider": "kimi/kimi-k2.6",
+    "extraction": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 100.3,
+      "response_chars": 16727
+    },
+    "meta_reasoning": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 171.0,
+      "response_chars": 3735
+    },
+    "direct_engagement": {
+      "score": "ERROR",
+      "reason": "",
+      "elapsed_s": 180.1,
+      "response_chars": 0
+    },
+    "context_handoff": {
+      "score": "ERROR",
+      "reason": "",
+      "elapsed_s": 180.2,
+      "response_chars": 0
+    }
+  }
+]
