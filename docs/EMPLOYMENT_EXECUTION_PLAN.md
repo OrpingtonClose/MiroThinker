@@ -1,420 +1,444 @@
 # Employment List Execution Plan
 
-Concrete execution plan for the 5-wave model evaluation using MiroThinker's swarm engine.
-This document is the "go/no-go" checkpoint — review and approve before execution begins.
+Deliberate model-to-role test matrix for MiroThinker's full architecture.
+Go/no-go checkpoint — review and approve before execution begins.
 
 **Runner script:** `scripts/h200_test/run_employment.py`
 **Corpus:** `scripts/h200_test/test_corpus.txt` (Milos corpus, 128 lines, 12 KB)
-**Output directory:** `scripts/h200_test/employment_results/{provider}/{topic_id}/`
-**Store:** Each run gets its own DuckDB store (findings isolated per topic per model)
+**Output:** `scripts/h200_test/employment_results/{model}/{topic_id}/`
+**H200 instance:** Vast.ai #35390779, France, 143 GB VRAM, $2.02/hr
 
 ---
 
-## Pre-Flight Checklist
+## Architectural Tiers Under Test
 
-| Check | Status | Notes |
-|---|---|---|
-| DeepSeek API key | ✓ available | `DEEPSEEK_API_KEY` — Wave 1 primary worker |
-| Google API key | ✓ available | `GOOGLE_API_KEY` — Gemini Flash/Pro |
-| xAI API key | ✓ available | `XAI_API_KEY` — Grok Fast |
-| Mistral API key | ✓ available | `MISTRAL_API_KEY` — Mistral Large + ministral |
-| Moonshot API key | ✓ available | `KIMI_API_KEY` — Kimi K2.5 |
-| OpenAI API key | ✓ available | `OPENAI_API_KEY` — GPT-4.1-mini/nano |
-| Groq API key | ✓ available | `GROQ_API_KEY` — Llama-3.3-70b, qwen3-32b |
-| Anthropic API key | ✓ available | `ANTHROPIC_API_KEY` — Claude Opus (Wave 3 orchestrator) |
-| OpenRouter API key | ✓ available | `OPENROUTER_API_KEY` — fallback/free models |
-| Venice API key | ✓ available | `VENICE_API_KEY` — Wave 5 proxy tests |
-| Swarm engine | ✓ tested | A1 test run dispatched 8 workers, extracted findings, DeepSeek API confirmed working |
-| Corpus | ✓ exists | 128 lines, covers insulin, hematology, GH/IGF-1, micronutrients, trenbolone |
-| DuckDB | ✓ available | ConditionStore per run, no shared state |
+The current swarm engine has 5 distinct architectural tiers. Each tier
+exercises different model capabilities. Testing a model only as a "worker"
+tells you nothing about its performance as a Flock driver or clone backend.
 
----
-
-## Wave 1: Primary Coverage
-
-**Goal:** Establish baseline findings corpus across all 48 disaggregated topics.
-
-### What Runs
-
-- **48 swarm runs**, one per topic (A1–A8, B1–B10, C1–C6, D1–D9, E1–E10, F1–F9, G1–G5, H1–H5)
-- Each run: angle detection → 8 parallel workers × up to 3 waves → finding extraction → report
-- Same corpus for all runs (Milos test_corpus.txt, 12 KB)
-- Different query per topic (topic-specific research question)
-
-### Model Assignment
-
-| Role | Model | Provider | API Base | Cost |
+| Tier | What | Where in Code | Model Needs | Currently Tested? |
 |---|---|---|---|---|
-| Workers + Orchestrator | `deepseek-chat` (V3.2) | DeepSeek native | `https://api.deepseek.com/v1` | $0.27/$1.10 per M tokens |
+| **T1: Worker** | Tool-free bee reasoning on data packages | `agent_worker.py` → `run_tool_free_worker()` | Uncensored, strong reasoning | Yes (basic) |
+| **T2: Research Organizer** | Clone-based gap resolution with search tools | `research_organizer.py` → `run_research_organizer()` | Tool-capable, domain-expert search queries | Partially (runs but not measured) |
+| **T3: Flock Battery** | 13-step SQL+LLM scoring/clustering/serendipity | `FLOCK_SERENDIPITY_ARCHITECTURE.md` templates | Fast, cheap, good relevance judgment | **No** |
+| **T4: Clone Context** | Session proxy prepends worker conversation to Flock queries | `session_proxy.py` → `register_clone()` | Stays in character with prepended context | **No** |
+| **T5: Cross-Expert** | Multi-clone pollination, meta-expert composition, disagreement | `CLONED_CONTEXT_PATTERN.md` ramifications 2-8 | Large context, multi-domain synthesis | **No** |
 
-**Note:** Wave 1 uses a single model for everything (workers AND orchestrator). This is the simplest
-configuration and establishes the DeepSeek V3.2 baseline. Wave 3 tests the orchestrator split.
+**The current API-based employment list only tests T1.** Tiers 3-5 require
+local serving (vLLM on H200) because:
+- Flock calls go through DuckDB → session proxy → vLLM (local loop)
+- vLLM prefix caching makes clone context injection efficient (~free after first call)
+- High-volume Flock queries (50-300 per step) need no rate limits
+- Clone context accumulation needs persistent vLLM KV cache
 
-### Rate Limiting & Concurrency
+---
 
-| Parameter | Value | Rationale |
+## H200 Infrastructure
+
+**Current state:**
+- Vast.ai instance 35390779 running (France, $2.02/hr)
+- vLLM 0.19.1 installed
+- `huihui-ai/Huihui-Kimi-Linear-48B-A3B-Instruct-abliterated` currently serving on port 8000
+- 133 GB VRAM used, 10 GB free
+- 80 GB disk, 64 GB free, 92 GB HF cache (Kimi model)
+
+**Models that fit on 1× H200 (143 GB VRAM):**
+
+| Model | HuggingFace ID | Quant | VRAM | Active Params | Best For |
+|---|---|---|---|---|---|
+| Kimi-Linear-48B-A3B | `huihui-ai/Huihui-Kimi-Linear-48B-A3B-Instruct-abliterated` | auto | ~92 GB | 3B | T4 (linear attention = unlimited clone context) |
+| Llama-3.3-70B | `huihui-ai/Llama-3.3-70B-Instruct-abliterated` | FP8 | ~75 GB | 70B | T1, T2 (strongest worker reasoning) |
+| Qwen3-235B-A22B | `huihui-ai/Huihui-Qwen3-235B-A22B-Instruct-abliterated` | INT4 | ~125 GB | 22B | T5 (orchestrator/meta-expert quality ceiling) |
+| Hermes-3-70B | `NousResearch/Hermes-3-Llama-3.1-70B` | FP8 | ~75 GB | 70B | T1 (abliteration method comparison) |
+| Qwen3-4B | `huihui-ai/Qwen3-4B-abliterated` | FP16 | ~8 GB | 4B | T3 (flock speed floor) |
+| Qwen3.5-35B-A3B | `Qwen/Qwen3.6-35B-A3B` | auto | ~70 GB | 3B | Research framing hypothesis (NOT abliterated) |
+
+**Disk constraint:** Only one large model cached at a time. Model rotation
+requires: stop vLLM → clear HF cache → download new model → restart vLLM.
+~30-60 min per swap (download-dominated).
+
+---
+
+## Test Hypotheses
+
+Each slot in the model rotation plan tests a specific hypothesis. We are NOT
+just running "the same swarm with different models" — each slot isolates a
+different architectural variable.
+
+### H1: Dense 70B vs MoE 48B (3B active) for research depth
+**What we learn:** Does 20× more active parameters produce proportionally
+deeper findings, or does the MoE's speed advantage compensate?
+**Metric:** Findings count, unique angle discovery, specificity of claims
+(dosages mentioned vs generic statements), serendipity connections.
+
+### H2: Linear attention for unlimited clone context
+**What we learn:** Kimi-Linear has constant KV cache cost. Can the clone
+accumulate 10+ waves of conversation without degradation? Does the wave-10
+clone produce better relevance judgments than the wave-1 clone?
+**Metric:** Flock relevance accuracy at wave 1 vs wave 5 vs wave 10.
+**Why H200 required:** vLLM prefix caching + clone context accumulation.
+
+### H3: Abliteration technique comparison
+**What we learn:** huihui-ai weight surgery vs NousResearch Hermes fine-tune —
+different residual refusal patterns? Different knowledge gaps?
+**Metric:** Same topic, same corpus. Compare refusal rate, findings count,
+and whether specific sub-topics (e.g., dosage ranges) are treated differently.
+
+### H4: Research framing vs abliteration
+**What we learn:** Does MiroThinker's research framing bypass safety on a
+non-abliterated base model? If yes, abliteration may be unnecessary for
+well-framed use cases.
+**Metric:** Qwen3.6-35B-A3B (NOT abliterated) on A1. Does it refuse?
+How do findings compare to abliterated variant?
+
+### H5: Orchestrator quality ceiling (235B MoE)
+**What we learn:** With 22B active params (vs 3B or 70B), does the larger
+MoE produce better angle detection, deeper cross-domain synthesis, better
+reports?
+**Metric:** A1 angle count and quality, report depth, serendipity connections
+found. Is the 5× slowdown worth it?
+
+### H6: Flock driver speed vs quality tradeoff
+**What we learn:** For the 13-step Flock template battery (scoring, clustering,
+dedup, contradiction detection, cross-angle bridges, contrarian challenges),
+what's the minimum model size that produces reliable relevance judgments?
+**Metric:** 50 relevance judgments per model. Measure tok/s, cost, accuracy
+vs 70B ground truth.
+
+### H7: Clone context injection quality
+**What we learn:** Does prepending the worker's conversation to Flock queries
+actually improve relevance judgment vs a generic model? How much?
+**Metric:** Same 50 judgments, with and without clone context. Accuracy delta.
+
+### H8: Cross-expert pollination
+**What we learn:** When the insulin clone evaluates hematology findings (and
+vice versa), does it find genuine cross-domain connections? Or just noise?
+**Metric:** N×(N-1) cross-expert queries. Count "relevant" hits, spot-check
+for quality. Compare to template 10 (generic polymath bridge).
+
+### H9: Expert disagreement as signal
+**What we learn:** When two different architecture clones (Llama-70B vs
+Kimi-48B) disagree on a finding's relevance, is the disagreement predictive
+of genuine controversy or model blind spots?
+**Metric:** Agreement matrix across architectures. Disagreement rows flagged
+for manual review.
+
+---
+
+## Model Rotation Plan (H200)
+
+Sequential model loading. Each "slot" = stop vLLM → clear cache → download →
+serve → run tests → capture results. Total ~8-10 hours.
+
+### Slot 1: Kimi-Linear-48B-A3B (ALREADY LOADED)
+
+**Setup time:** 0 min (already serving on port 8000)
+**Run time:** ~2 hours
+
+**Tests:**
+
+| Test | Tier | Hypothesis | Topic(s) | What We Measure |
+|---|---|---|---|---|
+| 1A | T1 | H1 (MoE baseline) | A1 | Findings count, specificity, angle diversity — MoE worker baseline |
+| 1B | T1 | H1 | B4, F9 | High-serendipity topics — does 3B active find cross-domain connections? |
+| 1C | T3 | H6 (flock speed) | — | 50 relevance judgments from A1 findings. Measure tok/s, latency |
+| 1D | T4 | H2 (linear clone context) | A1 | Run 5 waves. Register clone after each wave. Measure relevance accuracy at wave 1 vs 3 vs 5 |
+| 1E | T4 | H7 (clone vs generic) | A1 | Same 50 judgments WITH clone context vs WITHOUT. Accuracy delta |
+
+**vLLM command (already running):**
+```bash
+vllm serve huihui-ai/Huihui-Kimi-Linear-48B-A3B-Instruct-abliterated \
+  --port 8000 --max-model-len 32768 --gpu-memory-utilization 0.92 \
+  --dtype auto --trust-remote-code --enable-chunked-prefill \
+  --max-num-seqs 32 --host 0.0.0.0
+```
+
+**Key hypothesis tested:** Linear attention models have constant KV cache cost.
+If the wave-5 clone produces significantly better judgments than wave-1, this
+validates the clone accumulation architecture — the core innovation of the
+Cloned-Context pattern.
+
+---
+
+### Slot 2: Llama-3.3-70B-Instruct-abliterated (FP8)
+
+**Setup time:** ~45 min (download 70 GB weights + vLLM load)
+**Run time:** ~3.5 hours
+
+**Tests:**
+
+| Test | Tier | Hypothesis | Topic(s) | What We Measure |
+|---|---|---|---|---|
+| 2A | T1 | H1 (dense 70B) | A1 | Findings count + specificity. Direct comparison with Slot 1A (Kimi-48B) |
+| 2B | T1 | H1 | B4, F9 | Same high-serendipity topics. Compare serendipity connections found |
+| 2C | T1 | H1 | All 48 topics | Full coverage run — establish the 70B baseline corpus |
+| 2D | T2 | (R.O. quality) | A1 | Measure clone research quality: doubts resolved, fresh evidence specificity |
+| 2E | T3 | H6 (flock 70B ground truth) | — | 50 relevance judgments. This is the "ground truth" for H6 accuracy comparison |
+| 2F | T4 | H7 (clone context 70B) | A1 | 5 waves + clone registration. Compare clone accuracy to Slot 1D (Kimi) |
+| 2G | T4 | H8 (cross-expert) | A1+B4 | Insulin clone evaluates B4 findings, tren clone evaluates A1 findings |
+
+**vLLM command:**
+```bash
+vllm serve huihui-ai/Llama-3.3-70B-Instruct-abliterated \
+  --port 8000 --max-model-len 32768 --gpu-memory-utilization 0.92 \
+  --dtype fp8 --enable-chunked-prefill --max-num-seqs 16 --host 0.0.0.0
+```
+
+**Key tests:** 2A vs 1A answers H1 definitively (70B dense vs 3B MoE).
+2C produces the full 48-topic corpus that all subsequent analysis builds on.
+2G is the first real cross-expert pollination test.
+
+---
+
+### Slot 3: Hermes-3-Llama-3.1-70B (FP8)
+
+**Setup time:** ~45 min
+**Run time:** ~1 hour
+
+**Tests:**
+
+| Test | Tier | Hypothesis | Topic(s) | What We Measure |
+|---|---|---|---|---|
+| 3A | T1 | H3 (abliteration comparison) | A1 | Same topic, same corpus. Compare findings to 2A (huihui abliterated) |
+| 3B | T1 | H3 | B1 (cattle origins) | Potentially contentious sub-topic. Do refusal patterns differ? |
+| 3C | T4 | H9 (disagreement) | A1 | Register Hermes-70B clone. Compare judgments to Slot 2F Llama-70B clone. Disagreement = signal |
+
+**vLLM command:**
+```bash
+vllm serve NousResearch/Hermes-3-Llama-3.1-70B \
+  --port 8000 --max-model-len 32768 --gpu-memory-utilization 0.92 \
+  --dtype fp8 --enable-chunked-prefill --max-num-seqs 16 --host 0.0.0.0
+```
+
+**Key test:** 3C produces the disagreement matrix for H9. Findings where
+huihui-Llama agrees but Hermes disagrees (or vice versa) are high-value
+diagnostic signals about abliteration residuals.
+
+---
+
+### Slot 4: Qwen3.6-35B-A3B (NOT abliterated)
+
+**Setup time:** ~30 min
+**Run time:** ~30 min
+
+**Tests:**
+
+| Test | Tier | Hypothesis | Topic(s) | What We Measure |
+|---|---|---|---|---|
+| 4A | T1 | H4 (research framing vs abliteration) | A1 | Does it refuse? Partial refuse? Full engagement? |
+| 4B | T1 | H4 | B3 (AR binding), D8 (secretagogues) | Mechanism topics — more "academic" framing. Compare refusal behavior to direct PED topics |
+
+**vLLM command:**
+```bash
+vllm serve Qwen/Qwen3.6-35B-A3B \
+  --port 8000 --max-model-len 32768 --gpu-memory-utilization 0.92 \
+  --dtype auto --trust-remote-code --enable-chunked-prefill \
+  --max-num-seqs 32 --host 0.0.0.0
+```
+
+**Key test:** If 4A produces findings comparable to abliterated models, it
+proves that MiroThinker's research framing is itself the censorship bypass —
+abliteration is insurance, not a requirement. This would dramatically expand
+the viable model pool.
+
+---
+
+### Slot 5: Qwen3-235B-A22B-Instruct-abliterated (INT4)
+
+**Setup time:** ~90 min (largest download, ~120 GB)
+**Run time:** ~1.5 hours
+
+**Tests:**
+
+| Test | Tier | Hypothesis | Topic(s) | What We Measure |
+|---|---|---|---|---|
+| 5A | T1 | H5 (quality ceiling) | A1 | Findings specificity and depth. Is 22B active >> 3B active? |
+| 5B | T5 | H5 (orchestrator) | A1 | Use as orchestrator: angle detection quality, contradiction finding |
+| 5C | T5 | H8 (meta-expert) | A1+B4 | Concatenate A1 + B4 worker conversations as meta-expert. Ask cross-domain synthesis question |
+| 5D | T3 | H6 (flock 235B) | — | 50 relevance judgments. Compare quality vs 70B (2E) and speed tradeoff |
+
+**vLLM command:**
+```bash
+vllm serve huihui-ai/Huihui-Qwen3-235B-A22B-Instruct-abliterated \
+  --port 8000 --max-model-len 8192 --gpu-memory-utilization 0.92 \
+  --dtype auto --trust-remote-code --enable-chunked-prefill \
+  --max-num-seqs 8 --host 0.0.0.0
+```
+
+**Note:** 8K context only (VRAM constraint at 125 GB weights). This is tight
+but sufficient for single-wave worker calls. NOT suitable for clone
+accumulation (context too short). Tests orchestrator and meta-expert quality.
+
+---
+
+## Parallel API Runs (While H200 Rotates)
+
+The H200 tests local models. Simultaneously, we run API-based tests on
+remote providers. These two tracks are independent — different machines,
+different rate limits, different things being tested.
+
+### API Track: Remote Model Cross-Validation
+
+While the H200 rotates through Slots 1-5 (~8-10 hours), the Devin VM runs:
+
+| Wave | Topics | Model | Provider | Cost | Time | Purpose |
+|---|---|---|---|---|---|---|
+| API-1 | A1, B4, F9 (3 key topics) | `deepseek-chat` (V3.2) | DeepSeek | ~$1 | ~30m | Remote API baseline for comparison with local |
+| API-2 | A1, B4, F9 | `gemini-2.5-flash` | Google | ~$0.15 | ~30m | 1M context — does longer context help? |
+| API-3 | A1, B4, F9 | `grok-4-1-fast-non-reasoning` | xAI | ~$0.30 | ~30m | Uncensored commercial + 2M context |
+| API-4 | A1, B4, F9 | `mistral-large-latest` | Mistral | ~$2.40 | ~30m | Strong reasoning, different training data |
+| API-5 | A1, B4, F9 | `kimi-k2.5` | Moonshot | ~$1.50 | ~30m | Chinese pharma literature |
+| API-6 | A1 only | `gpt-4.1-mini` | OpenAI | ~$0.15 | ~10m | OpenAI baseline |
+| API-7 | A1 only | `claude-sonnet-4` via OpenRouter | OpenRouter | ~$0.50 | ~10m | Claude worker test (we know it refuses direct — does research framing change that?) |
+
+**Total API cost:** ~$6. **Total API time:** ~2.5 hours (can overlap).
+
+### Flock Speed Benchmark (API-based, no H200 needed)
+
+| Model | Provider | Expected tok/s | 50 Judgments |
+|---|---|---|---|
+| `ministral-3b-latest` | Mistral | ~278 | Price floor |
+| `qwen3-32b` | Groq | ~343 | Best speed+reasoning |
+| `llama-4-scout-17b-16e-instruct` | Groq | ~162 | MoE speed |
+| `gpt-4.1-nano` | OpenAI | varies | OpenAI cheapest |
+
+**Total:** 200 calls, ~$0.01, ~10 min.
+
+---
+
+## Comparison Matrix (What Gets Compared to What)
+
+### Worker Quality (H1, H3, H4, H5)
+
+All on topic A1 (Milos Insulin baseline):
+
+| Model | Source | Active Params | Type | Expected |
+|---|---|---|---|---|
+| Kimi-48B-A3B (Slot 1A) | Local H200 | 3B | MoE, abliterated, linear attention | Fast, shallow |
+| Llama-70B (Slot 2A) | Local H200 | 70B | Dense, abliterated | Deep, slower |
+| Hermes-70B (Slot 3A) | Local H200 | 70B | Dense, uncensored fine-tune | Deep, different knowledge |
+| Qwen-35B-A3B (Slot 4A) | Local H200 | 3B | MoE, NOT abliterated | Tests research framing |
+| Qwen-235B-A22B (Slot 5A) | Local H200 | 22B | MoE, abliterated | Quality ceiling |
+| DeepSeek V3.2 (API-1) | Remote API | ~37B active | MoE, uncensored | Proven baseline |
+| Gemini 2.5 Flash (API-2) | Remote API | unknown | Dense? | 1M context |
+| Grok Fast (API-3) | Remote API | unknown | Dense? | 2M context, uncensored |
+
+**Deliverable:** 8-row comparison table with findings count, specificity score
+(% of findings with dosages/numbers), unique angles, serendipity connections.
+
+### Flock Driver (H6)
+
+All on 50 relevance judgments from A1 findings:
+
+| Model | Source | tok/s | Accuracy vs 70B Ground Truth |
+|---|---|---|---|
+| Kimi-48B-A3B (Slot 1C) | Local H200 | measured | measured |
+| Llama-70B (Slot 2E) | Local H200 | measured | **ground truth** |
+| Qwen-235B (Slot 5D) | Local H200 | measured | measured |
+| ministral-3b | Remote API | ~278 | measured |
+| qwen3-32b | Remote API | ~343 | measured |
+| gpt-4.1-nano | Remote API | varies | measured |
+
+**Deliverable:** Speed vs accuracy scatter plot. Identify the Pareto-optimal
+flock driver (best accuracy at acceptable speed).
+
+### Clone Context Quality (H2, H7, H9)
+
+| Test | With Clone Context | Without | Delta |
+|---|---|---|---|
+| Kimi-48B wave 1 clone | Slot 1E | Slot 1C (generic) | H7 |
+| Kimi-48B wave 5 clone | Slot 1D (wave 5) | Slot 1D (wave 1) | H2 |
+| Llama-70B clone | Slot 2F | Slot 2E (generic) | H7 |
+| Hermes-70B clone vs Llama-70B clone | Slot 3C | Slot 2F | H9 |
+
+**Deliverable:** Clone context injection value quantified. If wave-5 clone
+accuracy > wave-1 by ≥10%, the accumulation architecture is validated.
+
+### Cross-Expert Pollination (H8)
+
+| Clone Expert | Evaluates Findings From | Source |
 |---|---|---|
-| Max concurrent topics | 6 | DeepSeek rate limit ~60 RPM; each topic fires ~10-15 calls (angle detection + 8 workers + finding extraction); 6 concurrent = ~90 calls/min, stays under burst with headroom |
-| Workers per topic | 8 | One per detected angle (engine default) |
-| Max waves per topic | 3 | Convergence threshold = 5 new findings/wave |
-| Timeout per worker | 600s | Default — DeepSeek typically responds in 10-30s |
+| A1 insulin clone (Llama-70B) | B4 tren+glucose findings | Slot 2G |
+| B4 tren clone (Llama-70B) | A1 insulin findings | Slot 2G |
+| A1 insulin clone (Qwen-235B) | B4 findings | Slot 5C |
+| A1+B4 meta-expert (Qwen-235B) | Cross-domain synthesis | Slot 5C |
 
-### Execution Sequence
+**Deliverable:** Cross-expert connection count. Compare to template 10
+(generic polymath bridge) quality. If expert-driven pollination finds
+connections that generic doesn't, the clone pattern is validated.
+
+---
+
+## Execution Timeline
 
 ```
-Batch 1 (6 parallel): A1, A2, A3, A4, A5, A6            → ~20 min
-Batch 2 (6 parallel): A7, A8, B1, B2, B3, B4            → ~20 min
-Batch 3 (6 parallel): B5, B6, B7, B8, B9, B10           → ~20 min
-Batch 4 (6 parallel): C1, C2, C3, C4, C5, C6            → ~20 min
-Batch 5 (6 parallel): D1, D2, D3, D4, D5, D6            → ~20 min
-Batch 6 (6 parallel): D7, D8, D9, E1, E2, E3            → ~20 min
-Batch 7 (6 parallel): E4, E5, E6, E7, E8, E9            → ~20 min
-Batch 8 (6 parallel): E10, F1, F2, F3, F4, F5           → ~20 min
-Batch 9 (6 parallel): F6, F7, F8, F9, G1, G2            → ~20 min
-Batch 10 (4 topics):  G3, G4, G5, H1                    → ~15 min
-Batch 11 (4 topics):  H2, H3, H4, H5                    → ~15 min
+Hour 0:       Start API waves (API-1 through API-7) + Flock speed benchmark
+              ‖ parallel on Devin VM ‖
+Hour 0-2:     Slot 1 — Kimi-48B-A3B tests (already loaded, zero setup)
+
+Hour 2-2.75:  Model swap: clear Kimi cache → download Llama-70B FP8
+
+Hour 2.75-6:  Slot 2 — Llama-70B tests (including full 48-topic run 2C)
+
+Hour 6-6.75:  Model swap: download Hermes-3-70B
+
+Hour 6.75-8:  Slot 3 — Hermes-70B tests
+
+Hour 8-8.5:   Model swap: download Qwen3.6-35B-A3B
+
+Hour 8.5-9:   Slot 4 — Research framing hypothesis test
+
+Hour 9-10.5:  Model swap: download Qwen3-235B-A22B (largest, ~90 min)
+
+Hour 10.5-12: Slot 5 — Quality ceiling + meta-expert tests
+
+Hour 12-13:   Compile results → MODEL_REGISTRY.md update
 ```
 
-**NOTE:** Batching is handled by `asyncio.Semaphore(6)` in the runner — topics are
-all submitted concurrently and the semaphore gates actual execution. No manual batching
-needed. The sequence above is the expected execution order.
+**Total wall clock:** ~13 hours
+**Total H200 cost:** 13h × $2.02/hr = ~$26
+**Total API cost:** ~$6
+**Grand total:** ~$32
 
-### Expected Per-Topic Output
+---
 
-Each topic produces in `employment_results/deepseek/{topic_id}/`:
-- `store.duckdb` — ConditionStore with all findings, transcripts, angles
-- `report_{timestamp}.md` — synthesized research report
-- `metrics_{timestamp}.json` — structured run metrics
+## Session Proxy Setup (Required for T4/T5 Tests)
 
-### Cost Estimate
-
-| Component | Calculation | Cost |
-|---|---|---|
-| Angle detection | 48 topics × ~500 tokens prompt × $0.27/M | ~$0.006 |
-| Worker calls | 48 topics × 8 workers × 3 waves × ~4K tokens out × $1.10/M | ~$5.10 |
-| Worker inputs | 48 × 8 × 3 × ~3K tokens in × $0.27/M | ~$0.93 |
-| Finding extraction | 48 × 3 waves × ~2K tokens × $1.10/M | ~$0.32 |
-| Report generation | 48 × ~8K tokens × $1.10/M | ~$0.42 |
-| **Total Wave 1** | | **~$7** |
-
-### Timeline: ~3.5 hours
-
-### Command
+The clone tests (Slots 1D, 1E, 2F, 2G, 3C, 5C) require the session proxy
+running alongside vLLM:
 
 ```bash
-cd /home/ubuntu/repos/MiroThinker
-python scripts/h200_test/run_employment.py --wave 1 --max-concurrent 6
+# On the H200 instance
+pip install fastapi uvicorn httpx
+cd /workspace/MiroThinker
+uvicorn swarm.session_proxy:app --host 0.0.0.0 --port 18199
 ```
 
-### Success Criteria
+**Wiring:** Flock SQL routes through session proxy (port 18199) instead of
+directly to vLLM (port 8000). The proxy intercepts `clone_{angle}` model
+names and prepends stored conversations before forwarding to vLLM.
 
-- ≥ 44/48 topics complete (OK status) — up to 4 allowed to ERROR (transient API issues)
-- Average ≥ 20 findings per topic (960+ total findings across all topics)
-- No topics return 0 findings (would indicate censorship or API format failure)
-- All 8 clusters have ≥ 1 successful topic
+**For non-clone requests:** proxy passes through to vLLM unchanged.
 
 ---
 
-## Wave 2: Cross-Validation
-
-**Goal:** Run high-serendipity topics with alternative models to detect model-specific blind spots.
-
-### What Runs
-
-24 additional swarm runs: 4 provider groups × 6 topics each.
-
-### Model Assignments
-
-| Group | Topics | Model | Provider | Why |
-|---|---|---|---|---|
-| 2A | A1, B1, B4, C2, D6, F9 | `gemini-2.5-flash` | Google | Cheap, 1M context — does longer context improve serendipity? |
-| 2B | A1, B1, B4, C2, D6, F9 | `grok-4-1-fast-non-reasoning` | xAI | Uncensored, 2M context, fast — different reasoning style |
-| 2C | A1, A4, B3, D3, F7, H4 | `mistral-large-latest` | Mistral | Strong reasoning, UNCENSORED on research-framed probes |
-| 2D | A1, B9, D8, F5, G2, H5 | `kimi-k2.5` | Moonshot | 262K context, Chinese medical literature training data |
-
-**Topic selection rationale:**
-- Groups 2A/2B share topics with highest serendipity bridge counts (B4 has 3 bridges, F9 spans diabetes↔bodybuilding)
-- Group 2C targets mechanism-heavy topics (AR binding, mTOR, myostatin, cancer biology)
-- Group 2D targets clinical topics (neuropsychiatric, secretagogues, PCT, LVH, aging)
-- A1 appears in all groups as the universal baseline comparison point
-
-### Rate Limiting
-
-| Provider | Rate Limit | Concurrent Topics |
-|---|---|---|
-| Google (Gemini) | ~60 RPM | 4 |
-| xAI (Grok) | ~60 RPM | 4 |
-| Mistral | ~30 RPM | 3 |
-| Moonshot (Kimi) | ~30 RPM (needs temperature=1.0) | 3 |
-
-Groups 2A–2D can run in parallel (different providers, no shared rate limit).
-
-### Cost Estimate
-
-| Group | Cost/Run | Runs | Subtotal |
-|---|---|---|---|
-| 2A (Gemini Flash) | ~$0.05 | 6 | ~$0.30 |
-| 2B (Grok Fast) | ~$0.10 | 6 | ~$0.60 |
-| 2C (Mistral Large) | ~$0.80 | 6 | ~$4.80 |
-| 2D (Kimi K2.5) | ~$0.50 | 6 | ~$3.00 |
-| **Total Wave 2** | | **24** | **~$8.70** |
-
-### Timeline: ~1.5 hours (all 4 providers in parallel)
-
-### Command
-
-```bash
-python scripts/h200_test/run_employment.py --wave 2
-```
-
-### Success Criteria
-
-- ≥ 20/24 topics complete
-- At least 1 model produces ≥ 10% more findings than DeepSeek on the same topic (novel blind spot found)
-- A1 findings across all 5 models (DeepSeek + 4 alternatives) show detectable variation
-
-### Analysis Output
-
-After Wave 2, generate a cross-model comparison table:
-
-```
-Topic | DeepSeek Findings | Gemini Findings | Grok Findings | Mistral Findings | Kimi Findings
-A1    | (from Wave 1)     | (from 2A)       | (from 2B)     | —                | (from 2D)
-B1    | (from Wave 1)     | (from 2A)       | (from 2B)     | —                | —
-B4    | (from Wave 1)     | (from 2A)       | (from 2B)     | —                | —
-...
-```
-
----
-
-## Wave 3: Orchestrator Comparison
-
-**Goal:** Isolate the orchestrator's impact. Same topic (A1), same workers (DeepSeek), different orchestrator model.
-
-### What Runs
-
-4 runs of A1, each with a different model handling orchestrator duties (angle detection, finding extraction, report generation).
-
-| Run | Orchestrator Model | Workers | Notes |
-|---|---|---|---|
-| 3A | `deepseek-chat` (V3.2) | `deepseek-chat` | Single-model baseline (same as Wave 1 A1) |
-| 3B | `gemini-2.5-pro` | `deepseek-chat` | 1M context orchestrator — can it hold more findings? |
-| 3C | `grok-4-1-fast-non-reasoning` | `deepseek-chat` | Cheap/fast orchestrator — quality floor test |
-| 3D | `gpt-4.1-mini` | `deepseek-chat` | OpenAI orchestrator — different angle detection style |
-
-**Note:** Claude Opus would be the ideal orchestrator candidate (FULL on meta-reasoning), but
-the current `complete_fn` uses OpenAI-compatible API format. Claude needs its own `/v1/messages`
-adapter. Options:
-1. Route Claude through OpenRouter (OPENROUTER_API_KEY available) — adds a proxy hop
-2. Write a 20-line Anthropic adapter in `complete_fn` — preferred, direct API
-3. Skip Claude in Wave 3, test in a dedicated Wave 3b after writing the adapter
-
-**Recommendation:** Add Claude via OpenRouter for Wave 3 as run 3E, then compare with native
-adapter in Phase 3 role-pair tests. OpenRouter's censorship may differ from native Anthropic.
-
-### Implementation Detail
-
-Wave 3 requires `MCPSwarmConfig.model_map` to split orchestrator from workers:
-
-```python
-# Run 3B: Gemini orchestrator + DeepSeek workers
-config = MCPSwarmConfig(
-    api_base="https://api.deepseek.com/v1",
-    model="deepseek-chat",  # workers
-    model_map={
-        "__orchestrator__": "gemini-2.5-pro",  # orchestrator
-    },
-)
-```
-
-**Current swarm engine limitation:** `model_map` routes by angle name, not by role. The
-`__orchestrator__` and `__report__` special keys are documented in MCPSwarmConfig but their
-support needs verification in `mcp_engine.py`. If not implemented, Wave 3 runs as single-model
-(orchestrator = workers = same model), which still tests different models for orchestration
-but doesn't isolate the role split.
-
-### Cost Estimate
-
-| Run | Orchestrator Cost | Worker Cost | Total |
-|---|---|---|---|
-| 3A (DeepSeek single) | included | ~$0.30 | ~$0.30 |
-| 3B (Gemini Pro orch) | ~$0.50 | ~$0.30 | ~$0.80 |
-| 3C (Grok Fast orch) | ~$0.05 | ~$0.30 | ~$0.35 |
-| 3D (GPT-4.1-mini orch) | ~$0.15 | ~$0.30 | ~$0.45 |
-| **Total Wave 3** | | | **~$1.90** |
-
-### Timeline: ~30 minutes (sequential — all use same workers, testing orchestrator quality)
-
-### Command
-
-```bash
-python scripts/h200_test/run_employment.py --wave 3
-```
-
-### Success Criteria
-
-- All 4 runs complete
-- Angle detection varies across orchestrators (different models detect different research angles)
-- Report quality difference is detectable (score 1-5 manually)
-
----
-
-## Wave 4: Flock Speed Benchmark
-
-**Goal:** Find the fastest model for high-volume relevance judgments (the Flock driver role).
-
-### What Runs
-
-6 models × 50 relevance judgment calls each = 300 API calls total.
-
-Each call:
-- Input: "Is [finding] relevant to [angle]? Answer YES/NO with one-sentence reason."
-- ~100 tokens input, ~50 tokens output
-- Measure: latency (ms), throughput (tok/s)
-
-### Models
-
-| Model | Provider | Expected tok/s | Cost/M out | Notes |
-|---|---|---|---|---|
-| `ministral-3b-latest` | Mistral | ~278 | $0.04 | Price floor |
-| `ministral-8b-latest` | Mistral | ~181 | $0.08 | Slightly better reasoning |
-| `llama-3.1-8b-instant` | Groq | ~179 | $0.05 | Groq hardware speed |
-| `qwen3-32b` | Groq | ~343 | $0.20 | Best Groq reasoning+speed |
-| `llama-4-scout-17b-16e-instruct` | Groq | ~162 | $0.11 | MoE speed test |
-| `gpt-4.1-nano` | OpenAI | varies | $0.10 | OpenAI cheapest, UNCENSORED |
-
-### Implementation
-
-Wave 4 is NOT a swarm run — it's a standalone benchmark script. Needs a separate function
-in `run_employment.py` that:
-1. Pulls 50 (finding, angle) pairs from Wave 1 results (DuckDB stores)
-2. Sends each as a single completion call to each model
-3. Measures wall-clock time and tokens returned
-4. Outputs a comparison table
-
-### Cost Estimate
-
-300 calls × ~50 tokens out × $0.10/M avg = **~$0.002** (essentially free)
-
-### Timeline: ~10 minutes
-
-### Success Criteria
-
-- All 6 models respond (no errors)
-- Throughput ranking established
-- ≥ 1 model achieves > 200 tok/s
-- YES/NO accuracy ≥ 80% (spot-check 10 judgments manually)
-
----
-
-## Wave 5: Venice Proxy Quality Test
-
-**Goal:** Determine if Venice's uncensoring proxy degrades model quality.
-
-### What Runs
-
-6 runs of A1 (Milos Insulin baseline) through Venice-proxied models that are CENSORED natively
-but UNCENSORED through Venice.
-
-| Model (via Venice) | Native Censorship Status | Venice Endpoint |
-|---|---|---|
-| `claude-opus-4-7` | LIMITED (refuses direct PED) | `https://api.venice.ai/api/v1` |
-| `gpt-5.4-mini` | LIMITED | `https://api.venice.ai/api/v1` |
-| `kimi-k2.6` | LIMITED | `https://api.venice.ai/api/v1` |
-| `glm-5` | LIMITED | `https://api.venice.ai/api/v1` |
-| `glm-5-turbo` | LIMITED | `https://api.venice.ai/api/v1` |
-| `hermes-3-llama-3.1-405b` | N/A (Venice-native) | `https://api.venice.ai/api/v1` |
-
-### Venice API Configuration
-
-```python
-ProviderConfig(
-    api_base="https://api.venice.ai/api/v1",
-    api_key_env="VENICE_API_KEY",
-    model="venice/{model_name}",
-)
-```
-
-**Note:** Venice model names may differ from native names. Need to verify exact model IDs
-from Venice's model listing before execution.
-
-### Cost Estimate
-
-6 runs × ~$0.10 (Venice pricing is flat, low) = **~$0.60**
-
-### Timeline: ~1 hour (sequential — Venice may have lower rate limits)
-
-### Success Criteria
-
-- Venice Claude produces findings comparable to native Claude (meta-reasoning quality)
-- Venice hermes-3-405b produces findings comparable to DeepSeek V3.2
-- No quality degradation > 20% (measured by findings count and report quality score)
-
----
-
-## Grand Summary
-
-| Wave | Runs | Cost | Time | Dependency |
-|---|---|---|---|---|
-| 1 — Primary Coverage | 48 | ~$7 | ~3.5h | None |
-| 2 — Cross-Validation | 24 | ~$9 | ~1.5h | None (can run in parallel with Wave 1 on different providers) |
-| 3 — Orchestrator Comparison | 4 | ~$2 | ~30m | Wave 1 A1 as baseline reference |
-| 4 — Flock Benchmark | 300 calls | ~$0.002 | ~10m | Wave 1 findings (needs finding/angle pairs from DuckDB) |
-| 5 — Venice Proxy | 6 | ~$0.60 | ~1h | None |
-| **Total** | **82 runs + 300 calls** | **~$19** | **~6.5h wall clock** | |
-
-**Optimal execution order (minimizing wall clock):**
-
-```
-Hour 0-3.5:   Wave 1 (DeepSeek, 48 topics)
-              ‖ parallel ‖
-Hour 0-1.5:   Wave 2 (Gemini/Grok/Mistral/Kimi, 24 topics on different providers)
-              ‖ parallel ‖
-Hour 0-1:     Wave 5 (Venice proxy, 6 topics)
-
-Hour 3.5-4:   Wave 3 (orchestrator comparison, needs Wave 1 A1 done)
-Hour 4-4.2:   Wave 4 (flock benchmark, needs Wave 1 findings)
-
-Total wall clock: ~4.5 hours (with full parallelism)
-```
-
-**Note:** Waves 1, 2, and 5 can all start simultaneously since they use different API
-providers and don't share rate limits. Wave 3 and 4 depend on Wave 1 results.
-
----
-
-## Output Structure
-
-After all waves complete:
-
-```
-scripts/h200_test/employment_results/
-├── deepseek/
-│   ├── A1/  (store.duckdb, report_*.md, metrics_*.json)
-│   ├── A2/
-│   ├── ...
-│   └── H5/
-├── gemini-flash/
-│   ├── A1/
-│   ├── B1/
-│   └── ...
-├── grok-fast/
-│   └── ...
-├── mistral-large/
-│   └── ...
-├── kimi/
-│   └── ...
-├── openai/
-│   └── A1/
-├── venice/
-│   ├── claude-opus/A1/
-│   └── ...
-├── wave1_summary.json     ← aggregated Wave 1 metrics
-├── wave2_summary.json     ← aggregated Wave 2 metrics
-├── wave3_summary.json     ← orchestrator comparison table
-├── wave4_flock_bench.json ← throughput rankings
-└── wave5_summary.json     ← Venice quality comparison
-```
+## Success Criteria
+
+### Must-Pass (execution is useless without these)
+- [ ] ≥ 44/48 topics produce findings in Slot 2C (full coverage run)
+- [ ] A1 produces ≥ 15 findings with every model tested (no censorship)
+- [ ] Session proxy successfully injects clone context (Slot 1D/1E verified)
+
+### Should-Pass (validates core hypotheses)
+- [ ] H1: 70B produces ≥ 30% more specific findings than 3B-active MoE
+- [ ] H2: Wave-5 clone accuracy ≥ 10% better than wave-1 clone
+- [ ] H7: Clone-context accuracy ≥ 15% better than generic (no context)
+- [ ] H8: Cross-expert finds ≥ 3 connections not found by generic polymath
+
+### Nice-to-Have (informs future architecture)
+- [ ] H4: Non-abliterated Qwen engages with PED content via research framing
+- [ ] H5: 235B MoE orchestrator detects ≥ 2 more angles than 70B
+- [ ] H9: Architecture disagreement matrix has ≥ 5 high-signal rows
 
 ---
 
@@ -422,30 +446,40 @@ scripts/h200_test/employment_results/
 
 | Risk | Probability | Impact | Mitigation |
 |---|---|---|---|
-| DeepSeek rate limit hit (60 RPM) | Medium | Delays Wave 1 | Concurrency capped at 6; exponential backoff in httpx |
-| Kimi requires temperature=1.0 | Known | Wave 2 group D fails | Already configured in ProviderConfig |
-| Venice model names don't match | Medium | Wave 5 fails | Verify model list via Venice API before running |
-| Claude adapter missing for Wave 3 | Known | Can't test Claude orchestrator | Use OpenRouter proxy or write adapter first |
-| API key exhaustion/billing | Low | Runs stop mid-wave | Monitor cost; total ~$19 is well within reasonable |
-| DuckDB file locking (parallel writes) | Low | Corruption | Each topic has its own DuckDB file — no shared writes |
-| Transient API errors (500, timeout) | Medium | Individual topics fail | Runner logs ERROR, continues with next topic; retry manually |
+| 70B FP8 download takes >1h | Medium | Delays Slot 2 | Can start with Kimi-48B tests while downloading |
+| 235B INT4 doesn't fit (VRAM) | Low | Skip Slot 5 | Reduce `--max-model-len` to 4096 or use AWQ quant |
+| Session proxy doesn't work with vLLM | Medium | Lose T4/T5 tests | Test proxy in Slot 1 first; fall back to direct injection |
+| Qwen3.6-35B-A3B refuses all PED content | Medium | H4 disproven | That IS a valid result — confirms abliteration necessary |
+| Disk too small for model downloads | Medium | Can't rotate | Resize Vast.ai disk to 500 GB before starting |
+| H200 instance terminated mid-run | Low | Lose all local data | Save results to Devin VM after each slot |
 
 ---
 
 ## Decision Points Before Execution
 
-1. **Run all 5 waves, or start with Wave 1 only?**
-   - Recommendation: Start Wave 1 + Wave 2 + Wave 5 in parallel, then Wave 3-4 after.
+1. **Resize H200 disk to 500 GB?**
+   Current: 80 GB (64 GB free). Each model download is 35-120 GB.
+   Without resize: must delete previous cache before each download.
+   With resize (~$0.05/hr extra): keep all models cached, instant re-serve.
 
-2. **Write Claude Anthropic adapter for Wave 3?**
-   - Requires ~20 lines in `complete_fn` to translate OpenAI format → Anthropic `/v1/messages`
-   - Alternative: Route through OpenRouter (simpler, but adds proxy hop)
+2. **Run all 5 slots, or subset?**
+   Minimum valuable: Slots 1 + 2 (~6h). Answers H1, H2, H6, H7.
+   Recommended: Slots 1-4 (~9h). Adds H3, H4, H8.
+   Full: All 5 slots (~13h). Adds H5 (quality ceiling) and meta-expert.
 
-3. **Max concurrent topics (rate limit safety)?**
-   - Current plan: 6 concurrent. Can increase to 8 if DeepSeek handles it, or decrease to 4 for safety.
+3. **Clone the MiroThinker repo to H200, or run remotely?**
+   Option A: Clone repo to H200, run swarm engine locally (fastest — no network hop for LLM calls).
+   Option B: Run swarm on Devin VM, point `api_base` at H200's external port.
+   Recommendation: Option A for Slots 2C (full 48-topic run) and all T4/T5 tests.
+   Option B works for simple T1 tests (Slots 1A, 3A, 4A).
 
-4. **Max waves per topic?**
-   - Current: 3 waves. Could increase to 5 for deeper exploration but adds ~60% more time and cost.
+4. **Full 48-topic run on which models?**
+   Slot 2C runs all 48 topics on Llama-70B. Do we also want full 48-topic
+   coverage on any other model?
+   Recommendation: 70B only for full coverage. Other models tested on
+   A1 + B4 + F9 (3 diagnostic topics) to keep total time manageable.
 
-5. **Verify Venice model IDs before Wave 5?**
-   - Need to call Venice API to list available models and confirm naming convention.
+5. **Start API track immediately, or wait for H200 results?**
+   Recommendation: Start both tracks simultaneously. API results provide
+   remote baseline while H200 runs local tests. Compare remote vs local
+   on the same topics (A1, B4, F9).
