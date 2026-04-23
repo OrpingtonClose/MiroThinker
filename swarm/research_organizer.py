@@ -40,6 +40,7 @@ import json
 import logging
 import re
 import string
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -114,6 +115,8 @@ class CloneResearchResult:
         search_queries_used: Queries the clone executed.
         sources_found: URLs and references discovered.
         worker_id: The clone's worker identifier.
+        iterations_run: Planning loop iterations completed.
+        retirement_reason: Why the clone stopped.
     """
 
     angle: str
@@ -122,6 +125,8 @@ class CloneResearchResult:
     search_queries_used: list[str] = field(default_factory=list)
     sources_found: list[str] = field(default_factory=list)
     worker_id: str = ""
+    iterations_run: int = 0
+    retirement_reason: str = ""
 
 
 @dataclass
@@ -138,15 +143,144 @@ class ResearchOrganizerConfig:
         trigger_uncertainty_threshold: Minimum uncertainty signals in
             a transcript to trigger clone research.
         trigger_every_n_waves: Spawn clones every N waves regardless.
+        max_planning_iterations: Max plan-act-evaluate loops per clone.
+        max_empty_searches: Retire clone after this many fruitless searches.
+        max_clone_api_calls_per_run: Global ceiling on search API calls
+            across all clones in a single run.
     """
 
     max_doubts_per_worker: int = 3
     max_clones: int = 4
-    max_searches_per_clone: int = 5
-    max_extractions_per_clone: int = 2
-    clone_timeout_s: float = 120.0
+    max_searches_per_clone: int = 8
+    max_extractions_per_clone: int = 3
+    clone_timeout_s: float = 180.0
     trigger_uncertainty_threshold: int = 3
     trigger_every_n_waves: int = 2
+    max_planning_iterations: int = 6
+    max_empty_searches: int = 3
+    max_clone_api_calls_per_run: int = 100
+
+
+@dataclass
+class RetirementSignal:
+    """Signal from orchestrator to a running clone.
+
+    Attributes:
+        should_retire: Whether the clone should stop.
+        reason: Human-readable reason for retirement.
+        urgency: 'immediate' (stop now) or 'graceful' (finish current step).
+    """
+
+    should_retire: bool
+    reason: str = ""
+    urgency: str = ""  # "immediate" | "graceful"
+
+
+class RetirementChecker:
+    """Evaluates retirement conditions for active clones.
+
+    The orchestrator creates one RetirementChecker per run and passes
+    it to all clones.  The checker reads from the ConditionStore and
+    from shared orchestrator state.
+    """
+
+    def __init__(
+        self,
+        store: "ConditionStore",
+        config: ResearchOrganizerConfig,
+    ) -> None:
+        self.store = store
+        self.config = config
+        self._global_api_calls = 0
+        self._wave_advancing = False
+        self._convergence_achieved = False
+        self._lock = asyncio.Lock()
+
+    async def record_api_call(self) -> None:
+        """Track a search API call against the global budget."""
+        async with self._lock:
+            self._global_api_calls += 1
+
+    def signal_wave_advancing(self) -> None:
+        """Notify all clones that the next wave is starting."""
+        self._wave_advancing = True
+
+    def signal_convergence(self) -> None:
+        """Notify all clones that global convergence was reached."""
+        self._convergence_achieved = True
+
+    async def check(
+        self,
+        clone_id: str,
+        doubt: str,
+        angle: str,
+        tool_calls_used: int,
+        searches_used: int,
+        findings_stored: int,
+        elapsed_s: float,
+        consecutive_empty_searches: int = 0,
+    ) -> RetirementSignal:
+        """Evaluate whether a clone should retire.
+
+        Args:
+            clone_id: The clone's identifier.
+            doubt: The doubt being investigated.
+            angle: The research angle.
+            tool_calls_used: Total tool invocations so far.
+            searches_used: Search API calls so far.
+            findings_stored: Findings stored so far.
+            elapsed_s: Wall-clock time since clone start.
+            consecutive_empty_searches: Searches returning 0 findings in a row.
+
+        Returns:
+            RetirementSignal indicating whether to stop.
+        """
+        # 1. Immediate kills
+        if self._convergence_achieved:
+            return RetirementSignal(True, "convergence_achieved", "immediate")
+
+        if elapsed_s > self.config.clone_timeout_s:
+            return RetirementSignal(True, "timeout", "immediate")
+
+        async with self._lock:
+            if self._global_api_calls >= self.config.max_clone_api_calls_per_run:
+                return RetirementSignal(True, "global_budget_exhausted", "immediate")
+
+        # 2. Graceful stops
+        if self._wave_advancing:
+            return RetirementSignal(True, "wave_advancing", "graceful")
+
+        if searches_used >= self.config.max_searches_per_clone:
+            return RetirementSignal(True, "clone_budget_exhausted", "graceful")
+
+        # 3. Doubt resolved externally?
+        if await self._doubt_resolved(doubt, angle):
+            return RetirementSignal(True, "doubt_resolved_externally", "graceful")
+
+        # 4. Diminishing returns
+        if consecutive_empty_searches >= self.config.max_empty_searches:
+            return RetirementSignal(True, "diminishing_returns", "graceful")
+
+        return RetirementSignal(False)
+
+    async def _doubt_resolved(
+        self,
+        doubt: str,
+        angle: str,
+    ) -> bool:
+        """Check if another clone already resolved this doubt."""
+        try:
+            with self.store._lock:
+                count = self.store.conn.execute(
+                    """SELECT COUNT(*) FROM conditions
+                       WHERE source_type = 'clone_research'
+                         AND angle = ?
+                         AND confidence >= 0.8""",
+                    [angle],
+                ).fetchone()[0]
+            return count >= 2
+        except Exception:
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -386,102 +520,345 @@ async def _generate_clone_queries(
     return [need.data_needed, f"{need.angle} {need.doubt[:100]}"]
 
 
+_PLAN_PROMPT = """\
+You are a {angle} specialist investigating a specific doubt.
+
+DOUBT: {doubt}
+DATA NEEDED: {data_needed}
+
+MATERIAL GATHERED SO FAR:
+{gathered_so_far}
+
+Based on what you have (and what is still missing), plan your NEXT \
+research action. Choose ONE:
+- SEARCH: generate 2-3 search queries to find missing data
+- EXTRACT: list 1-2 URLs from search results to read in full
+- DONE: the doubt is sufficiently resolved
+
+Output ONLY valid JSON:
+{{
+  "action": "SEARCH" or "EXTRACT" or "DONE",
+  "queries": ["q1", "q2"],
+  "urls": ["url1"],
+  "reasoning": "why this action"
+}}"""
+
+_EVALUATE_PROMPT = """\
+You are evaluating whether a research doubt has been resolved.
+
+ORIGINAL DOUBT: {doubt}
+DATA NEEDED: {data_needed}
+
+FINDINGS SO FAR:
+{findings_summary}
+
+Has the doubt been resolved? What specific gaps remain?
+
+Output ONLY valid JSON:
+{{
+  "resolved": true/false,
+  "confidence": 0.0-1.0,
+  "remaining_gaps": ["gap1", "gap2"],
+  "reasoning": "assessment"
+}}"""
+
+
 async def run_clone_research(
     need: ResearchNeed,
     complete: Callable[[str], Awaitable[str]],
     config: ResearchOrganizerConfig,
+    retirement_checker: RetirementChecker | None = None,
 ) -> CloneResearchResult:
-    """Run a single tool-armed clone to resolve a specific doubt.
+    """Run a clone with a plan-act-evaluate loop to resolve a doubt.
 
-    The clone generates expert-informed search queries, fans out across
-    available APIs, extracts content from top URLs, and returns
-    structured findings.
+    Instead of a flat fan-out, the clone iterates: it plans what to
+    search next, acts (search or extract), evaluates whether the doubt
+    is resolved, and checks retirement conditions.  Exits early when
+    the doubt is resolved or a retirement rule fires.
+
+    Architecture reference: docs/CLONE_DEEP_AGENT_ARCHITECTURE.md §3.3
 
     Args:
         need: The research need to investigate.
         complete: Async LLM completion function.
         config: Research organizer configuration.
+        retirement_checker: Optional retirement checker for mid-flight
+            budget and convergence checks.
 
     Returns:
-        CloneResearchResult with findings and sources.
+        CloneResearchResult with findings, iteration count, and
+        retirement reason.
     """
+    clone_id = f"clone_{need.source_worker_id}"
     result = CloneResearchResult(
         angle=need.angle,
         doubt=need.doubt,
-        worker_id=f"clone_{need.source_worker_id}",
+        worker_id=clone_id,
     )
+    t0 = time.monotonic()
 
-    # Step 1: Generate expert search queries
-    queries = await _generate_clone_queries(need, complete)
-    result.search_queries_used = queries
-
-    logger.info(
-        "angle=<%s>, doubt=<%s>, queries=<%d> | clone generating search queries",
-        need.angle, need.doubt[:60], len(queries),
-    )
-
-    # Step 2: Fan-out search across available APIs
     search_fns = _get_available_search_fns()
     all_search_results: list[dict[str, str]] = []
-    searches_done = 0
-
-    for q in queries:
-        if searches_done >= config.max_searches_per_clone:
-            break
-        fn = search_fns[searches_done % len(search_fns)]
-        try:
-            results = await fn(q)
-            all_search_results.extend(results)
-            searches_done += 1
-        except Exception as exc:
-            logger.warning(
-                "angle=<%s>, query=<%s>, error=<%s> | clone search failed",
-                need.angle, q[:50], exc,
-            )
-
-    # Step 3: Extract content from top URLs
-    urls_seen: set[str] = set()
-    top_urls: list[str] = []
-    for r in all_search_results:
-        url = r.get("url", "")
-        if url and url not in urls_seen:
-            urls_seen.add(url)
-            top_urls.append(url)
-            if len(top_urls) >= config.max_extractions_per_clone:
-                break
-
     extracted_texts: list[str] = []
-    for url in top_urls:
-        content = await extract_url_content(url)
-        if content:
-            extracted_texts.append(content)
-            result.sources_found.append(url)
-
-    # Step 4: Synthesize findings from gathered material
-    all_material = "\n\n".join(extracted_texts)
-    snippet_material = "\n".join(
-        f"- {r.get('title', '')}: {r.get('snippet', '')}"
-        for r in all_search_results
-        if r.get("snippet")
-    )
-
-    if all_material or snippet_material:
-        findings = await _synthesize_clone_findings(
-            need=need,
-            full_articles=all_material,
-            snippets=snippet_material,
-            complete=complete,
-        )
-        result.findings = findings
+    searches_done = 0
+    extractions_done = 0
+    consecutive_empty = 0
 
     logger.info(
-        "angle=<%s>, doubt=<%s>, findings=<%d>, sources=<%d> | "
-        "clone research complete",
-        need.angle, need.doubt[:60], len(result.findings),
-        len(result.sources_found),
+        "clone=<%s>, angle=<%s>, doubt=<%s> | starting planning loop",
+        clone_id, need.angle, need.doubt[:60],
+    )
+
+    for iteration in range(1, config.max_planning_iterations + 1):
+        elapsed = time.monotonic() - t0
+
+        # ── Mid-flight retirement check ──────────────────────────
+        if retirement_checker is not None:
+            signal = await retirement_checker.check(
+                clone_id=clone_id,
+                doubt=need.doubt,
+                angle=need.angle,
+                tool_calls_used=searches_done + extractions_done,
+                searches_used=searches_done,
+                findings_stored=len(result.findings),
+                elapsed_s=elapsed,
+                consecutive_empty_searches=consecutive_empty,
+            )
+            if signal.should_retire:
+                result.retirement_reason = signal.reason
+                result.iterations_run = iteration - 1
+                logger.info(
+                    "clone=<%s>, iteration=<%d>, reason=<%s> | "
+                    "retiring mid-flight",
+                    clone_id, iteration, signal.reason,
+                )
+                break
+
+        # ── PLAN: ask LLM what to do next ────────────────────────
+        gathered = _summarize_gathered(
+            all_search_results, extracted_texts, result.findings,
+        )
+        plan_prompt = _safe_substitute(
+            _PLAN_PROMPT,
+            angle=need.angle,
+            doubt=need.doubt,
+            data_needed=need.data_needed,
+            gathered_so_far=gathered or "(nothing yet — first iteration)",
+        )
+
+        try:
+            plan_raw = await complete(plan_prompt)
+            plan = _parse_plan(plan_raw)
+        except Exception as exc:
+            logger.warning(
+                "clone=<%s>, iteration=<%d>, error=<%s> | plan failed",
+                clone_id, iteration, exc,
+            )
+            # Fall back to initial query generation on first iteration
+            if iteration == 1:
+                queries = await _generate_clone_queries(need, complete)
+                plan = {"action": "SEARCH", "queries": queries}
+            else:
+                break
+
+        action = plan.get("action", "DONE").upper()
+
+        # ── ACT: execute the planned action ──────────────────────
+        if action == "DONE":
+            result.retirement_reason = "doubt_resolved"
+            result.iterations_run = iteration
+            logger.info(
+                "clone=<%s>, iteration=<%d> | plan says DONE",
+                clone_id, iteration,
+            )
+            break
+
+        if action == "SEARCH":
+            queries = plan.get("queries", [])
+            if not queries:
+                queries = [f"{need.angle} {need.doubt[:100]}"]
+            result.search_queries_used.extend(queries)
+
+            new_results = 0
+            for q in queries:
+                if searches_done >= config.max_searches_per_clone:
+                    break
+                fn = search_fns[searches_done % len(search_fns)]
+                try:
+                    hits = await fn(q)
+                    all_search_results.extend(hits)
+                    new_results += len(hits)
+                    searches_done += 1
+                    if retirement_checker is not None:
+                        await retirement_checker.record_api_call()
+                except Exception as exc:
+                    logger.warning(
+                        "clone=<%s>, query=<%s>, error=<%s> | search failed",
+                        clone_id, q[:50], exc,
+                    )
+
+            if new_results == 0:
+                consecutive_empty += 1
+            else:
+                consecutive_empty = 0
+
+        elif action == "EXTRACT":
+            urls = plan.get("urls", [])
+            if not urls:
+                # Pick from search results
+                for r in all_search_results:
+                    url = r.get("url", "")
+                    if url and url not in {s for s in result.sources_found}:
+                        urls.append(url)
+                        if len(urls) >= 2:
+                            break
+
+            for url in urls:
+                if extractions_done >= config.max_extractions_per_clone:
+                    break
+                try:
+                    content = await extract_url_content(url)
+                    if content:
+                        extracted_texts.append(content)
+                        result.sources_found.append(url)
+                    extractions_done += 1
+                    if retirement_checker is not None:
+                        await retirement_checker.record_api_call()
+                except Exception as exc:
+                    logger.warning(
+                        "clone=<%s>, url=<%s>, error=<%s> | extraction failed",
+                        clone_id, url[:80], exc,
+                    )
+
+        # ── Synthesize after every iteration that gathered material ──
+        all_material = "\n\n".join(extracted_texts)
+        snippet_material = "\n".join(
+            f"- {r.get('title', '')}: {r.get('snippet', '')}"
+            for r in all_search_results
+            if r.get("snippet")
+        )
+
+        if all_material or snippet_material:
+            findings = await _synthesize_clone_findings(
+                need=need,
+                full_articles=all_material,
+                snippets=snippet_material,
+                complete=complete,
+            )
+            result.findings = findings
+
+        # ── EVALUATE: did this resolve the doubt? ────────────────
+        if result.findings:
+            eval_result = await _evaluate_doubt_resolution(
+                need=need,
+                findings=result.findings,
+                complete=complete,
+            )
+            if eval_result.get("resolved", False):
+                result.retirement_reason = "doubt_resolved"
+                result.iterations_run = iteration
+                logger.info(
+                    "clone=<%s>, iteration=<%d>, findings=<%d> | "
+                    "doubt resolved by evaluation",
+                    clone_id, iteration, len(result.findings),
+                )
+                break
+
+        result.iterations_run = iteration
+
+    else:
+        # Exhausted all iterations
+        result.retirement_reason = "max_iterations"
+
+    logger.info(
+        "clone=<%s>, iterations=<%d>, findings=<%d>, sources=<%d>, "
+        "reason=<%s>, elapsed_s=<%.1f> | clone planning loop complete",
+        clone_id, result.iterations_run, len(result.findings),
+        len(result.sources_found), result.retirement_reason,
+        time.monotonic() - t0,
     )
 
     return result
+
+
+def _summarize_gathered(
+    search_results: list[dict[str, str]],
+    extracted_texts: list[str],
+    findings: list[dict[str, Any]],
+) -> str:
+    """Build a summary of what the clone has gathered so far."""
+    parts: list[str] = []
+
+    if search_results:
+        parts.append(f"Search results: {len(search_results)} hits")
+        for r in search_results[:5]:
+            parts.append(f"  - {r.get('title', 'untitled')}: {r.get('snippet', '')[:100]}")
+
+    if extracted_texts:
+        parts.append(f"Full articles extracted: {len(extracted_texts)}")
+        for t in extracted_texts:
+            parts.append(f"  - ({len(t)} chars) {t[:100]}...")
+
+    if findings:
+        parts.append(f"Findings synthesized: {len(findings)}")
+        for f in findings[:3]:
+            parts.append(f"  - {f.get('fact', '')[:120]}")
+
+    return "\n".join(parts) if parts else ""
+
+
+def _parse_plan(raw: str) -> dict[str, Any]:
+    """Parse the LLM's plan response into a dict."""
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+
+    try:
+        plan = json.loads(raw)
+        if isinstance(plan, dict):
+            return plan
+    except json.JSONDecodeError:
+        pass
+
+    # Heuristic fallback
+    upper = raw.upper()
+    if "DONE" in upper:
+        return {"action": "DONE"}
+    if "EXTRACT" in upper:
+        return {"action": "EXTRACT", "urls": []}
+    return {"action": "SEARCH", "queries": []}
+
+
+async def _evaluate_doubt_resolution(
+    need: ResearchNeed,
+    findings: list[dict[str, Any]],
+    complete: Callable[[str], Awaitable[str]],
+) -> dict[str, Any]:
+    """Ask LLM whether the gathered findings resolve the original doubt."""
+    findings_summary = "\n".join(
+        f"- {f.get('fact', '')[:200]} (confidence: {f.get('confidence', '?')})"
+        for f in findings[:10]
+    )
+
+    prompt = _safe_substitute(
+        _EVALUATE_PROMPT,
+        doubt=need.doubt,
+        data_needed=need.data_needed,
+        findings_summary=findings_summary or "(no findings yet)",
+    )
+
+    try:
+        raw = await complete(prompt)
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+        result = json.loads(raw)
+        if isinstance(result, dict):
+            return result
+    except Exception:
+        pass
+
+    return {"resolved": False, "confidence": 0.0}
 
 
 # ---------------------------------------------------------------------------
@@ -815,13 +1192,55 @@ async def run_research_organizer(
         wave, len(all_needs), len(selected_needs),
     )
 
-    # ── Step 3: Spawn tool-armed clones in parallel ──────────────
+    # ── Step 3: Pre-spawn retirement checks ────────────────────────
+    retirement_checker = RetirementChecker(store, config)
+    spawn_needs: list[ResearchNeed] = []
+
+    for need in selected_needs:
+        # Pre-spawn rule: doubt already resolved?
+        if await retirement_checker._doubt_resolved(need.doubt, need.angle):
+            logger.info(
+                "angle=<%s>, doubt=<%s> | pre-spawn skip: doubt already resolved",
+                need.angle, need.doubt[:60],
+            )
+            continue
+
+        # Pre-spawn rule: duplicate doubt (same angle, same core question)?
+        is_dup = False
+        for existing in spawn_needs:
+            if (existing.angle == need.angle
+                    and existing.doubt.lower()[:50] == need.doubt.lower()[:50]):
+                is_dup = True
+                break
+        if is_dup:
+            logger.info(
+                "angle=<%s>, doubt=<%s> | pre-spawn skip: duplicate doubt",
+                need.angle, need.doubt[:60],
+            )
+            continue
+
+        spawn_needs.append(need)
+
+    if not spawn_needs:
+        logger.info(
+            "wave=<%d> | all doubts filtered by pre-spawn checks",
+            wave,
+        )
+        return []
+
+    logger.info(
+        "wave=<%d>, pre_spawn_selected=<%d>, filtered=<%d> | "
+        "spawning clones with planning loop",
+        wave, len(spawn_needs), len(selected_needs) - len(spawn_needs),
+    )
+
+    # ── Step 4: Spawn tool-armed clones in parallel ──────────────
     clone_tasks = [
         asyncio.wait_for(
-            run_clone_research(need, complete, config),
+            run_clone_research(need, complete, config, retirement_checker),
             timeout=config.clone_timeout_s,
         )
-        for need in selected_needs
+        for need in spawn_needs
     ]
 
     clone_results_raw = await asyncio.gather(
@@ -835,12 +1254,12 @@ async def run_research_organizer(
         if isinstance(result, Exception):
             logger.warning(
                 "angle=<%s>, error=<%s> | clone research failed or timed out",
-                selected_needs[i].angle, result,
+                spawn_needs[i].angle, result,
             )
             continue
         if isinstance(result, CloneResearchResult):
             clone_results.append(result)
-            # Step 4: Store findings in ConditionStore
+            # Step 5: Store findings in ConditionStore
             stored = store_clone_findings(store, result, wave, run_id)
             total_findings += stored
 

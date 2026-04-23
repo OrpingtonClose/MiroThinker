@@ -107,7 +107,11 @@ class MCPSwarmConfig:
     Attributes:
         max_workers: Maximum number of parallel worker agents.
         max_waves: Maximum worker waves before stopping.
-        convergence_threshold: Stop if new findings per wave drops below this.
+        convergence_threshold: Stop if new findings per wave drops below this
+            (absolute floor).
+        convergence_delta_pct: Stop if wave-over-wave findings growth is
+            below this fraction (e.g. 0.05 = 5%).  Catches plateaus when
+            each wave still produces many findings but growth has stalled.
         api_base: vLLM or OpenAI-compatible API endpoint.
         model: Default model identifier for the endpoint.
         model_map: Per-angle model assignment. Maps angle name to model
@@ -130,6 +134,7 @@ class MCPSwarmConfig:
     max_workers: int = 7
     max_waves: int = 3
     convergence_threshold: int = 5
+    convergence_delta_pct: float = 0.05
     api_base: str = "http://localhost:8000/v1"
     model: str = "default"
     model_map: dict[str, str] = field(default_factory=dict)
@@ -348,6 +353,7 @@ class MCPSwarmEngine:
         # ── Phase 1-N: Worker waves (tool-free) ─────────────────────
         wave = 0
         prior_outputs: dict[str, str] = {}
+        _background_ro_tasks: list[asyncio.Task[None]] = []
 
         for wave in range(1, config.max_waves + 1):
             phase_start = time.monotonic()
@@ -558,69 +564,112 @@ class MCPSwarmEngine:
                         wave, exc,
                     )
 
-            # ── Research Organizer: clone-based gap resolution ────
-            # After each wave, the Research Organizer reads all worker
-            # transcripts, extracts doubts/gaps, and spawns tool-armed
-            # clones to resolve them.  Clone findings are stored as
-            # source_type='clone_research' and appear in next wave's
-            # data packages as §8 FRESH EVIDENCE.
+            # ── Research Organizer: non-blocking clone-based gap resolution
+            # Spawn clones as a background task so the next wave can
+            # start immediately.  Clone findings land in ConditionStore
+            # asynchronously and appear in subsequent waves' §8 FRESH
+            # EVIDENCE via the data package builder.
             successful_results = [
                 r for r in results
                 if isinstance(r, dict) and r.get("status") == "success"
             ]
             if successful_results and wave < config.max_waves:
-                try:
-                    from swarm.research_organizer import run_research_organizer
+                from swarm.research_organizer import run_research_organizer
 
-                    ro_start = time.monotonic()
-                    clone_results = await run_research_organizer(
-                        store=self.store,
-                        worker_results=successful_results,
-                        wave=wave,
-                        run_id=config.source_run or run_id,
-                        complete=self.complete,
-                    )
-                    ro_time = time.monotonic() - ro_start
-
-                    clone_findings = sum(
-                        len(cr.findings) for cr in clone_results
-                    )
-                    metrics.phase_times[f"research_organizer_wave_{wave}"] = ro_time
-
-                    if clone_results:
-                        logger.info(
-                            "wave=<%d>, clones=<%d>, clone_findings=<%d>, "
-                            "elapsed_s=<%.1f> | research organizer complete",
-                            wave, len(clone_results), clone_findings, ro_time,
+                async def _run_ro_background(
+                    w: int,
+                    worker_res: list[dict[str, Any]],
+                ) -> None:
+                    """Background task for research organizer."""
+                    try:
+                        ro_start = time.monotonic()
+                        clone_results = await run_research_organizer(
+                            store=self.store,
+                            worker_results=worker_res,
+                            wave=w,
+                            run_id=config.source_run or run_id,
+                            complete=self.complete,
                         )
-                        await _emit({
-                            "type": "swarm_phase",
-                            "phase": f"research_organizer_wave_{wave}",
-                            "clones": len(clone_results),
-                            "clone_findings": clone_findings,
-                            "elapsed_s": round(ro_time, 1),
-                        })
-                except Exception as exc:
-                    logger.warning(
-                        "wave=<%d>, error=<%s> | research organizer failed, continuing",
-                        wave, exc,
-                    )
+                        ro_time = time.monotonic() - ro_start
 
-            # Convergence check
-            if wave_findings_count < config.convergence_threshold:
+                        clone_findings = sum(
+                            len(cr.findings) for cr in clone_results
+                        )
+                        metrics.phase_times[f"research_organizer_wave_{w}"] = ro_time
+
+                        if clone_results:
+                            logger.info(
+                                "wave=<%d>, clones=<%d>, clone_findings=<%d>, "
+                                "elapsed_s=<%.1f> | research organizer complete",
+                                w, len(clone_results), clone_findings, ro_time,
+                            )
+                            await _emit({
+                                "type": "swarm_phase",
+                                "phase": f"research_organizer_wave_{w}",
+                                "clones": len(clone_results),
+                                "clone_findings": clone_findings,
+                                "elapsed_s": round(ro_time, 1),
+                            })
+                    except Exception as exc:
+                        logger.warning(
+                            "wave=<%d>, error=<%s> | research organizer failed, continuing",
+                            w, exc,
+                        )
+
+                ro_task = asyncio.create_task(
+                    _run_ro_background(wave, successful_results),
+                    name=f"research_organizer_wave_{wave}",
+                )
+                _background_ro_tasks.append(ro_task)
+
+            # Convergence check — dual criteria:
+            # 1. Absolute: new findings below hard floor (catches near-zero waves)
+            # 2. Delta: wave-over-wave growth below threshold (catches plateaus)
+            abs_converged = wave_findings_count < config.convergence_threshold
+            delta_converged = False
+            if wave >= 2 and len(metrics.findings_per_wave) >= 2:
+                prev_count = metrics.findings_per_wave[-2]
+                if prev_count > 0:
+                    delta = (wave_findings_count - prev_count) / prev_count
+                    delta_converged = delta < config.convergence_delta_pct
+                elif wave_findings_count == 0:
+                    delta_converged = True
+
+            if abs_converged or delta_converged:
+                reason_parts = []
+                if abs_converged:
+                    reason_parts.append(
+                        f"{wave_findings_count} new < {config.convergence_threshold} abs threshold"
+                    )
+                if delta_converged:
+                    prev = metrics.findings_per_wave[-2] if len(metrics.findings_per_wave) >= 2 else 0
+                    reason_parts.append(
+                        f"delta {wave_findings_count - prev:+d} vs prev {prev} "
+                        f"< {config.convergence_delta_pct:.0%} threshold"
+                    )
                 metrics.convergence_reason = (
-                    f"converged at wave {wave}: {wave_findings_count} new findings "
-                    f"< threshold {config.convergence_threshold}"
+                    f"converged at wave {wave}: {'; '.join(reason_parts)}"
                 )
                 logger.info(
-                    "wave=<%d>, new_findings=<%d>, threshold=<%d> | convergence detected",
-                    wave, wave_findings_count, config.convergence_threshold,
+                    "wave=<%d>, new_findings=<%d>, reason=<%s> | convergence detected",
+                    wave, wave_findings_count, metrics.convergence_reason,
                 )
                 break
         else:
             metrics.convergence_reason = f"max waves ({config.max_waves}) reached"
 
         metrics.total_waves = wave if config.max_waves > 0 else 0
+
+        # ── Await background research organizer tasks ────────────────
+        # Let any in-flight clone research finish so findings land in
+        # the store before the serendipity wave and report generation.
+        if _background_ro_tasks:
+            logger.info(
+                "pending_ro_tasks=<%d> | awaiting background research organizer tasks",
+                len(_background_ro_tasks),
+            )
+            await asyncio.gather(*_background_ro_tasks, return_exceptions=True)
+            _background_ro_tasks.clear()
 
         # ── Serendipity wave (tool-free) ─────────────────────────────
         if config.enable_serendipity_wave and len(assignments) >= 2:
@@ -808,11 +857,17 @@ class MCPSwarmEngine:
                     iteration=serendipity_iteration,
                 )
 
-                # Extract findings
+                # Extract findings — use a cross-domain aware query
+                # so the extraction prompt doesn't discard connections
+                # between angles as "off-topic"
+                cross_domain_query = (
+                    f"Cross-domain connections between: {angle_list}. "
+                    f"Original query: {query}"
+                )
                 findings = await extract_findings_llm(
                     worker_output=response,
                     angle="cross-domain connections",
-                    query=query,
+                    query=cross_domain_query,
                     complete=self.complete,
                 )
                 store_extracted_findings(

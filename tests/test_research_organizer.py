@@ -237,7 +237,11 @@ class TestResearchOrganizerConfig:
         config = ResearchOrganizerConfig()
         assert config.max_doubts_per_worker == 3
         assert config.max_clones == 4
-        assert config.max_searches_per_clone == 5
-        assert config.max_extractions_per_clone == 2
+        assert config.max_searches_per_clone == 8
+        assert config.max_extractions_per_clone == 3
         assert config.trigger_every_n_waves == 2
         assert config.trigger_uncertainty_threshold == 3
+        assert config.max_planning_iterations == 6
+        assert config.max_empty_searches == 3
+        assert config.max_clone_api_calls_per_run == 100
+        assert config.clone_timeout_s == 180.0
