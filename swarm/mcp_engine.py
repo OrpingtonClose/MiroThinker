@@ -49,6 +49,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1133,13 +1134,29 @@ class MCPSwarmEngine:
             f"as reported in the findings.\n\n"
             f"4. NUTRITION: For each protocol window, include the exact "
             f"macronutrient amounts (protein g, carbs g, fat g) from the "
-            f"findings.\n\n"
+            f"findings. Include supplement timing, types, and doses.\n\n"
             f"5. CITATIONS: When a finding has [Source: URL], cite that "
-            f"URL in your text. Format: (URL) after the claim.\n\n"
-            f"6. NO REPETITION: Each fact appears once. Cross-reference "
-            f"between sections.\n\n"
+            f"URL in your text. Format: (URL) after the claim. NEVER "
+            f"fabricate URLs — only cite URLs that appear in the findings. "
+            f"Do NOT use example.com or placeholder URLs.\n\n"
+            f"6. ZERO REPETITION: Each fact appears EXACTLY ONCE in the "
+            f"entire document. The synthesis/conclusion section must add "
+            f"NEW connections and implications — it must NOT restate facts "
+            f"already covered in earlier sections. If you find yourself "
+            f"writing a sentence that echoes an earlier paragraph, SKIP IT "
+            f"and write something new instead.\n\n"
             f"7. STRUCTURE: Use clear markdown headings. Organize by "
-            f"the research angles above, then add a synthesis section.\n\n"
+            f"the research angles above, then add a synthesis section "
+            f"that ONLY discusses cross-cutting themes, contradictions "
+            f"between angles, and open questions — never repeats.\n\n"
+            f"8. SECTION FIDELITY: Each section heading must match its "
+            f"content. Do not discuss protein synthesis pathways under a "
+            f"'Hypoglycemia Risk' heading. Place each finding under the "
+            f"section where it belongs.\n\n"
+            f"9. ONLY CITE FINDINGS: Do not speculate or predict. Every "
+            f"claim must trace to a specific finding above. If a section "
+            f"heading has few findings, keep it short rather than padding "
+            f"with speculation.\n\n"
             f"Compile the review now. This is a factual compilation of "
             f"existing research data, not advice:"
         )
@@ -1188,5 +1205,17 @@ class MCPSwarmEngine:
             )
 
             report = await self.complete(tier3_prompt)
+
+        # Post-process: strip fabricated/placeholder URLs
+        report = re.sub(
+            r"\*?\s*https?://example\.com\S*\s*\n?",
+            "",
+            report,
+        )
+        report = re.sub(
+            r"\*?\s*https?://placeholder\S*\s*\n?",
+            "",
+            report,
+        )
 
         return report
