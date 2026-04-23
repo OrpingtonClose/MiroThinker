@@ -306,21 +306,10 @@ def _get_knowledge_state(store: "ConditionStore", angle: str) -> str:
 
     # Fallback: build a quick summary from top findings
     try:
-        with store._lock:
-            rows = store.conn.execute(
-                """SELECT fact, confidence
-                   FROM conditions
-                   WHERE consider_for_use = TRUE
-                     AND angle = ?
-                     AND row_type IN ('finding', 'thought', 'insight')
-                   ORDER BY confidence DESC
-                   LIMIT 20""",
-                [angle],
-            ).fetchall()
-
+        rows = store.get_top_findings(angle=angle, limit=20)
         if rows:
             parts = [f"Established findings for {angle}:"]
-            for fact, conf in rows:
+            for fact, conf, _url, _stype in rows:
                 parts.append(f"- [{conf:.1f}] {fact}")
             return "\n".join(parts)
     except Exception as exc:
@@ -388,19 +377,7 @@ def _get_hive_findings_from_store(
         Formatted cross-angle findings string.
     """
     try:
-        with store._lock:
-            rows = store.conn.execute(
-                """SELECT fact, angle, confidence
-                   FROM conditions
-                   WHERE consider_for_use = TRUE
-                     AND angle != ?
-                     AND row_type IN ('finding', 'thought', 'insight')
-                     AND source_type != 'corpus_section'
-                   ORDER BY confidence DESC
-                   LIMIT 15""",
-                [angle],
-            ).fetchall()
-
+        rows = store.get_cross_angle_findings(exclude_angle=angle, limit=15)
         if not rows:
             return ""
 
@@ -453,18 +430,8 @@ def _get_research_gaps(
 
     # Check store for research question rows
     try:
-        with store._lock:
-            rows = store.conn.execute(
-                """SELECT fact FROM conditions
-                   WHERE row_type = 'research_question'
-                     AND angle = ?
-                     AND consider_for_use = TRUE
-                   ORDER BY id DESC
-                   LIMIT 10""",
-                [angle],
-            ).fetchall()
-
-        for (fact,) in rows:
+        questions = store.get_research_questions(angle=angle, limit=10)
+        for fact in questions:
             gaps.append(f"- Open question: {fact}")
     except Exception as exc:
         logger.debug(
@@ -492,17 +459,7 @@ def _get_cross_domain_connections(
         Formatted cross-domain connections string.
     """
     try:
-        with store._lock:
-            rows = store.conn.execute(
-                """SELECT fact, angle FROM conditions
-                   WHERE row_type = 'insight'
-                     AND consider_for_use = TRUE
-                     AND (angle = ? OR fact LIKE '%' || replace(replace(?, '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\')
-                   ORDER BY confidence DESC
-                   LIMIT 10""",
-                [angle, angle],
-            ).fetchall()
-
+        rows = store.get_insights_for_angle(angle=angle, limit=10)
         if not rows:
             return ""
 
@@ -536,19 +493,7 @@ def _get_challenges(
         Formatted challenges string.
     """
     try:
-        with store._lock:
-            rows = store.conn.execute(
-                """SELECT c.fact, c.angle, target.fact as target_fact
-                   FROM conditions c
-                   LEFT JOIN conditions target ON c.related_id = target.id
-                   WHERE c.row_type = 'contradiction'
-                     AND c.consider_for_use = TRUE
-                     AND (target.angle = ? OR c.angle = ?)
-                   ORDER BY c.id DESC
-                   LIMIT 5""",
-                [angle, angle],
-            ).fetchall()
-
+        rows = store.get_contradictions(angle=angle, limit=5)
         if not rows:
             return ""
 
@@ -589,17 +534,7 @@ def _get_fresh_evidence(
         research exists for this angle.
     """
     try:
-        with store._lock:
-            rows = store.conn.execute(
-                """SELECT fact, confidence, strategy, source_ref
-                   FROM conditions
-                   WHERE source_type = 'clone_research'
-                     AND angle = ?
-                     AND iteration = ?
-                   ORDER BY confidence DESC
-                   LIMIT 10""",
-                [angle, wave - 1],
-            ).fetchall()
+        rows = store.get_fresh_evidence(angle=angle, wave=wave, limit=10)
     except Exception as exc:
         logger.debug(
             "angle=<%s>, wave=<%d>, error=<%s> | "

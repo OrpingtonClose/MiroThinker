@@ -284,15 +284,11 @@ class RetirementChecker:
         """
         try:
             doubt_prefix = doubt.strip()[:50].lower()
-            with self.store._lock:
-                count = self.store.conn.execute(
-                    """SELECT COUNT(*) FROM conditions
-                       WHERE source_type = 'clone_research'
-                         AND angle = ?
-                         AND confidence >= 0.8
-                         AND lower(left(strategy, 50)) = ?""",
-                    [angle, doubt_prefix],
-                ).fetchone()[0]
+            count = self.store.get_clone_research_count(
+                angle=angle,
+                doubt_prefix=doubt_prefix,
+                min_confidence=0.8,
+            )
             return count >= 2
         except Exception:
             return False
@@ -760,7 +756,15 @@ async def run_clone_research(
                 snippets=snippet_material,
                 complete=complete,
             )
-            result.findings = findings if findings else result.findings
+            # Extend rather than overwrite — later synthesis iterations
+            # may produce fewer findings due to LLM non-determinism.
+            # Dedup by fact text to avoid exact duplicates across iterations.
+            if findings:
+                existing_facts = {f.get("fact", "").strip().lower() for f in result.findings}
+                for f in findings:
+                    if f.get("fact", "").strip().lower() not in existing_facts:
+                        result.findings.append(f)
+                        existing_facts.add(f.get("fact", "").strip().lower())
 
         # ── EVALUATE: did this resolve the doubt? ────────────────
         if result.findings:
@@ -1192,17 +1196,7 @@ def build_fresh_evidence_section(
         clone research exists.
     """
     try:
-        with store._lock:
-            rows = store.conn.execute(
-                """SELECT fact, confidence, strategy as doubt, source_ref
-                   FROM conditions
-                   WHERE source_type = 'clone_research'
-                     AND angle = ?
-                     AND iteration = ?
-                   ORDER BY confidence DESC
-                   LIMIT 10""",
-                [angle, wave - 1],
-            ).fetchall()
+        rows = store.get_fresh_evidence(angle=angle, wave=wave, limit=10)
     except Exception as exc:
         logger.warning(
             "angle=<%s>, wave=<%d>, error=<%s> | "

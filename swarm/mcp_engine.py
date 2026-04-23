@@ -222,7 +222,11 @@ class MCPSwarmEngine:
         t0 = time.monotonic()
         metrics = MCPSwarmMetrics()
         config = self.config
-        run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        run_id = config.source_run or f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+
+        # Activate run scoping — all store reads filter by this run,
+        # all writes stamp source_run automatically.
+        self.store.current_run = run_id
 
         async def _emit(event: dict) -> None:
             if on_event is not None:
@@ -466,12 +470,8 @@ class MCPSwarmEngine:
 
             metrics.findings_per_wave.append(wave_findings_count)
 
-            # Track total active findings
-            with self.store._lock:
-                total_active = self.store.conn.execute(
-                    "SELECT COUNT(*) FROM conditions WHERE consider_for_use = TRUE"
-                ).fetchone()[0]
-            metrics.total_findings_stored = total_active
+            # Track total active findings (scoped to this run)
+            metrics.total_findings_stored = self.store.count_active()
 
             wave_time = time.monotonic() - phase_start
             metrics.phase_times[f"wave_{wave}"] = wave_time
@@ -481,13 +481,13 @@ class MCPSwarmEngine:
                 "phase": f"wave_{wave}_complete",
                 "wave": wave,
                 "new_findings": wave_findings_count,
-                "total_findings": total_active,
+                "total_findings": metrics.total_findings_stored,
                 "elapsed_s": round(wave_time, 1),
             })
 
             logger.info(
                 "wave=<%d>, new_findings=<%d>, total=<%d>, elapsed_s=<%.1f> | wave complete",
-                wave, wave_findings_count, total_active, wave_time,
+                wave, wave_findings_count, metrics.total_findings_stored, wave_time,
             )
 
             # Periodic compaction
@@ -644,9 +644,10 @@ class MCPSwarmEngine:
                     )
                 if delta_converged:
                     prev = metrics.findings_per_wave[-2] if len(metrics.findings_per_wave) >= 2 else 0
+                    pct_delta = ((wave_findings_count - prev) / prev * 100) if prev else 0.0
                     reason_parts.append(
-                        f"delta {wave_findings_count - prev:+d} vs prev {prev} "
-                        f"< {config.convergence_delta_pct:.0%} threshold"
+                        f"delta {pct_delta:+.1f}% (prev {prev} \u2192 {wave_findings_count}) "
+                        f"within {config.convergence_delta_pct:.0%} threshold"
                     )
                 metrics.convergence_reason = (
                     f"converged at wave {wave}: {'; '.join(reason_parts)}"
@@ -894,35 +895,21 @@ class MCPSwarmEngine:
         run_number = len(stats.get("models_seen", [])) or 1
 
         for a in assignments:
-            with self.store._lock:
-                count = self.store.conn.execute(
-                    """SELECT COUNT(*) FROM conditions
-                       WHERE consider_for_use = TRUE
-                         AND angle = ?
-                         AND row_type IN ('finding', 'thought', 'insight')""",
-                    [a.angle],
-                ).fetchone()[0]
-
+            count = self.store.count_active(
+                angle=a.angle,
+                row_types=("finding", "thought", "insight"),
+            )
             if count == 0:
                 continue
 
-            with self.store._lock:
-                rows = self.store.conn.execute(
-                    """SELECT fact, confidence
-                       FROM conditions
-                       WHERE consider_for_use = TRUE
-                         AND angle = ?
-                         AND row_type IN ('finding', 'thought', 'insight')
-                       ORDER BY confidence DESC
-                       LIMIT 15""",
-                    [a.angle],
-                ).fetchall()
-
+            rows = self.store.get_top_findings(
+                angle=a.angle, limit=15,
+            )
             if not rows:
                 continue
 
             summary_parts = [f"[{a.angle}] {count} total findings. Top claims:"]
-            for fact, conf in rows:
+            for fact, conf, _url, _stype in rows:
                 summary_parts.append(f"- (conf={conf:.2f}) {fact[:200]}")
 
             summary = "\n".join(summary_parts)[:2000]
@@ -1015,20 +1002,12 @@ class MCPSwarmEngine:
         all_seen_facts: set[str] = set()
 
         for a in assignments:
-            with self.store._lock:
-                rows = self.store.conn.execute(
-                    """SELECT fact, confidence, source_url, source_type
-                       FROM conditions
-                       WHERE consider_for_use = TRUE
-                         AND angle = ?
-                         AND row_type IN ('finding', 'thought', 'insight')
-                         AND length(fact) >= 30
-                       ORDER BY
-                         CASE WHEN source_type = 'worker_analysis' THEN 0 ELSE 1 END,
-                         confidence DESC
-                       LIMIT 80""",
-                    [a.angle],
-                ).fetchall()
+            rows = self.store.get_top_findings(
+                angle=a.angle,
+                limit=80,
+                min_length=30,
+                order_by="CASE WHEN source_type = 'worker_analysis' THEN 0 ELSE 1 END, confidence DESC",
+            )
 
             if not rows:
                 continue
@@ -1070,21 +1049,15 @@ class MCPSwarmEngine:
                 sections.append(section)
 
         # Get cross-domain findings
-        with self.store._lock:
-            cross_rows = self.store.conn.execute(
-                """SELECT fact, confidence, angle
-                   FROM conditions
-                   WHERE consider_for_use = TRUE
-                     AND angle = 'cross-domain connections'
-                     AND row_type IN ('finding', 'thought', 'insight')
-                     AND length(fact) >= 30
-                   ORDER BY confidence DESC
-                   LIMIT 20""",
-            ).fetchall()
+        cross_rows = self.store.get_top_findings(
+            angle="cross-domain connections",
+            limit=20,
+            min_length=30,
+        )
 
         if cross_rows:
             cross_findings: list[str] = []
-            for fact, conf, angle in cross_rows:
+            for fact, conf, _url, _stype in cross_rows:
                 if self._is_garbage_finding(fact):
                     continue
                 fact_key = fact.strip().lower()
@@ -1251,9 +1224,11 @@ class MCPSwarmEngine:
         )
 
         # Strip parenthetical finding echoes where the LLM copies the
-        # entire finding text inside parentheses after the claim
+        # entire finding text inside parentheses after the claim.
+        # [^)\n] prevents matching across newlines — only single-line
+        # parentheticals are stripped.
         report = re.sub(
-            r"\s*\([^)]{50,}\)",
+            r"\s*\([^)\n]{50,}\)",
             "",
             report,
         )

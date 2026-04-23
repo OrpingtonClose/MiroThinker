@@ -84,11 +84,16 @@ class ConditionStore:
     from async event loop and sync research thread.
     """
 
-    def __init__(self, db_path: str = "") -> None:
+    def __init__(self, db_path: str = "", *, current_run: str = "") -> None:
         """Initialize DuckDB connection and schema.
 
         Args:
             db_path: Path to DuckDB file. Empty string = in-memory.
+            current_run: Run identifier that scopes all queries.
+                When set, every read method automatically filters by
+                ``source_run = current_run`` and every write method
+                stamps ``source_run`` on new rows.  Pass ``cross_run=True``
+                to individual methods to bypass this scoping.
         """
         if db_path:
             self.conn = duckdb.connect(db_path)
@@ -97,6 +102,7 @@ class ConditionStore:
         self._lock = threading.RLock()  # Reentrant: methods call each other
         self._next_id = 1
         self._db_path = db_path
+        self.current_run: str = current_run
         self.user_query: str = ""  # Set by _run_job for trigger_gossip context
 
         # Enable WAL mode for file-backed databases — crash-safe writes
@@ -283,6 +289,45 @@ class ConditionStore:
             """)
         except Exception:
             pass
+
+        # P2: indices for common query patterns (idempotent)
+        for idx_sql in (
+            "CREATE INDEX IF NOT EXISTS idx_cond_run_filter ON conditions(source_run, consider_for_use, row_type)",
+            "CREATE INDEX IF NOT EXISTS idx_cond_angle ON conditions(angle, consider_for_use)",
+            "CREATE INDEX IF NOT EXISTS idx_cond_source ON conditions(source_type, angle)",
+            "CREATE INDEX IF NOT EXISTS idx_cond_phase ON conditions(phase)",
+        ):
+            try:
+                self.conn.execute(idx_sql)
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
+    # Run-scoping helpers
+    # ------------------------------------------------------------------
+
+    def _run_sql(self, *, cross_run: bool = False) -> str:
+        """Return a SQL fragment ``AND source_run = ?`` when scoping is active.
+
+        Args:
+            cross_run: If True, skip run filtering (for compaction, cross-run
+                comparison, etc.).
+
+        Returns:
+            SQL fragment (empty string when scoping is inactive or bypassed).
+        """
+        if cross_run or not self.current_run:
+            return ""
+        return " AND source_run = ?"
+
+    def _run_params(self, *, cross_run: bool = False) -> list[str]:
+        """Return ``[current_run]`` when scoping is active, else ``[]``.
+
+        Pair with :meth:`_run_sql` to build parameterized queries.
+        """
+        if cross_run or not self.current_run:
+            return []
+        return [self.current_run]
 
     # ------------------------------------------------------------------
     # Corpus fingerprinting — prevents re-ingestion across runs
@@ -615,28 +660,35 @@ class ConditionStore:
                 [sid, angle, summary, finding_count, now, run_number],
             )
 
-    def get_store_stats(self) -> dict[str, Any]:
+    def get_store_stats(self, *, cross_run: bool = False) -> dict[str, Any]:
         """Get aggregate statistics about the store for diagnostics."""
+        run_sql = self._run_sql(cross_run=cross_run)
+        run_p = self._run_params(cross_run=cross_run)
         with self._lock:
             total = self.conn.execute(
-                "SELECT COUNT(*) FROM conditions"
+                f"SELECT COUNT(*) FROM conditions WHERE TRUE{run_sql}",
+                run_p,
             ).fetchone()[0]
             active = self.conn.execute(
-                "SELECT COUNT(*) FROM conditions WHERE consider_for_use = TRUE"
+                f"SELECT COUNT(*) FROM conditions WHERE consider_for_use = TRUE{run_sql}",
+                run_p,
             ).fetchone()[0]
             by_type = self.conn.execute(
-                """SELECT row_type, COUNT(*) FROM conditions
-                   WHERE consider_for_use = TRUE
-                   GROUP BY row_type"""
+                f"""SELECT row_type, COUNT(*) FROM conditions
+                   WHERE consider_for_use = TRUE{run_sql}
+                   GROUP BY row_type""",
+                run_p,
             ).fetchall()
             by_angle = self.conn.execute(
-                """SELECT angle, COUNT(*) FROM conditions
-                   WHERE consider_for_use = TRUE AND row_type = 'finding'
-                   GROUP BY angle ORDER BY COUNT(*) DESC"""
+                f"""SELECT angle, COUNT(*) FROM conditions
+                   WHERE consider_for_use = TRUE AND row_type = 'finding'{run_sql}
+                   GROUP BY angle ORDER BY COUNT(*) DESC""",
+                run_p,
             ).fetchall()
             models = self.conn.execute(
-                """SELECT DISTINCT source_model FROM conditions
-                   WHERE source_model != '' AND source_model IS NOT NULL"""
+                f"""SELECT DISTINCT source_model FROM conditions
+                   WHERE source_model != '' AND source_model IS NOT NULL{run_sql}""",
+                run_p,
             ).fetchall()
         return {
             "total_rows": total,
@@ -645,6 +697,331 @@ class ConditionStore:
             "by_angle": dict(by_angle),
             "models_seen": [r[0] for r in models],
         }
+
+    # ------------------------------------------------------------------
+    # Scoped query methods — run-aware reads for external callers
+    # ------------------------------------------------------------------
+    # These methods use _run_sql()/_run_params() so that when current_run
+    # is set, queries automatically filter by source_run.  External code
+    # (data_package.py, mcp_engine.py, research_organizer.py) MUST use
+    # these instead of raw conn.execute() against conditions.
+
+    def get_top_findings(
+        self,
+        angle: str | None = None,
+        *,
+        row_types: tuple[str, ...] = ("finding", "thought", "insight"),
+        limit: int = 20,
+        min_length: int = 0,
+        exclude_source_types: tuple[str, ...] = (),
+        order_by: str = "confidence DESC",
+        cross_run: bool = False,
+    ) -> list[tuple[str, float, str, str]]:
+        """Get top findings with run scoping.
+
+        Args:
+            angle: Filter to this angle. None = all angles.
+            row_types: Row types to include.
+            limit: Maximum results.
+            min_length: Minimum fact length in characters.
+            exclude_source_types: Source types to exclude.
+            order_by: SQL ORDER BY clause.
+            cross_run: If True, skip run filtering.
+
+        Returns:
+            List of (fact, confidence, source_url, source_type) tuples.
+        """
+        run_sql = self._run_sql(cross_run=cross_run)
+        params: list[Any] = []
+
+        where_parts = ["consider_for_use = TRUE"]
+
+        if row_types:
+            placeholders = ", ".join("?" for _ in row_types)
+            where_parts.append(f"row_type IN ({placeholders})")
+            params.extend(row_types)
+
+        if angle is not None:
+            where_parts.append("angle = ?")
+            params.append(angle)
+
+        if min_length > 0:
+            where_parts.append(f"length(fact) >= {min_length}")
+
+        if exclude_source_types:
+            placeholders = ", ".join("?" for _ in exclude_source_types)
+            where_parts.append(f"source_type NOT IN ({placeholders})")
+            params.extend(exclude_source_types)
+
+        params.extend(self._run_params(cross_run=cross_run))
+
+        where = " AND ".join(where_parts) + run_sql
+        sql = f"""SELECT fact, confidence, source_url, source_type
+                  FROM conditions
+                  WHERE {where}
+                  ORDER BY {order_by}
+                  LIMIT ?"""
+        params.append(limit)
+
+        with self._lock:
+            return self.conn.execute(sql, params).fetchall()
+
+    def count_active(
+        self,
+        angle: str | None = None,
+        *,
+        row_types: tuple[str, ...] | None = None,
+        cross_run: bool = False,
+    ) -> int:
+        """Count active (consider_for_use=TRUE) findings with run scoping.
+
+        Args:
+            angle: Filter to this angle. None = all angles.
+            row_types: Filter to these row types. None = all types.
+            cross_run: If True, skip run filtering.
+
+        Returns:
+            Count of matching rows.
+        """
+        run_sql = self._run_sql(cross_run=cross_run)
+        params: list[Any] = []
+
+        where_parts = ["consider_for_use = TRUE"]
+
+        if angle is not None:
+            where_parts.append("angle = ?")
+            params.append(angle)
+
+        if row_types is not None:
+            placeholders = ", ".join("?" for _ in row_types)
+            where_parts.append(f"row_type IN ({placeholders})")
+            params.extend(row_types)
+
+        params.extend(self._run_params(cross_run=cross_run))
+
+        where = " AND ".join(where_parts) + run_sql
+        sql = f"SELECT COUNT(*) FROM conditions WHERE {where}"
+
+        with self._lock:
+            return self.conn.execute(sql, params).fetchone()[0]
+
+    def get_cross_angle_findings(
+        self,
+        exclude_angle: str,
+        *,
+        limit: int = 15,
+        exclude_source_types: tuple[str, ...] = ("corpus_section",),
+        cross_run: bool = False,
+    ) -> list[tuple[str, str, float]]:
+        """Get findings from angles OTHER than exclude_angle.
+
+        Args:
+            exclude_angle: Angle to exclude from results.
+            limit: Maximum results.
+            exclude_source_types: Source types to exclude.
+            cross_run: If True, skip run filtering.
+
+        Returns:
+            List of (fact, angle, confidence) tuples.
+        """
+        run_sql = self._run_sql(cross_run=cross_run)
+        params: list[Any] = [exclude_angle]
+
+        excl_sql = ""
+        if exclude_source_types:
+            placeholders = ", ".join("?" for _ in exclude_source_types)
+            excl_sql = f" AND source_type NOT IN ({placeholders})"
+            params.extend(exclude_source_types)
+
+        params.extend(self._run_params(cross_run=cross_run))
+        params.append(limit)
+
+        sql = f"""SELECT fact, angle, confidence
+                  FROM conditions
+                  WHERE consider_for_use = TRUE
+                    AND angle != ?
+                    AND row_type IN ('finding', 'thought', 'insight')
+                    {excl_sql}
+                    {run_sql}
+                  ORDER BY confidence DESC
+                  LIMIT ?"""
+
+        with self._lock:
+            return self.conn.execute(sql, params).fetchall()
+
+    def get_research_questions(
+        self,
+        angle: str,
+        *,
+        limit: int = 10,
+        cross_run: bool = False,
+    ) -> list[str]:
+        """Get open research questions for an angle.
+
+        Args:
+            angle: Research angle.
+            limit: Maximum results.
+            cross_run: If True, skip run filtering.
+
+        Returns:
+            List of research question fact strings.
+        """
+        run_sql = self._run_sql(cross_run=cross_run)
+        params: list[Any] = [angle]
+        params.extend(self._run_params(cross_run=cross_run))
+        params.append(limit)
+
+        sql = f"""SELECT fact FROM conditions
+                  WHERE row_type = 'research_question'
+                    AND angle = ?
+                    AND consider_for_use = TRUE
+                    {run_sql}
+                  ORDER BY id DESC
+                  LIMIT ?"""
+
+        with self._lock:
+            rows = self.conn.execute(sql, params).fetchall()
+        return [r[0] for r in rows]
+
+    def get_insights_for_angle(
+        self,
+        angle: str,
+        *,
+        limit: int = 10,
+        cross_run: bool = False,
+    ) -> list[tuple[str, str]]:
+        """Get insight rows for cross-domain connections involving an angle.
+
+        Args:
+            angle: Research angle.
+            limit: Maximum results.
+            cross_run: If True, skip run filtering.
+
+        Returns:
+            List of (fact, angle) tuples.
+        """
+        run_sql = self._run_sql(cross_run=cross_run)
+        params: list[Any] = [angle, angle]
+        params.extend(self._run_params(cross_run=cross_run))
+        params.append(limit)
+
+        sql = f"""SELECT fact, angle FROM conditions
+                  WHERE row_type = 'insight'
+                    AND consider_for_use = TRUE
+                    AND (angle = ? OR fact LIKE '%' || replace(replace(?, '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\')
+                    {run_sql}
+                  ORDER BY confidence DESC
+                  LIMIT ?"""
+
+        with self._lock:
+            return self.conn.execute(sql, params).fetchall()
+
+    def get_contradictions(
+        self,
+        angle: str,
+        *,
+        limit: int = 5,
+        cross_run: bool = False,
+    ) -> list[tuple[str, str, str | None]]:
+        """Get contradiction rows targeting an angle.
+
+        Args:
+            angle: Research angle.
+            limit: Maximum results.
+            cross_run: If True, skip run filtering.
+
+        Returns:
+            List of (fact, source_angle, target_fact) tuples.
+        """
+        run_sql = self._run_sql(cross_run=cross_run)
+        params: list[Any] = [angle, angle]
+        params.extend(self._run_params(cross_run=cross_run))
+        params.append(limit)
+
+        sql = f"""SELECT c.fact, c.angle, target.fact as target_fact
+                  FROM conditions c
+                  LEFT JOIN conditions target ON c.related_id = target.id
+                  WHERE c.row_type = 'contradiction'
+                    AND c.consider_for_use = TRUE
+                    AND (target.angle = ? OR c.angle = ?)
+                    {run_sql}
+                  ORDER BY c.id DESC
+                  LIMIT ?"""
+
+        with self._lock:
+            return self.conn.execute(sql, params).fetchall()
+
+    def get_fresh_evidence(
+        self,
+        angle: str,
+        wave: int,
+        *,
+        limit: int = 10,
+        cross_run: bool = False,
+    ) -> list[tuple[str, float, str, str]]:
+        """Get clone research findings for an angle from a specific wave.
+
+        Args:
+            angle: Research angle.
+            wave: Current wave number (retrieves findings from wave-1).
+            limit: Maximum results.
+            cross_run: If True, skip run filtering.
+
+        Returns:
+            List of (fact, confidence, strategy/doubt, source_ref) tuples.
+        """
+        run_sql = self._run_sql(cross_run=cross_run)
+        params: list[Any] = [angle, wave - 1]
+        params.extend(self._run_params(cross_run=cross_run))
+        params.append(limit)
+
+        sql = f"""SELECT fact, confidence, strategy, source_ref
+                  FROM conditions
+                  WHERE source_type = 'clone_research'
+                    AND angle = ?
+                    AND iteration = ?
+                    {run_sql}
+                  ORDER BY confidence DESC
+                  LIMIT ?"""
+
+        with self._lock:
+            return self.conn.execute(sql, params).fetchall()
+
+    def get_clone_research_count(
+        self,
+        angle: str,
+        doubt_prefix: str,
+        *,
+        min_confidence: float = 0.8,
+        cross_run: bool = False,
+    ) -> int:
+        """Count clone research findings matching a doubt prefix.
+
+        Used by the retirement checker to detect when a doubt has been
+        resolved by another clone.
+
+        Args:
+            angle: Research angle.
+            doubt_prefix: First 50 chars of the doubt (case-insensitive).
+            min_confidence: Minimum confidence threshold.
+            cross_run: If True, skip run filtering.
+
+        Returns:
+            Count of matching clone findings.
+        """
+        run_sql = self._run_sql(cross_run=cross_run)
+        params: list[Any] = [angle, doubt_prefix]
+        params.extend(self._run_params(cross_run=cross_run))
+
+        sql = f"""SELECT COUNT(*) FROM conditions
+                  WHERE source_type = 'clone_research'
+                    AND angle = ?
+                    AND confidence >= {min_confidence}
+                    AND lower(left(strategy, 50)) = ?
+                    {run_sql}"""
+
+        with self._lock:
+            return self.conn.execute(sql, params).fetchone()[0]
 
     # ------------------------------------------------------------------
     # Core write methods
@@ -674,14 +1051,22 @@ class ConditionStore:
 
         Returns the assigned condition ID, or None if fact is empty.
 
+        If ``source_run`` is not provided and ``current_run`` is set on the
+        store, the row is automatically stamped with the current run id.
+
         Args:
             source_model: Model that produced this finding (#192 provenance).
             source_run: Run identifier for cross-run comparison (#192).
+                Defaults to ``self.current_run`` when empty.
             phase: Swarm phase (e.g. 'wave_1', 'serendipity') for lineage.
         """
         fact = fact.strip()
         if not fact:
             return None
+
+        # Auto-stamp source_run from current_run when not explicitly given
+        if not source_run and self.current_run:
+            source_run = self.current_run
 
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
@@ -852,12 +1237,13 @@ class ConditionStore:
                 """INSERT INTO conditions
                    (id, fact, source_type, source_ref, row_type,
                     consider_for_use, angle, strategy,
-                    created_at, phase, parent_ids)
-                   VALUES (?, ?, 'swarm', ?, ?, TRUE, ?, ?, ?, ?, ?)""",
+                    created_at, phase, parent_ids, source_run)
+                   VALUES (?, ?, 'swarm', ?, ?, TRUE, ?, ?, ?, ?, ?, ?)""",
                 [
                     cid, fact, entry.entry_id, row_type,
                     entry.angle, metadata_json,
                     created_at, entry.phase, parent_ids_json,
+                    self.current_run,
                 ],
             )
         logger.debug(
@@ -1009,6 +1395,8 @@ class ConditionStore:
         iteration: int | None = None,
         min_confidence: float = 0.0,
         max_rows: int | None = None,
+        *,
+        cross_run: bool = False,
     ) -> str:
         """Export corpus as structured text for gossip swarm input.
 
@@ -1019,20 +1407,24 @@ class ConditionStore:
             iteration: Filter to specific iteration, or None for all.
             min_confidence: Minimum confidence threshold.
             max_rows: Cap on number of conditions to export.
+            cross_run: If True, include findings from all runs.
 
         Returns:
             Structured text corpus for swarm consumption.
         """
+        run_sql = self._run_sql(cross_run=cross_run)
+        run_p = self._run_params(cross_run=cross_run)
         with self._lock:
-            query = """
+            query = f"""
                 SELECT id, fact, source_url, source_type, confidence,
                        angle, iteration, verification_status
                 FROM conditions
                 WHERE consider_for_use = TRUE
                   AND row_type = 'finding'
                   AND confidence >= ?
+                  {run_sql}
             """
-            params: list[Any] = [min_confidence]
+            params: list[Any] = [min_confidence] + run_p
 
             if iteration is not None:
                 query += " AND iteration = ?"
@@ -1068,6 +1460,8 @@ class ConditionStore:
         since: str,
         min_confidence: float = 0.0,
         max_rows: int = 10000,
+        *,
+        cross_run: bool = False,
     ) -> str:
         """Return findings created after *since* as formatted text.
 
@@ -1079,22 +1473,26 @@ class ConditionStore:
                 ``created_at > since`` are returned.
             min_confidence: Minimum confidence threshold.
             max_rows: Safety cap on returned findings (default 10000).
+            cross_run: If True, include findings from all runs.
 
         Returns:
             Formatted text block of new findings, or empty string if none.
         """
+        run_sql = self._run_sql(cross_run=cross_run)
+        run_p = self._run_params(cross_run=cross_run)
         with self._lock:
             rows = self.conn.execute(
-                """SELECT id, fact, source_url, source_type, confidence,
+                f"""SELECT id, fact, source_url, source_type, confidence,
                           angle, iteration, verification_status
                    FROM conditions
                    WHERE consider_for_use = TRUE
                      AND row_type = 'finding'
                      AND confidence >= ?
                      AND created_at > ?
+                     {run_sql}
                    ORDER BY created_at ASC
                    LIMIT ?""",
-                [min_confidence, since, max_rows],
+                [min_confidence, since] + run_p + [max_rows],
             ).fetchall()
 
         if not rows:
@@ -1113,7 +1511,7 @@ class ConditionStore:
             + "\n".join(lines)
         )
 
-    def export_prior_research(self) -> str:
+    def export_prior_research(self, *, cross_run: bool = False) -> str:
         """Export prior thoughts and insights as corpus text.
 
         Returns worker synthesis outputs, gossip round outputs, and
@@ -1125,14 +1523,18 @@ class ConditionStore:
         Returns:
             Formatted text block of prior thoughts/insights, or empty string.
         """
+        run_sql = self._run_sql(cross_run=cross_run)
+        run_p = self._run_params(cross_run=cross_run)
         with self._lock:
             rows = self.conn.execute(
-                """SELECT id, fact, source_url, source_type, confidence,
+                f"""SELECT id, fact, source_url, source_type, confidence,
                           angle, row_type, iteration
                    FROM conditions
                    WHERE consider_for_use = TRUE
                      AND row_type IN ('thought', 'insight')
-                   ORDER BY iteration ASC, id ASC"""
+                     {run_sql}
+                   ORDER BY iteration ASC, id ASC""",
+                run_p,
             ).fetchall()
 
         if not rows:
