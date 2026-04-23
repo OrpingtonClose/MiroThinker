@@ -1,0 +1,14 @@
+{
+  "model": "gemini-2.5-flash",
+  "prompt_len_chars": 3847,
+  "system_len_chars": 547,
+  "response": "Here's a structured reasoning trace based on the provided corpus:\n\n**[01] Humalog 10 IU pre-workout with 10g carbs per IU**\n1.  **Implication:** This finding suggests a specific starting dose (10 IU) and timing (pre-workout) for Humalog insulin, along with a critical carbohydrate intake (10g per IU) to accompany it.\n2.  **Bearing on Query:**\n    *   **Insulin timing protocol:** Directly provides a core recommendation for insulin timing and dose.\n    *   **Lean-mass gain:** Pre-workout insulin is used for nutrient partitioning, supporting muscle growth.\n    *   **Hypoglycemia risk:** The 10g carbs/IU rule is a direct measure to prevent hypoglycemia.\n3.  **Combine With:** [10], [27] (carb rule), [06], [32] (off-season frequency), [21], [40] (carb type), [07], [16], [39] (hypoglycemia warnings/symptoms), [02",
+  "response_len_chars": 816,
+  "latency_ms": 30257.0,
+  "usage": {
+    "prompt_tokens": 1211,
+    "completion_tokens": 237,
+    "total_tokens": 7207
+  },
+  "timestamp": "2026-04-23T22:01:45.854489+00:00"
+}
