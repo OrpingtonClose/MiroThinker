@@ -275,15 +275,23 @@ class RetirementChecker:
         doubt: str,
         angle: str,
     ) -> bool:
-        """Check if another clone already resolved this doubt."""
+        """Check if another clone already resolved this specific doubt.
+
+        Clone findings store the doubt text in the ``strategy`` column.
+        We match on the first 50 chars of the doubt (case-insensitive)
+        to tolerate minor LLM wording variation while still being
+        doubt-specific rather than angle-level.
+        """
         try:
+            doubt_prefix = doubt.strip()[:50].lower()
             with self.store._lock:
                 count = self.store.conn.execute(
                     """SELECT COUNT(*) FROM conditions
                        WHERE source_type = 'clone_research'
                          AND angle = ?
-                         AND confidence >= 0.8""",
-                    [angle],
+                         AND confidence >= 0.8
+                         AND lower(left(strategy, 50)) = ?""",
+                    [angle, doubt_prefix],
                 ).fetchone()[0]
             return count >= 2
         except Exception:

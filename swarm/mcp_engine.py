@@ -631,7 +631,7 @@ class MCPSwarmEngine:
                 prev_count = metrics.findings_per_wave[-2]
                 if prev_count > 0:
                     delta = (wave_findings_count - prev_count) / prev_count
-                    delta_converged = delta < config.convergence_delta_pct
+                    delta_converged = abs(delta) < config.convergence_delta_pct
                 elif wave_findings_count == 0:
                     delta_converged = True
 
