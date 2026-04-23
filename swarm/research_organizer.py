@@ -747,7 +747,7 @@ async def run_research_organizer(
     config = config or ResearchOrganizerConfig()
 
     # ── Step 1: Decide whether to trigger clone research ─────────
-    should_trigger = (wave % config.trigger_every_n_waves == 0)
+    should_trigger = (config.trigger_every_n_waves > 0 and wave % config.trigger_every_n_waves == 0)
 
     if not should_trigger:
         # Check uncertainty levels across all workers
