@@ -56,6 +56,7 @@ class WorkerAssignment:
     summary: str = ""
     prev_summary: str = ""  # previous round's summary (for convergence detection)
     angle_idx: int = -1  # index into the original angles list (-1 = unknown)
+    section_indices: list[int] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.char_count = len(self.raw_content)
@@ -214,21 +215,52 @@ async def detect_angles_via_llm(
 
     Falls back to structural section titles if LLM fails.
     """
-    # Use a generous corpus preview for angle detection — local models
-    # have large context windows and need enough material to identify
-    # underrepresented topics.
-    corpus_preview = corpus[:30000]
+    # Sample across the corpus instead of just the first N chars.
+    # Web-scraped corpora often start with navigation junk that drowns
+    # out actual research content.  Taking evenly-spaced chunks from
+    # the full corpus gives the LLM a representative view.
+    _PREVIEW_BUDGET = 30000
+    _CHUNK_SIZE = 5000
+    _NUM_CHUNKS = _PREVIEW_BUDGET // _CHUNK_SIZE  # 6 chunks
+
+    if len(corpus) <= _PREVIEW_BUDGET:
+        corpus_preview = corpus
+    else:
+        # Take evenly-spaced chunks across the corpus
+        step = max(1, (len(corpus) - _CHUNK_SIZE) // (_NUM_CHUNKS - 1))
+        chunks: list[str] = []
+        for i in range(_NUM_CHUNKS):
+            start = min(i * step, len(corpus) - _CHUNK_SIZE)
+            chunks.append(corpus[start : start + _CHUNK_SIZE])
+        corpus_preview = "\n\n[...]\n\n".join(chunks)
 
     prompt = (
-        "You are a research strategist. Read the following corpus excerpt "
-        "and identify the distinct specialist research ANGLES — the separate "
-        "facets, disciplines, or lines of inquiry present in this material.\n\n"
-        "Each angle should be a concise label (3-8 words) that names a "
-        "specific investigative direction. Do NOT return generic labels like "
-        "'further research' or 'additional analysis'. Each angle must name "
-        "the actual domain, theory, mechanism, or question.\n\n"
-        f"Return 2-{max_angles} angles, one per line, prefixed with ANGLE:\n"
-        "If the material only has one coherent direction, return just one.\n\n"
+        "You are a research strategist. Your task: given the USER QUERY and "
+        "a CORPUS excerpt, identify distinct specialist research ANGLES that "
+        "a team of expert workers should investigate.\n\n"
+        "CRITICAL: Angles must be SPECIFIC TO THE QUERY. If the query mentions "
+        "specific compounds (insulin, GH, trenbolone), protocols (Milos Sarcev), "
+        "or interactions — the angles MUST reflect those specifics, not generic "
+        "textbook topics.\n\n"
+        "BAD angles for a query about 'Milos Sarcev insulin protocol with GH "
+        "and trenbolone':\n"
+        "- 'Macronutrient Composition for Bodybuilding' (too generic)\n"
+        "- 'Protein Requirements for Athletes' (ignores the query)\n"
+        "- 'Carbohydrate Intake for Exercise' (generic textbook topic)\n\n"
+        "GOOD angles for the same query:\n"
+        "- 'Milos Sarcev Insulin Protocol Specifics'\n"
+        "- 'Insulin-GH Synergy and IGF-1 Cascade'\n"
+        "- 'Trenbolone-Insulin Nutrient Partitioning'\n"
+        "- 'PED Cycle Timing and Meal Architecture'\n"
+        "- 'Hypoglycemia Risk Management'\n\n"
+        "RULES:\n"
+        "- Each angle must be ORTHOGONAL — covering a different domain or facet\n"
+        "- NEVER split one topic into numbered parts ('Topic part 1', "
+        "'Topic part 2')\n"
+        "- NEVER return two angles that investigate the same mechanisms\n"
+        "- Each angle should be 3-8 words, naming the specific investigation\n"
+        "- At least half the angles must directly reference entities from the query\n\n"
+        f"Return 2-{max_angles} angles, one per line, prefixed with ANGLE:\n\n"
         f"USER QUERY: {query}\n\n"
         f"CORPUS (first {len(corpus_preview)} chars):\n{corpus_preview}"
     )
@@ -242,9 +274,73 @@ async def detect_angles_via_llm(
                 a = line[6:].strip().strip("'\"-.•*")
                 if a and len(a) > 2:
                     angles.append(a[:80])
-        return angles[:max_angles]
+        return _dedup_angles(angles)[:max_angles]
     except Exception:
         return []
+
+
+# Pattern that catches "Topic (part 2)", "Topic part 3", "Topic - Part II", etc.
+_PART_SUFFIX_RE = re.compile(
+    r"\s*[-–—]?\s*\(?\s*part\s+\d+\s*\)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _dedup_angles(angles: list[str]) -> list[str]:
+    """Remove duplicate angles, including 'part N' variants.
+
+    If the LLM returns "Topic" and "Topic (part 2)", only the first
+    occurrence is kept.  Also catches substring duplicates where one
+    angle is fully contained in another.
+
+    Args:
+        angles: Raw angle list from LLM.
+
+    Returns:
+        Deduplicated angle list preserving original order.
+    """
+    if not angles:
+        return angles
+
+    # Strip "part N" suffixes to get base names
+    bases: list[str] = []
+    for a in angles:
+        base = _PART_SUFFIX_RE.sub("", a).strip()
+        bases.append(base if base else a)
+
+    seen_bases: set[str] = set()
+    deduped: list[str] = []
+
+    for i, angle in enumerate(angles):
+        base_lower = bases[i].lower()
+
+        # Skip if this base name (ignoring "part N") was already seen
+        if base_lower in seen_bases:
+            continue
+
+        # Skip if this angle overlaps heavily with an already-kept angle.
+        # Use word-set Jaccard similarity instead of raw substring to avoid
+        # dropping distinct specializations (e.g. "GH Protocols" vs
+        # "GH Protocols and Insulin Synergy" share only 2/5 words).
+        is_dup = False
+        base_words = set(base_lower.split())
+        for existing_base in seen_bases:
+            existing_words = set(existing_base.split())
+            union = base_words | existing_words
+            if not union:
+                continue
+            jaccard = len(base_words & existing_words) / len(union)
+            if jaccard >= 0.8:
+                is_dup = True
+                break
+        if is_dup:
+            continue
+
+        seen_bases.add(base_lower)
+        # Use the clean base name (without "part N") as the angle
+        deduped.append(bases[i])
+
+    return deduped
 
 
 def _prepare_sections(
@@ -532,27 +628,35 @@ def assign_workers(
                     break
             angle_indices.append(best_idx)
 
-    # Create worker assignments with unique angle keys
-    assignments: list[WorkerAssignment] = []
-    used_angles: dict[str, int] = {}
-
+    # Merge sections assigned to the same angle into one worker.
+    # Previously, duplicate angles got "part 2" suffixes which polluted
+    # the ConditionStore with redundant angle names and confused
+    # downstream components (data packages, research organizer, reports).
+    angle_groups: dict[str, list[tuple[int, str, int]]] = {}
     for i, section in enumerate(final_sections):
         angle_idx = angle_indices[i]
         best_angle = angles[angle_idx] if angle_idx < len(angles) else section.title
+        if best_angle not in angle_groups:
+            angle_groups[best_angle] = []
+        angle_groups[best_angle].append((i, section.content, angle_idx))
 
-        if best_angle in used_angles:
-            used_angles[best_angle] += 1
-            unique_angle = f"{best_angle} (part {used_angles[best_angle]})"
-        else:
-            used_angles[best_angle] = 1
-            unique_angle = best_angle
-
+    assignments: list[WorkerAssignment] = []
+    worker_id = 0
+    for angle_name, group in angle_groups.items():
+        merged_content = "\n\n".join(content for _, content, _ in group)
+        # Use the first section's angle_idx for the merged assignment
+        first_angle_idx = group[0][2]
+        # Track original section indices so apply_misassignment can
+        # look up the correct score_matrix rows after merging.
+        orig_indices = [idx for idx, _, _ in group]
         assignments.append(WorkerAssignment(
-            worker_id=i,
-            angle=unique_angle,
-            raw_content=section.content,
-            angle_idx=angle_idx,
+            worker_id=worker_id,
+            angle=angle_name,
+            raw_content=merged_content,
+            angle_idx=first_angle_idx,
+            section_indices=orig_indices,
         ))
+        worker_id += 1
 
     return assignments
 
@@ -598,11 +702,27 @@ def apply_misassignment(
         # angle scored LOWEST for worker i's section (= most semantically
         # distant).  score_matrix is sections x angles, so we must look up
         # each worker's actual angle_idx, not assume worker j = angle j.
+        #
+        # After section merging, assignments[i] may correspond to multiple
+        # original sections.  Use section_indices (if available) to look up
+        # the correct score_matrix rows and average them.
         for i in range(n):
-            if i >= len(score_matrix):
+            orig_rows = assignments[i].section_indices
+            if not orig_rows:
+                # Backward compat: when section_indices is not populated
+                # (e.g. gossip engine, tests), use the worker index directly
+                orig_rows = [i]
+            if any(r >= len(score_matrix) for r in orig_rows):
+                # Fallback: use positional distance if indices are out of range
                 distant_map[i] = (i + n // 2) % n
                 continue
-            row = score_matrix[i]
+            # Average the score_matrix rows for merged sections
+            ncols = len(score_matrix[orig_rows[0]])
+            row = [0.0] * ncols
+            for r in orig_rows:
+                for c in range(ncols):
+                    row[c] += score_matrix[r][c]
+            row = [v / len(orig_rows) for v in row]
             min_score = float("inf")
             min_worker = (i + n // 2) % n  # default fallback
             for j in range(n):

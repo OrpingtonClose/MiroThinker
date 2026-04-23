@@ -1,0 +1,72 @@
+[
+  {
+    "type": "swarm_phase",
+    "phase": "corpus_acquisition_start"
+  },
+  {
+    "type": "swarm_phase",
+    "phase": "corpus_acquisition_complete",
+    "corpus_chars": 340020,
+    "elapsed_s": 33.2
+  },
+  {
+    "type": "swarm_phase",
+    "phase": "ingestion_complete",
+    "workers": 8,
+    "angles": [
+      "Insulin Protocol Development for Bodybuilding",
+      "Effects of Insulin on Body Composition and Aesthetics",
+      "Anabolic Steroid Use in Bodybuilding and its Interaction with Insulin",
+      "Nutrient and Supplement Management for Optimal Insulin Sensitivity and Bodybuild",
+      "Growth Hormone and Insulin Interactions in Bodybuilding",
+      "Risk Assessment and Mitigation Strategies for Insulin Use in Bodybuilding",
+      "Insulin Protocol Development for Bodybuilding (part 2)",
+      "Effects of Insulin on Body Composition and Aesthetics (part 2)"
+    ],
+    "corpus_skipped": false
+  },
+  {
+    "type": "swarm_phase",
+    "phase": "wave_1_start",
+    "wave": 1
+  },
+  {
+    "type": "swarm_phase",
+    "phase": "wave_1_complete",
+    "wave": 1,
+    "new_findings": 208,
+    "total_findings": 2357,
+    "elapsed_s": 375.9
+  },
+  {
+    "type": "swarm_phase",
+    "phase": "wave_2_start",
+    "wave": 2
+  },
+  {
+    "type": "swarm_phase",
+    "phase": "wave_2_complete",
+    "wave": 2,
+    "new_findings": 180,
+    "total_findings": 2537,
+    "elapsed_s": 491.6
+  },
+  {
+    "type": "swarm_phase",
+    "phase": "research_organizer_wave_2",
+    "clones": 4,
+    "clone_findings": 10,
+    "elapsed_s": 110.6
+  },
+  {
+    "type": "swarm_phase",
+    "phase": "serendipity_complete",
+    "elapsed_s": 16.6
+  },
+  {
+    "type": "swarm_phase",
+    "phase": "complete",
+    "total_elapsed_s": 1039.9,
+    "total_findings": 2537
+  }
+]
