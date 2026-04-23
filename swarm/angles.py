@@ -595,27 +595,31 @@ def assign_workers(
                     break
             angle_indices.append(best_idx)
 
-    # Create worker assignments with unique angle keys
-    assignments: list[WorkerAssignment] = []
-    used_angles: dict[str, int] = {}
-
+    # Merge sections assigned to the same angle into one worker.
+    # Previously, duplicate angles got "part 2" suffixes which polluted
+    # the ConditionStore with redundant angle names and confused
+    # downstream components (data packages, research organizer, reports).
+    angle_groups: dict[str, list[tuple[int, str, int]]] = {}
     for i, section in enumerate(final_sections):
         angle_idx = angle_indices[i]
         best_angle = angles[angle_idx] if angle_idx < len(angles) else section.title
+        if best_angle not in angle_groups:
+            angle_groups[best_angle] = []
+        angle_groups[best_angle].append((i, section.content, angle_idx))
 
-        if best_angle in used_angles:
-            used_angles[best_angle] += 1
-            unique_angle = f"{best_angle} (part {used_angles[best_angle]})"
-        else:
-            used_angles[best_angle] = 1
-            unique_angle = best_angle
-
+    assignments: list[WorkerAssignment] = []
+    worker_id = 0
+    for angle_name, group in angle_groups.items():
+        merged_content = "\n\n".join(content for _, content, _ in group)
+        # Use the first section's angle_idx for the merged assignment
+        first_angle_idx = group[0][2]
         assignments.append(WorkerAssignment(
-            worker_id=i,
-            angle=unique_angle,
-            raw_content=section.content,
-            angle_idx=angle_idx,
+            worker_id=worker_id,
+            angle=angle_name,
+            raw_content=merged_content,
+            angle_idx=first_angle_idx,
         ))
+        worker_id += 1
 
     return assignments
 

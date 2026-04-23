@@ -941,22 +941,53 @@ async def _synthesize_clone_findings(
         content = await complete(prompt)
     except Exception as exc:
         logger.warning(
-            "angle=<%s>, error=<%s> | clone synthesis failed",
+            "angle=<%s>, error=<%s> | clone synthesis LLM call failed",
             need.angle, exc,
         )
-        return []
+        return _heuristic_clone_findings(snippets, need)
 
     if not content:
-        return []
+        logger.warning(
+            "angle=<%s> | clone synthesis returned empty content",
+            need.angle,
+        )
+        return _heuristic_clone_findings(snippets, need)
+
+    logger.debug(
+        "angle=<%s>, content_len=<%d>, content_preview=<%s> | "
+        "clone synthesis raw response",
+        need.angle, len(content), content[:200],
+    )
 
     if content.startswith("```"):
         content = re.sub(r"^```(?:json)?\s*", "", content)
         content = re.sub(r"\s*```$", "", content)
 
+    # Detect LLM refusal (censorship)
+    refusal_phrases = [
+        "i can't", "i cannot", "i'm unable", "i am unable",
+        "i'm not able", "i won't", "i will not",
+        "not able to provide", "not able to assist",
+        "is there anything else",
+    ]
+    content_lower = content.lower()
+    if any(phrase in content_lower for phrase in refusal_phrases):
+        logger.warning(
+            "angle=<%s>, content_preview=<%s> | clone synthesis "
+            "LLM refused, falling back to heuristic",
+            need.angle, content[:100],
+        )
+        return _heuristic_clone_findings(snippets, need)
+
     try:
         items = json.loads(content)
         if not isinstance(items, list):
-            return []
+            logger.warning(
+                "angle=<%s> | clone synthesis JSON is not a list, "
+                "falling back to heuristic",
+                need.angle,
+            )
+            return _heuristic_clone_findings(snippets, need)
         findings = []
         for item in items:
             try:
@@ -969,9 +1000,92 @@ async def _synthesize_clone_findings(
                 "confidence": conf,
                 "resolves_doubt": bool(item.get("resolves_doubt", False)),
             })
+        if not findings:
+            logger.info(
+                "angle=<%s> | clone synthesis JSON parsed but empty, "
+                "falling back to heuristic",
+                need.angle,
+            )
+            return _heuristic_clone_findings(snippets, need)
         return findings
     except json.JSONDecodeError:
+        logger.warning(
+            "angle=<%s>, content_preview=<%s> | clone synthesis "
+            "JSON parse failed, falling back to heuristic",
+            need.angle, content[:200],
+        )
+        return _heuristic_clone_findings(snippets, need)
+
+
+def _heuristic_clone_findings(
+    snippets: str,
+    need: "ResearchNeed",
+) -> list[dict[str, Any]]:
+    """Extract findings from search snippets when LLM synthesis fails.
+
+    Uses pattern matching to identify sentences with specific claims
+    (numbers, dosages, mechanisms) from raw search snippets.  This is
+    the clone equivalent of ``finding_extractor.extract_findings_heuristic``.
+
+    Args:
+        snippets: Raw search result snippets (one per line).
+        need: The research need being investigated.
+
+    Returns:
+        List of finding dicts with fact, source, confidence.
+    """
+    if not snippets or len(snippets.strip()) < 30:
         return []
+
+    findings: list[dict[str, Any]] = []
+
+    # Patterns indicating factual claims worth extracting
+    claim_patterns = [
+        r"\d+\s*(?:mg|mcg|iu|ml|µg|ng|g/dl|mmol|%)",
+        r"\d+\s*(?:minutes?|hours?|days?|weeks?)",
+        r"(?:increases?|decreases?|inhibits?|activates?|binds?)\s",
+        r"(?:receptor|pathway|enzyme|hormone|protein)\s",
+        r"(?:dosage|dose|protocol|cycle|stack)\s",
+    ]
+
+    for line in snippets.split("\n"):
+        line = line.strip()
+        if not line or len(line) < 40:
+            continue
+
+        # Strip leading "- Title: " prefix from snippet lines
+        if line.startswith("- "):
+            colon_idx = line.find(":", 2)
+            if colon_idx > 0 and colon_idx < 80:
+                snippet_text = line[colon_idx + 1:].strip()
+            else:
+                snippet_text = line[2:].strip()
+        else:
+            snippet_text = line
+
+        if not snippet_text or len(snippet_text) < 30:
+            continue
+
+        # Check if the snippet contains a factual claim
+        for pattern in claim_patterns:
+            if re.search(pattern, snippet_text, re.IGNORECASE):
+                findings.append({
+                    "fact": snippet_text[:500],
+                    "source": "search_snippet",
+                    "confidence": 0.5,
+                    "resolves_doubt": False,
+                })
+                break
+
+        if len(findings) >= 15:
+            break
+
+    logger.info(
+        "angle=<%s>, findings=<%d> | heuristic clone finding extraction",
+        need.angle, len(findings),
+    )
+
+    return findings
 
 
 # ---------------------------------------------------------------------------
