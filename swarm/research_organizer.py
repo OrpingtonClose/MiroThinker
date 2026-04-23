@@ -979,42 +979,65 @@ async def _synthesize_clone_findings(
         )
         return _heuristic_clone_findings(snippets, need)
 
+    # Try to parse JSON — first directly, then by extracting an embedded
+    # JSON array from preamble text (LLMs often wrap valid JSON in prose
+    # like "Here is the analysis:\n\n[{...}]").
+    parsed: list | None = None
     try:
-        items = json.loads(content)
-        if not isinstance(items, list):
-            logger.warning(
-                "angle=<%s> | clone synthesis JSON is not a list, "
-                "falling back to heuristic",
-                need.angle,
-            )
-            return _heuristic_clone_findings(snippets, need)
-        findings = []
-        for item in items:
-            try:
-                conf = float(item.get("confidence", 0.5))
-            except (TypeError, ValueError):
-                conf = 0.5
-            findings.append({
-                "fact": item.get("fact", ""),
-                "source": item.get("source", ""),
-                "confidence": conf,
-                "resolves_doubt": bool(item.get("resolves_doubt", False)),
-            })
-        if not findings:
-            logger.info(
-                "angle=<%s> | clone synthesis JSON parsed but empty, "
-                "falling back to heuristic",
-                need.angle,
-            )
-            return _heuristic_clone_findings(snippets, need)
-        return findings
+        raw = json.loads(content)
+        if isinstance(raw, list):
+            parsed = raw
     except json.JSONDecodeError:
+        pass
+
+    if parsed is None:
+        # Look for the first '[' ... last ']' span in the content
+        bracket_start = content.find("[")
+        bracket_end = content.rfind("]")
+        if bracket_start != -1 and bracket_end > bracket_start:
+            candidate = content[bracket_start:bracket_end + 1]
+            try:
+                raw = json.loads(candidate)
+                if isinstance(raw, list):
+                    parsed = raw
+                    logger.debug(
+                        "angle=<%s> | clone synthesis JSON extracted "
+                        "from preamble text",
+                        need.angle,
+                    )
+            except json.JSONDecodeError:
+                pass
+
+    if parsed is None:
         logger.warning(
             "angle=<%s>, content_preview=<%s> | clone synthesis "
             "JSON parse failed, falling back to heuristic",
             need.angle, content[:200],
         )
         return _heuristic_clone_findings(snippets, need)
+
+    findings = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        try:
+            conf = float(item.get("confidence", 0.5))
+        except (TypeError, ValueError):
+            conf = 0.5
+        findings.append({
+            "fact": item.get("fact", ""),
+            "source": item.get("source", ""),
+            "confidence": conf,
+            "resolves_doubt": bool(item.get("resolves_doubt", False)),
+        })
+    if not findings:
+        logger.info(
+            "angle=<%s> | clone synthesis JSON parsed but empty, "
+            "falling back to heuristic",
+            need.angle,
+        )
+        return _heuristic_clone_findings(snippets, need)
+    return findings
 
 
 def _heuristic_clone_findings(
