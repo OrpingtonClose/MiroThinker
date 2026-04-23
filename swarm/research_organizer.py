@@ -760,7 +760,7 @@ async def run_clone_research(
                 snippets=snippet_material,
                 complete=complete,
             )
-            result.findings = findings
+            result.findings = findings if findings else result.findings
 
         # ── EVALUATE: did this resolve the doubt? ────────────────
         if result.findings:

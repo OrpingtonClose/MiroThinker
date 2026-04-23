@@ -671,9 +671,10 @@ def _select_diverse_urls(
         if domain in _SKIP_DOMAINS:
             continue
         if any(domain.endswith(s) for s in priority_suffixes):
-            selected.append(url)
-            seen_urls.add(url)
-            seen_domains.add(domain)
+            if domain not in seen_domains:
+                selected.append(url)
+                seen_urls.add(url)
+                seen_domains.add(domain)
             if len(selected) >= max_count:
                 return selected
 
