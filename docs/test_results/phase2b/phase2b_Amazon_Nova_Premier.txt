@@ -1,0 +1,92 @@
+**Finding 1: Humalog Timing Protocols**
+- **Compound**: Insulin lispro (Humalog)
+- **Dosage**: 5-10 IU pre-workout
+- **Timing**: 15 minutes before resistance training
+- **Mechanism**: Rapid-acting insulin creates anabolic environment by increasing muscle glycogen storage and amino acid uptake
+- **Evidence Quality**: Anecdotal reports from bodybuilding forums, not peer-reviewed
+- **Cross-Domain Connections**: Synergizes with branched-chain amino acids (BCAAs) taken concurrently
+
+**Finding 2: Intra-Workout Insulin**
+- **Compound**: Humalog
+- **Dosage**: 2-5 IU during workout
+- **Timing**: Midway through 60-minute resistance session
+- **Mechanism**: Maintains insulin spike during catabolic stress phase
+- **Evidence Quality**: Case report from competitive bodybuilder
+- **Cross-Domain Interactions**: Potential hypoglycemia risk when combined with beta-blockers
+
+**Finding 3: Post-Workout Insulin**
+- **Compound**: Humalog
+- **Dosage**: 3-7 IU immediately post-workout
+- **Timing**: Within 10 minutes of workout completion
+- **Mechanism**: Enhances glycogen replenishment and protein synthesis
+- **Evidence Quality**: Anecdotal evidence from bodybuilding community
+- **Cross-Domain Effects**: May interact with creatine monohydrate absorption
+
+**Finding 4: Starting Dosages**
+- **Compound**: Humalog
+- **Dosage**: 0.5 IU per 10g carbohydrates
+- **Timing**: Meal-dependent
+- **Mechanism**: Baseline glycemic control
+- **Evidence Quality**: Clinical diabetes guidelines repurposed for bodybuilding
+- **Cross-Domain Note**: Requires monitoring when combined with thyroid hormones
+
+**Finding 5: Glucose Thresholds**
+- **Compound**: Glucose monitoring
+- **Thresholds**: <70 mg/dL requires intervention
+- **Timing**: Every 30 minutes during protocol
+- **Mechanism**: Prevents hypoglycemia
+- **Evidence Quality**: Standard medical protocol adapted
+- **Cross-Domain Connection**: Metformin may lower thresholds
+
+**Finding 6: GH-Insulin Synergy**
+- **Compound**: Recombinant GH
+- **Dosage**: 2-4 IU daily
+- **Timing**: Injected 2 hours post-insulin
+- **Mechanism**: Complementary anabolic effects and nutrient partitioning
+- **Evidence Quality**: Anecdotal bodybuilder logs
+- **Cross-Domain Effects**: Risk of fluid retention with concurrent AAS use
+
+**Finding 7: IGF-1 LR3 Timing**
+- **Compound**: IGF-1 LR3
+- **Dosage**: 20-40 mcg
+- **Timing**: Injected 30 minutes after insulin
+- **Mechanism**: Extended half-life allows sustained anabolic signaling
+- **Evidence Quality**: Case study reports
+- **Cross-Domain Connection**: May amplify insulin hypoglycemia risk
+
+**Finding 8: Metformin Dosing**
+- **Compound**: Metformin
+- **Dosage**: 500-1000 mg twice daily
+- **Timing**: Morning and evening, separate from insulin
+- **Mechanism**: Improves insulin sensitivity
+- **Evidence Quality**: Clinical diabetes studies repurposed
+- **Cross-Domain Note**: Contraindicated with high-dose NSAIDs
+
+**Finding 9: Carbohydrate Ratios**
+- **Specifics**: 1 IU insulin per 8-12g carbohydrates
+- **Timing**: Meal-dependent
+- **Mechanism**: Optimizes glycogen storage
+- **Evidence Quality**: Diabetes nutrition guidelines adapted
+- **Cross-Domain Note**: High-GI carbs require tighter monitoring
+
+**Finding 10: Testosterone Interactions**
+- **Compound**: Testosterone cypionate
+- **Dosage**: 200-600 mg/week
+- **Mechanism**: Synergistic muscle growth but complicates glucose management
+- **Evidence Quality**: Observational bodybuilder studies
+- **Cross-Domain Connection**: Aromatase inhibitors may exacerbate insulin resistance
+
+**Finding 11: Emergency Protocols**
+- **Compound**: Glucagon kit
+- **Dosage**: 1 mg IM injection
+- **Timing**: When glucose <50 mg/dL unresponsive to oral glucose
+- **Mechanism**: Catalyzes glycogen breakdown
+- **Evidence Quality**: Standard medical emergency protocol
+- **Cross-Domain Connection**: Beta-blockers inhibit glucagon efficacy
+
+**Finding 12: Off-Season Insulin Use**
+- **Pattern**: 12-week on, 4-week off cycles
+- **Dosage**: Tapering by 2 IU/week
+- **Mechanism**: Prevents receptor downregulation
+- **Evidence Quality**: Anecdotal periodization strategies
+- **Cross-Domain Effects**: May need thyroid function monitoring during deload
