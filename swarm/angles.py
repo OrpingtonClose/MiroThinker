@@ -56,6 +56,7 @@ class WorkerAssignment:
     summary: str = ""
     prev_summary: str = ""  # previous round's summary (for convergence detection)
     angle_idx: int = -1  # index into the original angles list (-1 = unknown)
+    section_indices: list[int] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.char_count = len(self.raw_content)
@@ -613,11 +614,15 @@ def assign_workers(
         merged_content = "\n\n".join(content for _, content, _ in group)
         # Use the first section's angle_idx for the merged assignment
         first_angle_idx = group[0][2]
+        # Track original section indices so apply_misassignment can
+        # look up the correct score_matrix rows after merging.
+        orig_indices = [idx for idx, _, _ in group]
         assignments.append(WorkerAssignment(
             worker_id=worker_id,
             angle=angle_name,
             raw_content=merged_content,
             angle_idx=first_angle_idx,
+            section_indices=orig_indices,
         ))
         worker_id += 1
 
@@ -665,11 +670,23 @@ def apply_misassignment(
         # angle scored LOWEST for worker i's section (= most semantically
         # distant).  score_matrix is sections x angles, so we must look up
         # each worker's actual angle_idx, not assume worker j = angle j.
+        #
+        # After section merging, assignments[i] may correspond to multiple
+        # original sections.  Use section_indices (if available) to look up
+        # the correct score_matrix rows and average them.
         for i in range(n):
-            if i >= len(score_matrix):
+            orig_rows = assignments[i].section_indices
+            if not orig_rows or any(r >= len(score_matrix) for r in orig_rows):
+                # Fallback: use positional distance if indices are out of range
                 distant_map[i] = (i + n // 2) % n
                 continue
-            row = score_matrix[i]
+            # Average the score_matrix rows for merged sections
+            ncols = len(score_matrix[orig_rows[0]])
+            row = [0.0] * ncols
+            for r in orig_rows:
+                for c in range(ncols):
+                    row[c] += score_matrix[r][c]
+            row = [v / len(orig_rows) for v in row]
             min_score = float("inf")
             min_worker = (i + n // 2) % n  # default fallback
             for j in range(n):
