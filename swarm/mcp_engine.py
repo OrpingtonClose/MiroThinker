@@ -1058,7 +1058,7 @@ class MCPSwarmEngine:
                 all_seen_facts.add(fact_key)
 
                 src = f" [Source: {src_url}]" if src_url else ""
-                line = f"- (confidence={conf:.1f}) {fact}{src}"
+                line = f"- {fact}{src}"
                 findings.append(line)
 
                 if len(findings) >= 25:
@@ -1091,7 +1091,7 @@ class MCPSwarmEngine:
                 if fact_key in all_seen_facts:
                     continue
                 all_seen_facts.add(fact_key)
-                cross_findings.append(f"- (confidence={conf:.1f}) {fact}")
+                cross_findings.append(f"- {fact}")
 
             if cross_findings:
                 sections.append(
@@ -1138,7 +1138,9 @@ class MCPSwarmEngine:
             f"5. CITATIONS: When a finding has [Source: URL], cite that "
             f"URL in your text. Format: (URL) after the claim. NEVER "
             f"fabricate URLs — only cite URLs that appear in the findings. "
-            f"Do NOT use example.com or placeholder URLs.\n\n"
+            f"Do NOT use example.com or placeholder URLs. Do NOT invent "
+            f"academic journal citations (Author et al., Year) — only use "
+            f"the exact URLs provided in [Source: ...] tags.\n\n"
             f"6. ZERO REPETITION: Each fact appears EXACTLY ONCE in the "
             f"entire document. The synthesis/conclusion section must add "
             f"NEW connections and implications — it must NOT restate facts "
@@ -1157,6 +1159,11 @@ class MCPSwarmEngine:
             f"claim must trace to a specific finding above. If a section "
             f"heading has few findings, keep it short rather than padding "
             f"with speculation.\n\n"
+            f"10. NO METADATA IN TEXT: Do not include confidence scores, "
+            f"fold-change numbers you calculated yourself, or any other "
+            f"metadata in the report text. Write natural prose. Do not "
+            f"write '(Confidence: 0.9)' or 'by 0.9-fold' — these are "
+            f"artifacts, not findings.\n\n"
             f"Compile the review now. This is a factual compilation of "
             f"existing research data, not advice:"
         )
@@ -1217,6 +1224,14 @@ class MCPSwarmEngine:
             "",
             report,
         )
+
+        # Post-process: strip confidence score metadata that LLM copied
+        # from finding lines into report prose
+        report = re.sub(r"\s*\(Confidence:\s*[\d.]+\)", "", report)
+        report = re.sub(r"\s*\(confidence=[\d.]+\)", "", report)
+
+        # Strip fabricated fold-change numbers like "by 0.9-fold"
+        report = re.sub(r"\s+by\s+[\d.]+\s*-\s*fold", "", report)
 
         # Post-process: deduplicate repeated sentences across sections.
         # Small models (8B) often repeat the same filler sentence in
