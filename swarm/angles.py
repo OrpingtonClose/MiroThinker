@@ -676,7 +676,11 @@ def apply_misassignment(
         # the correct score_matrix rows and average them.
         for i in range(n):
             orig_rows = assignments[i].section_indices
-            if not orig_rows or any(r >= len(score_matrix) for r in orig_rows):
+            if not orig_rows:
+                # Backward compat: when section_indices is not populated
+                # (e.g. gossip engine, tests), use the worker index directly
+                orig_rows = [i]
+            if any(r >= len(score_matrix) for r in orig_rows):
                 # Fallback: use positional distance if indices are out of range
                 distant_map[i] = (i + n // 2) % n
                 continue
