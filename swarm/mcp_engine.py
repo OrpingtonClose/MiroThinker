@@ -369,6 +369,20 @@ class MCPSwarmEngine:
                 "wave": wave,
             })
 
+            # ── Await any pending Research Organizer tasks ─────────
+            # Clone findings must land in the store BEFORE we build
+            # data packages, otherwise §8 FRESH EVIDENCE is empty.
+            if _background_ro_tasks:
+                logger.info(
+                    "wave=<%d>, pending_ro_tasks=<%d> | "
+                    "awaiting background RO before building packages",
+                    wave, len(_background_ro_tasks),
+                )
+                await asyncio.gather(
+                    *_background_ro_tasks, return_exceptions=True,
+                )
+                _background_ro_tasks.clear()
+
             # ── Phase A: Build data packages ─────────────────────
             pkg_start = time.monotonic()
             packages = build_data_packages(

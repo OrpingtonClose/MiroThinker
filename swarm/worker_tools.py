@@ -503,9 +503,11 @@ def build_worker_tools(
             return "(no corpus data assigned to your angle)"
 
         if raw_count > 0:
-            row_type_filter = "row_type = 'raw'"
+            corpus_row_type = "raw"
+            corpus_require_active = False
         else:
-            row_type_filter = "consider_for_use = TRUE AND row_type = 'finding'"
+            corpus_row_type = "finding"
+            corpus_require_active = True
 
         # Estimate total chars from row count (avoid full scan)
         # Fetch rows in pages, accumulate chars until offset, then collect chunk
@@ -523,7 +525,8 @@ def build_worker_tools(
                 break
             rows = store.get_corpus_page(
                 worker_angle,
-                row_type_filter=row_type_filter,
+                row_type=corpus_row_type,
+                require_active=corpus_require_active,
                 page_size=page_size,
                 page_offset=page,
             )

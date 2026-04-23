@@ -1181,7 +1181,8 @@ class ConditionStore:
         self,
         angle: str,
         *,
-        row_type_filter: str,
+        row_type: str = "raw",
+        require_active: bool = False,
         page_size: int = 100,
         page_offset: int = 0,
         cross_run: bool = False,
@@ -1190,7 +1191,8 @@ class ConditionStore:
 
         Args:
             angle: Research angle.
-            row_type_filter: SQL WHERE fragment for row type filtering.
+            row_type: Row type to filter by (e.g. 'raw', 'finding').
+            require_active: If True, also filter by consider_for_use=TRUE.
             page_size: Rows per page.
             page_offset: Row offset for pagination.
             cross_run: If True, skip run filtering.
@@ -1199,13 +1201,18 @@ class ConditionStore:
             List of (fact,) tuples.
         """
         run_sql = self._run_sql(cross_run=cross_run)
-        params: list[Any] = [angle]
+        params: list[Any] = [row_type, angle]
+
+        where_parts = ["row_type = ?", "angle = ?"]
+        if require_active:
+            where_parts.append("consider_for_use = TRUE")
+
         params.extend(self._run_params(cross_run=cross_run))
         params.extend([page_size, page_offset])
 
+        where = " AND ".join(where_parts) + run_sql
         sql = f"""SELECT fact FROM conditions
-                  WHERE {row_type_filter} AND angle = ?
-                  {run_sql}
+                  WHERE {where}
                   ORDER BY id ASC
                   LIMIT ? OFFSET ?"""
 
@@ -1233,6 +1240,139 @@ class ConditionStore:
                    FROM knowledge_summaries
                    ORDER BY id DESC""",
             ).fetchall()
+
+    # ------------------------------------------------------------------
+    # Wave-scoped methods for incremental data packages
+    # ------------------------------------------------------------------
+
+    def get_findings_since_wave(
+        self,
+        angle: str | None = None,
+        *,
+        since_wave: int,
+        row_types: tuple[str, ...] = ("finding", "thought", "insight"),
+        limit: int = 50,
+        cross_run: bool = False,
+    ) -> list[tuple[str, float, str, str]]:
+        """Get findings created after a given wave.
+
+        Used by incremental data packages to deliver only the delta
+        since the worker's last wave.
+
+        Args:
+            angle: Filter to this angle. None = all angles.
+            since_wave: Return findings with iteration > since_wave.
+            row_types: Row types to include.
+            limit: Maximum results.
+            cross_run: If True, skip run filtering.
+
+        Returns:
+            List of (fact, confidence, source_url, source_type) tuples.
+        """
+        run_sql = self._run_sql(cross_run=cross_run)
+        params: list[Any] = []
+
+        where_parts = [
+            "consider_for_use = TRUE",
+            "iteration > ?",
+        ]
+        params.append(since_wave)
+
+        if row_types:
+            placeholders = ", ".join("?" for _ in row_types)
+            where_parts.append(f"row_type IN ({placeholders})")
+            params.extend(row_types)
+
+        if angle is not None:
+            where_parts.append("angle = ?")
+            params.append(angle)
+
+        params.extend(self._run_params(cross_run=cross_run))
+        params.append(limit)
+
+        where = " AND ".join(where_parts) + run_sql
+        sql = f"""SELECT fact, confidence, source_url, source_type
+                  FROM conditions
+                  WHERE {where}
+                  ORDER BY confidence DESC
+                  LIMIT ?"""
+
+        with self._lock:
+            return self.conn.execute(sql, params).fetchall()
+
+    def get_cross_angle_findings_since_wave(
+        self,
+        exclude_angle: str,
+        *,
+        since_wave: int,
+        limit: int = 15,
+        cross_run: bool = False,
+    ) -> list[tuple[str, str, float]]:
+        """Get cross-angle findings created after a given wave.
+
+        Args:
+            exclude_angle: Angle to exclude from results.
+            since_wave: Return findings with iteration > since_wave.
+            limit: Maximum results.
+            cross_run: If True, skip run filtering.
+
+        Returns:
+            List of (fact, angle, confidence) tuples.
+        """
+        run_sql = self._run_sql(cross_run=cross_run)
+        params: list[Any] = [exclude_angle, since_wave]
+        params.extend(self._run_params(cross_run=cross_run))
+        params.append(limit)
+
+        sql = f"""SELECT fact, angle, confidence
+                  FROM conditions
+                  WHERE consider_for_use = TRUE
+                    AND angle != ?
+                    AND row_type IN ('finding', 'thought', 'insight')
+                    AND iteration > ?
+                    {run_sql}
+                  ORDER BY confidence DESC
+                  LIMIT ?"""
+
+        with self._lock:
+            return self.conn.execute(sql, params).fetchall()
+
+    def count_findings_since_wave(
+        self,
+        angle: str | None = None,
+        *,
+        since_wave: int,
+        cross_run: bool = False,
+    ) -> int:
+        """Count findings created after a given wave.
+
+        Args:
+            angle: Filter to this angle. None = all angles.
+            since_wave: Count findings with iteration > since_wave.
+            cross_run: If True, skip run filtering.
+
+        Returns:
+            Count of matching rows.
+        """
+        run_sql = self._run_sql(cross_run=cross_run)
+        params: list[Any] = [since_wave]
+
+        where_parts = [
+            "consider_for_use = TRUE",
+            "iteration > ?",
+            "row_type IN ('finding', 'thought', 'insight')",
+        ]
+
+        if angle is not None:
+            where_parts.append("angle = ?")
+            params.append(angle)
+
+        params.extend(self._run_params(cross_run=cross_run))
+        where = " AND ".join(where_parts) + run_sql
+        sql = f"SELECT COUNT(*) FROM conditions WHERE {where}"
+
+        with self._lock:
+            return self.conn.execute(sql, params).fetchone()[0]
 
     # ------------------------------------------------------------------
     # Core write methods
