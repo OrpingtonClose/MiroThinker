@@ -1035,14 +1035,14 @@ class ConditionStore:
             Count of matching clone findings.
         """
         run_sql = self._run_sql(cross_run=cross_run)
-        params: list[Any] = [angle, doubt_prefix]
+        params: list[Any] = [angle, min_confidence, doubt_prefix]
         params.extend(self._run_params(cross_run=cross_run))
 
         sql = f"""SELECT COUNT(*) FROM conditions
                   WHERE source_type = 'clone_research'
                     AND consider_for_use = TRUE
                     AND angle = ?
-                    AND confidence >= {min_confidence}
+                    AND confidence >= ?
                     AND lower(left(strategy, 50)) = ?
                     {run_sql}"""
 
