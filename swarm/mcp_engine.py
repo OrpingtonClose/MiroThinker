@@ -518,7 +518,7 @@ class MCPSwarmEngine:
                     "wave_metric",
                     {
                         "findings_new": wave_findings_count,
-                        "findings_total": total_active,
+                        "findings_total": metrics.total_findings_stored,
                         "tool_calls": 0,
                         "elapsed_s": round(wave_time, 1),
                         "workers": len(assignments),

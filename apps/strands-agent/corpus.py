@@ -938,13 +938,15 @@ class ConditionStore:
         params.extend(self._run_params(cross_run=cross_run))
         params.append(limit)
 
+        # Qualify source_run with table alias to avoid ambiguity in self-JOIN
+        qualified_run_sql = run_sql.replace("source_run", "c.source_run")
         sql = f"""SELECT c.fact, c.angle, target.fact as target_fact
                   FROM conditions c
                   LEFT JOIN conditions target ON c.related_id = target.id
                   WHERE c.row_type = 'contradiction'
                     AND c.consider_for_use = TRUE
                     AND (target.angle = ? OR c.angle = ?)
-                    {run_sql}
+                    {qualified_run_sql}
                   ORDER BY c.id DESC
                   LIMIT ?"""
 
