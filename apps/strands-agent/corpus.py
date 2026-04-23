@@ -980,6 +980,7 @@ class ConditionStore:
         sql = f"""SELECT fact, confidence, strategy, source_ref
                   FROM conditions
                   WHERE source_type = 'clone_research'
+                    AND consider_for_use = TRUE
                     AND angle = ?
                     AND iteration = ?
                     {run_sql}
@@ -1017,6 +1018,7 @@ class ConditionStore:
 
         sql = f"""SELECT COUNT(*) FROM conditions
                   WHERE source_type = 'clone_research'
+                    AND consider_for_use = TRUE
                     AND angle = ?
                     AND confidence >= {min_confidence}
                     AND lower(left(strategy, 50)) = ?
@@ -1024,6 +1026,213 @@ class ConditionStore:
 
         with self._lock:
             return self.conn.execute(sql, params).fetchone()[0]
+
+    # ------------------------------------------------------------------
+    # Additional scoped query methods for worker_tools.py
+    # ------------------------------------------------------------------
+
+    def get_angle_stats(
+        self,
+        *,
+        row_types: tuple[str, ...] = ("finding", "thought", "insight"),
+        cross_run: bool = False,
+    ) -> list[tuple[str, int, float]]:
+        """Get per-angle finding counts and average confidence.
+
+        Args:
+            row_types: Row types to include.
+            cross_run: If True, skip run filtering.
+
+        Returns:
+            List of (angle, count, avg_confidence) tuples sorted by count ASC.
+        """
+        run_sql = self._run_sql(cross_run=cross_run)
+        params: list[Any] = list(row_types)
+        params.extend(self._run_params(cross_run=cross_run))
+
+        placeholders = ", ".join("?" for _ in row_types)
+        sql = f"""SELECT angle, COUNT(*) as cnt,
+                         AVG(confidence) as avg_conf
+                  FROM conditions
+                  WHERE consider_for_use = TRUE
+                    AND row_type IN ({placeholders})
+                    AND angle != ''
+                    {run_sql}
+                  GROUP BY angle
+                  ORDER BY cnt ASC"""
+
+        with self._lock:
+            return self.conn.execute(sql, params).fetchall()
+
+    def count_by_filter(
+        self,
+        *,
+        row_types: tuple[str, ...] | None = None,
+        max_confidence: float | None = None,
+        verification_status: str | None = None,
+        cross_run: bool = False,
+    ) -> int:
+        """Count active findings matching flexible filters.
+
+        Args:
+            row_types: Row types to include. None = all.
+            max_confidence: Maximum confidence (exclusive). None = no cap.
+            verification_status: Filter to this status. None = any.
+            cross_run: If True, skip run filtering.
+
+        Returns:
+            Count of matching rows.
+        """
+        run_sql = self._run_sql(cross_run=cross_run)
+        params: list[Any] = []
+        where_parts = ["consider_for_use = TRUE"]
+
+        if row_types:
+            placeholders = ", ".join("?" for _ in row_types)
+            where_parts.append(f"row_type IN ({placeholders})")
+            params.extend(row_types)
+
+        if max_confidence is not None:
+            where_parts.append("confidence < ?")
+            params.append(max_confidence)
+
+        if verification_status is not None:
+            where_parts.append("verification_status = ?")
+            params.append(verification_status)
+
+        params.extend(self._run_params(cross_run=cross_run))
+        where = " AND ".join(where_parts) + run_sql
+        sql = f"SELECT COUNT(*) FROM conditions WHERE {where}"
+
+        with self._lock:
+            return self.conn.execute(sql, params).fetchone()[0]
+
+    def get_findings_by_angle_like(
+        self,
+        angle_pattern: str,
+        *,
+        row_types: tuple[str, ...] = ("finding", "thought", "insight"),
+        limit: int = 200,
+        cross_run: bool = False,
+    ) -> list[tuple[int, str, float, str]]:
+        """Get findings where angle matches a LIKE pattern.
+
+        Args:
+            angle_pattern: SQL LIKE pattern for angle matching.
+            row_types: Row types to include.
+            limit: Maximum results.
+            cross_run: If True, skip run filtering.
+
+        Returns:
+            List of (id, fact, confidence, angle) tuples.
+        """
+        run_sql = self._run_sql(cross_run=cross_run)
+        params: list[Any] = list(row_types)
+        params.extend([f"%{angle_pattern}%", f"%{angle_pattern.lower()}%"])
+        params.extend(self._run_params(cross_run=cross_run))
+        params.append(limit)
+
+        placeholders = ", ".join("?" for _ in row_types)
+        sql = f"""SELECT id, fact, confidence, angle
+                  FROM conditions
+                  WHERE consider_for_use = TRUE
+                    AND row_type IN ({placeholders})
+                    AND (angle LIKE ? OR angle LIKE ?)
+                    {run_sql}
+                  ORDER BY confidence DESC
+                  LIMIT ?"""
+
+        with self._lock:
+            return self.conn.execute(sql, params).fetchall()
+
+    def count_corpus_rows(
+        self,
+        angle: str,
+        *,
+        row_type: str = "raw",
+        cross_run: bool = False,
+    ) -> int:
+        """Count corpus rows for an angle.
+
+        Args:
+            angle: Research angle.
+            row_type: Row type to count.
+            cross_run: If True, skip run filtering.
+
+        Returns:
+            Count of matching rows.
+        """
+        run_sql = self._run_sql(cross_run=cross_run)
+        params: list[Any] = [angle]
+        params.extend(self._run_params(cross_run=cross_run))
+
+        where = f"row_type = ? AND angle = ?"
+        params_full = [row_type, angle]
+        params_full.extend(self._run_params(cross_run=cross_run))
+
+        sql = f"""SELECT COUNT(*) FROM conditions
+                  WHERE row_type = ? AND angle = ?
+                  {run_sql}"""
+
+        with self._lock:
+            return self.conn.execute(sql, params_full).fetchone()[0]
+
+    def get_corpus_page(
+        self,
+        angle: str,
+        *,
+        row_type_filter: str,
+        page_size: int = 100,
+        page_offset: int = 0,
+        cross_run: bool = False,
+    ) -> list[tuple[str]]:
+        """Get a page of corpus fact texts for an angle.
+
+        Args:
+            angle: Research angle.
+            row_type_filter: SQL WHERE fragment for row type filtering.
+            page_size: Rows per page.
+            page_offset: Row offset for pagination.
+            cross_run: If True, skip run filtering.
+
+        Returns:
+            List of (fact,) tuples.
+        """
+        run_sql = self._run_sql(cross_run=cross_run)
+        params: list[Any] = [angle]
+        params.extend(self._run_params(cross_run=cross_run))
+        params.extend([page_size, page_offset])
+
+        sql = f"""SELECT fact FROM conditions
+                  WHERE {row_type_filter} AND angle = ?
+                  {run_sql}
+                  ORDER BY id ASC
+                  LIMIT ? OFFSET ?"""
+
+        with self._lock:
+            return self.conn.execute(sql, params).fetchall()
+
+    def get_knowledge_summaries(
+        self,
+        *,
+        cross_run: bool = False,
+    ) -> list[tuple[str, str, int, int]]:
+        """Get knowledge summaries for all angles.
+
+        Args:
+            cross_run: If True, skip run filtering.
+
+        Returns:
+            List of (angle, summary, finding_count, run_number) tuples.
+        """
+        # knowledge_summaries table does not have source_run column,
+        # so we always return all summaries regardless of run scoping.
+        with self._lock:
+            return self.conn.execute(
+                """SELECT angle, summary, finding_count, run_number
+                   FROM knowledge_summaries
+                   ORDER BY id DESC""",
+            ).fetchall()
 
     # ------------------------------------------------------------------
     # Core write methods

@@ -158,8 +158,6 @@ def build_worker_tools(
         Every tool call becomes a row_type='tool_call' condition, creating
         a complete audit trail of how each worker explored the corpus.
         """
-        from datetime import datetime, timezone
-
         fact = f"[{tool_name}] {json.dumps(args, default=str)[:500]}"
         metadata = json.dumps({
             "tool": tool_name,
@@ -167,23 +165,21 @@ def build_worker_tools(
             "worker_id": worker_id,
             "result_summary": result_summary[:300],
         })
-        now = datetime.now(timezone.utc).isoformat()
 
-        with store._lock:
-            cid = store._next_id
-            store._next_id += 1
-            store.conn.execute(
-                """INSERT INTO conditions
-                   (id, fact, source_type, source_ref, row_type,
-                    consider_for_use, angle, strategy,
-                    created_at, phase)
-                   VALUES (?, ?, 'tool_call', ?, 'tool_call',
-                           FALSE, ?, ?, ?, ?)""",
-                [
-                    cid, fact, f"{worker_id}/{tool_name}",
-                    worker_angle, metadata, now, phase,
-                ],
-            )
+        cid = store.admit(
+            fact=fact,
+            source_type="tool_call",
+            source_ref=f"{worker_id}/{tool_name}",
+            row_type="tool_call",
+            consider_for_use=False,
+            angle=worker_angle,
+            strategy=metadata,
+            phase=phase,
+            source_model=source_model,
+            source_run=source_run,
+        )
+        if cid is None:
+            cid = -1
 
         logger.debug(
             "worker=<%s>, tool=<%s>, event_id=<%d> | tool call logged",
@@ -213,37 +209,26 @@ def build_worker_tools(
             return "(no searchable terms in query)"
 
         # Use LIMIT proportional to store size but cap at 2000 for speed
-        with store._lock:
-            total_count = store.conn.execute(
-                "SELECT COUNT(*) FROM conditions WHERE consider_for_use = TRUE AND row_type = 'finding'"
-            ).fetchone()[0]
-            fetch_limit = min(2000, max(500, total_count))
-            rows = store.conn.execute(
-                """SELECT id, fact, source_url, source_type, confidence,
-                          angle, verification_status
-                   FROM conditions
-                   WHERE consider_for_use = TRUE
-                     AND row_type = 'finding'
-                   ORDER BY confidence DESC
-                   LIMIT ?""",
-                [fetch_limit],
-            ).fetchall()
+        total_count = store.count_active(row_types=("finding",))
+        fetch_limit = min(2000, max(500, total_count))
+        rows = store.get_top_findings(
+            row_types=("finding",),
+            limit=fetch_limit,
+        )
 
         if not rows:
             return "(corpus is empty — no findings available)"
 
         # Score and rank by relevance
         scored = []
-        for row in rows:
-            cid, fact, src_url, src_type, conf, angle, vstatus = row
+        for fact, conf, src_url, src_type in rows:
             score = _keyword_score(query_terms, fact)
-            # Boost findings from same angle slightly
-            if angle and angle.lower() in worker_angle.lower():
-                score *= 1.2
+            # Boost findings from same angle slightly — no angle in tuple,
+            # but worker_angle context provides relevance
             if score > 0:
-                scored.append((score, cid, fact, src_url, src_type, conf, vstatus))
+                scored.append((score, fact, src_url, src_type, conf))
 
-        scored.sort(key=lambda x: (-x[0], -x[5]))
+        scored.sort(key=lambda x: (-x[0], -x[4]))
         top = scored[:max_results]
 
         if not top:
@@ -251,11 +236,11 @@ def build_worker_tools(
             return f"(no findings match query: {query})"
 
         lines = []
-        for score, cid, fact, src_url, src_type, conf, vstatus in top:
+        for score, fact, src_url, src_type, conf in top:
             src_tag = f"[{src_type}]" if src_type else ""
             url_tag = f" ({src_url})" if src_url else ""
             conf_tag = f" [conf={conf:.2f}]" if conf != 0.5 else ""
-            lines.append(f"[#{cid}]{src_tag}{conf_tag} {fact}{url_tag}")
+            lines.append(f"{src_tag}{conf_tag} {fact}{url_tag}")
 
         _log_tool_call("search_corpus", {"query": query, "max_results": max_results}, f"{len(top)} results")
         header = f"=== {len(top)} findings for: {query} (store has {total_count} total) ===\n"
@@ -287,35 +272,22 @@ def build_worker_tools(
             return "(no searchable terms in topic)"
 
         # Prioritize worker-generated insights over raw corpus paragraphs
-        with store._lock:
-            rows = store.conn.execute(
-                """SELECT id, fact, source_type, confidence, angle, phase
-                   FROM conditions
-                   WHERE consider_for_use = TRUE
-                     AND angle != ?
-                     AND angle != ''
-                     AND row_type IN ('finding', 'thought', 'insight')
-                   ORDER BY
-                     CASE WHEN source_type = 'worker_analysis' THEN 0 ELSE 1 END,
-                     confidence DESC
-                   LIMIT 1000""",
-                [worker_angle],
-            ).fetchall()
+        rows = store.get_cross_angle_findings(
+            exclude_angle=worker_angle,
+            limit=1000,
+            exclude_source_types=(),  # include all source types
+        )
 
         if not rows:
             return "(no peer insights available yet — you may be the first to analyze)"
 
         scored = []
-        for row in rows:
-            cid, fact, src_type, conf, angle, row_phase = row
+        for fact, angle, conf in rows:
             score = _keyword_score(topic_terms, fact)
-            # Boost worker-generated findings over raw corpus paragraphs
-            if src_type == "worker_analysis":
-                score *= 2.0
             if score > 0:
-                scored.append((score, cid, fact, src_type, conf, angle, row_phase))
+                scored.append((score, fact, conf, angle))
 
-        scored.sort(key=lambda x: (-x[0], -x[4]))
+        scored.sort(key=lambda x: (-x[0], -x[2]))
         top = scored[:max_results]
 
         if not top:
@@ -323,7 +295,7 @@ def build_worker_tools(
             return f"(no peer insights match topic: {topic})"
 
         lines = []
-        for score, cid, fact, src_type, conf, angle, row_phase in top:
+        for score, fact, conf, angle in top:
             lines.append(f"[{angle}] [conf={conf:.2f}] {fact}")
 
         _log_tool_call("get_peer_insights", {"topic": topic, "max_results": max_results}, f"{len(top)} results")
@@ -416,25 +388,16 @@ def build_worker_tools(
         if not claim_terms:
             return "(no searchable terms in claim)"
 
-        with store._lock:
-            rows = store.conn.execute(
-                """SELECT id, fact, confidence, angle, verification_status
-                   FROM conditions
-                   WHERE consider_for_use = TRUE
-                     AND row_type IN ('finding', 'thought', 'insight')
-                   ORDER BY confidence DESC
-                   LIMIT 1000""",
-            ).fetchall()
+        rows = store.get_top_findings(limit=1000)
 
         if not rows:
             return "(no existing findings to check against)"
 
         related = []
-        for row in rows:
-            cid, fact, conf, angle, vstatus = row
+        for fact, conf, src_url, src_type in rows:
             score = _keyword_score(claim_terms, fact)
             if score > 0:
-                related.append((score, cid, fact, conf, angle, vstatus))
+                related.append((score, fact, conf, src_type))
 
         related.sort(key=lambda x: -x[0])
         top = related[:10]
@@ -444,9 +407,9 @@ def build_worker_tools(
             return f"(no related findings found for: {claim})"
 
         lines = []
-        for score, cid, fact, conf, angle, vstatus in top:
-            status = f" [{vstatus}]" if vstatus else ""
-            lines.append(f"[#{cid}] [{angle}] [conf={conf:.2f}]{status} {fact}")
+        for score, fact, conf, src_type in top:
+            type_tag = f" [{src_type}]" if src_type else ""
+            lines.append(f"[conf={conf:.2f}]{type_tag} {fact}")
 
         _log_tool_call("check_contradictions", {"claim": claim[:100]}, f"{len(top)} related")
         header = f"=== {len(top)} related findings ===\n"
@@ -472,17 +435,7 @@ def build_worker_tools(
         lines = []
 
         # Angle coverage
-        with store._lock:
-            angle_stats = store.conn.execute(
-                """SELECT angle, COUNT(*) as cnt,
-                          AVG(confidence) as avg_conf
-                   FROM conditions
-                   WHERE consider_for_use = TRUE
-                     AND row_type IN ('finding', 'thought', 'insight')
-                     AND angle != ''
-                   GROUP BY angle
-                   ORDER BY cnt ASC""",
-            ).fetchall()
+        angle_stats = store.get_angle_stats()
 
         if angle_stats:
             lines.append("=== ANGLE COVERAGE ===")
@@ -491,27 +444,21 @@ def build_worker_tools(
                 lines.append(f"  [{status}] {angle}: {cnt} findings, avg_conf={avg_conf:.2f}")
 
         # Low-confidence findings
-        with store._lock:
-            low_conf = store.conn.execute(
-                """SELECT COUNT(*) FROM conditions
-                   WHERE consider_for_use = TRUE
-                     AND row_type IN ('finding', 'thought', 'insight')
-                     AND confidence < 0.4""",
-            ).fetchone()
+        low_conf_count = store.count_by_filter(
+            row_types=("finding", "thought", "insight"),
+            max_confidence=0.4,
+        )
 
-        if low_conf and low_conf[0] > 0:
-            lines.append(f"\n{low_conf[0]} findings have confidence < 0.4 (weak evidence)")
+        if low_conf_count > 0:
+            lines.append(f"\n{low_conf_count} findings have confidence < 0.4 (weak evidence)")
 
         # Speculative findings
-        with store._lock:
-            speculative = store.conn.execute(
-                """SELECT COUNT(*) FROM conditions
-                   WHERE consider_for_use = TRUE
-                     AND verification_status = 'speculative'""",
-            ).fetchone()
+        speculative_count = store.count_by_filter(
+            verification_status="speculative",
+        )
 
-        if speculative and speculative[0] > 0:
-            lines.append(f"{speculative[0]} findings are still speculative (unverified)")
+        if speculative_count > 0:
+            lines.append(f"{speculative_count} findings are still speculative (unverified)")
 
         if not lines:
             _log_tool_call("get_research_gaps", {}, "empty corpus")
@@ -543,36 +490,17 @@ def build_worker_tools(
 
         # Stream rows instead of loading full corpus into memory.
         # With 150MB corpus, concatenating all rows would OOM.
-        with store._lock:
-            row_count = store.conn.execute(
-                """SELECT COUNT(*) FROM conditions
-                   WHERE row_type = 'raw' AND angle = ?""",
-                [worker_angle],
-            ).fetchone()[0]
+        raw_count = store.count_corpus_rows(worker_angle, row_type="raw")
+        row_count = raw_count
 
         if row_count == 0:
-            with store._lock:
-                row_count = store.conn.execute(
-                    """SELECT COUNT(*) FROM conditions
-                       WHERE consider_for_use = TRUE
-                         AND row_type = 'finding' AND angle = ?""",
-                    [worker_angle],
-                ).fetchone()[0]
+            row_count = store.count_active(
+                angle=worker_angle,
+                row_types=("finding",),
+            )
 
         if row_count == 0:
             return "(no corpus data assigned to your angle)"
-
-        # Paginated fetch: skip rows until we reach the offset,
-        # then collect up to max_chars
-        row_type_filter = "row_type = 'raw'" if row_count > 0 else (
-            "consider_for_use = TRUE AND row_type = 'finding'"
-        )
-        # Re-check which type has data
-        with store._lock:
-            raw_count = store.conn.execute(
-                "SELECT COUNT(*) FROM conditions WHERE row_type = 'raw' AND angle = ?",
-                [worker_angle],
-            ).fetchone()[0]
 
         if raw_count > 0:
             row_type_filter = "row_type = 'raw'"
@@ -593,14 +521,12 @@ def build_worker_tools(
         for page in range(0, row_count, page_size):
             if done:
                 break
-            with store._lock:
-                rows = store.conn.execute(
-                    f"""SELECT fact FROM conditions
-                       WHERE {row_type_filter} AND angle = ?
-                       ORDER BY id ASC
-                       LIMIT ? OFFSET ?""",
-                    [worker_angle, page_size, page],
-                ).fetchall()
+            rows = store.get_corpus_page(
+                worker_angle,
+                row_type_filter=row_type_filter,
+                page_size=page_size,
+                page_offset=page,
+            )
 
             for (fact_text,) in rows:
                 scanned_rows += 1
@@ -664,27 +590,8 @@ def build_worker_tools(
             Pairs of findings from different angles that may interact.
         """
         # Get top findings from each angle
-        with store._lock:
-            rows_a = store.conn.execute(
-                """SELECT id, fact, confidence, angle
-                   FROM conditions
-                   WHERE consider_for_use = TRUE
-                     AND row_type IN ('finding', 'thought', 'insight')
-                     AND (angle LIKE ? OR angle LIKE ?)
-                   ORDER BY confidence DESC
-                   LIMIT 200""",
-                [f"%{angle_a}%", f"%{angle_a.lower()}%"],
-            ).fetchall()
-            rows_b = store.conn.execute(
-                """SELECT id, fact, confidence, angle
-                   FROM conditions
-                   WHERE consider_for_use = TRUE
-                     AND row_type IN ('finding', 'thought', 'insight')
-                     AND (angle LIKE ? OR angle LIKE ?)
-                   ORDER BY confidence DESC
-                   LIMIT 200""",
-                [f"%{angle_b}%", f"%{angle_b.lower()}%"],
-            ).fetchall()
+        rows_a = store.get_findings_by_angle_like(angle_a, limit=200)
+        rows_b = store.get_findings_by_angle_like(angle_b, limit=200)
 
         if not rows_a or not rows_b:
             return f"(insufficient findings for {angle_a} and/or {angle_b})"
@@ -759,26 +666,11 @@ def build_worker_tools(
         Returns:
             Condensed knowledge briefing across all angles.
         """
-        with store._lock:
-            summaries = store.conn.execute(
-                """SELECT angle, summary, finding_count, run_number
-                   FROM knowledge_summaries
-                   ORDER BY id DESC""",
-            ).fetchall()
+        summaries = store.get_knowledge_summaries()
 
         if not summaries:
             # Fall back to angle stats if no summaries exist yet
-            with store._lock:
-                stats = store.conn.execute(
-                    """SELECT angle, COUNT(*) as cnt,
-                              AVG(confidence) as avg_conf
-                       FROM conditions
-                       WHERE consider_for_use = TRUE
-                         AND row_type IN ('finding', 'thought', 'insight')
-                         AND angle != ''
-                       GROUP BY angle
-                       ORDER BY cnt DESC""",
-                ).fetchall()
+            stats = store.get_angle_stats()
 
             if not stats:
                 return "(no knowledge accumulated yet)"
