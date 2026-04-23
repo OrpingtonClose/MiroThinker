@@ -1218,4 +1218,67 @@ class MCPSwarmEngine:
             report,
         )
 
+        # Post-process: deduplicate repeated sentences across sections.
+        # Small models (8B) often repeat the same filler sentence in
+        # multiple sections.  We keep the first occurrence and remove
+        # subsequent duplicates.
+        report = self._dedup_report_sentences(report)
+
         return report
+
+    @staticmethod
+    def _dedup_report_sentences(report: str) -> str:
+        """Remove duplicate sentences from the report.
+
+        Splits the report into paragraphs (by blank lines), then within
+        each paragraph splits into sentences. If a sentence (normalized
+        to lowercase, stripped of whitespace) has been seen before, it is
+        removed. Empty paragraphs left after dedup are removed.
+
+        Args:
+            report: The raw report text.
+
+        Returns:
+            Report with duplicate sentences removed.
+        """
+        seen: set[str] = set()
+        output_paragraphs: list[str] = []
+
+        for paragraph in report.split("\n\n"):
+            # Don't deduplicate headings or reference lines
+            stripped = paragraph.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("**") or stripped.startswith("#"):
+                output_paragraphs.append(paragraph)
+                continue
+            if stripped.startswith("* http") or stripped.startswith("- http"):
+                output_paragraphs.append(paragraph)
+                continue
+
+            # Split paragraph into sentences and deduplicate.
+            # Catch both exact and near-duplicates (sentences sharing
+            # a long common prefix but diverging at the end).
+            sentences = re.split(r"(?<=\.)\s+", stripped)
+            kept: list[str] = []
+            for sentence in sentences:
+                key = sentence.lower().strip().rstrip(".")
+                if len(key) < 30:
+                    # Keep short sentences (fragments, transitions)
+                    kept.append(sentence)
+                    continue
+                if key in seen:
+                    continue
+                # Also check prefix-based near-duplicates: if the
+                # first 80 chars match a seen sentence, skip it
+                prefix_key = key[:80]
+                if prefix_key in seen:
+                    continue
+                seen.add(key)
+                seen.add(prefix_key)
+                kept.append(sentence)
+
+            if kept:
+                output_paragraphs.append(" ".join(kept))
+
+        return "\n\n".join(output_paragraphs)
