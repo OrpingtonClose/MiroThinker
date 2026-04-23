@@ -55,7 +55,11 @@ async def run(
 
     import httpx
 
-    db_path = str(Path(output_dir) / "store.duckdb")
+    # Each run gets a fresh store to avoid contamination from prior runs.
+    # A stale store causes angle detection to see accumulated noise instead
+    # of analyzing the fresh corpus, collapsing to 1 generic angle.
+    ts_prefix = time.strftime("%Y%m%d_%H%M%S")
+    db_path = str(Path(output_dir) / f"store_{ts_prefix}.duckdb")
     store = ConditionStore(db_path=db_path)
 
     async def complete_fn(prompt: str) -> str:
