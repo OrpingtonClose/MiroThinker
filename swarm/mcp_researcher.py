@@ -466,7 +466,7 @@ async def _search_semantic_scholar(query: str, timeout: float = 20.0) -> list[di
 async def execute_research(
     targets: list[ResearchTarget],
     config: MCPResearcherConfig,
-) -> list[ResearchResult]:
+) -> tuple[list[ResearchResult], int]:
     """Execute research across all available MCP APIs.
 
     Fans out each target's search queries across available APIs in
@@ -477,7 +477,8 @@ async def execute_research(
         config: Researcher configuration.
 
     Returns:
-        List of research results from all APIs.
+        Tuple of (results, api_calls_made) where api_calls_made is the
+        total number of API calls dispatched (including failures).
     """
     search_fns = {
         "brave": _search_brave,
@@ -499,7 +500,7 @@ async def execute_research(
 
     if not available:
         logger.warning("no search APIs available for MCP researcher")
-        return []
+        return [], 0
 
     semaphore = asyncio.Semaphore(config.max_concurrent)
     all_results: list[ResearchResult] = []
@@ -543,7 +544,7 @@ async def execute_research(
         elif isinstance(r, Exception):
             logger.debug("error=<%s> | research task failed", r)
 
-    return all_results
+    return all_results, len(tasks)
 
 
 # ---------------------------------------------------------------------------
@@ -668,16 +669,15 @@ async def run_mcp_research_round(
     )
 
     # 2. Execute research
-    results = await execute_research(targets, config)
+    results, total_api_calls = await execute_research(targets, config)
 
     # 3. Store results
     stored = store_research_results(store, results, run_id)
 
     elapsed = time.monotonic() - t0
 
-    # Collect which APIs were used
+    # Collect which APIs returned successful results
     apis_used = list({r.source_api for r in results})
-    total_api_calls = len(targets) * config.max_queries_per_target * len(apis_used)
 
     metrics = MCPResearchRoundMetrics(
         targets_researched=len(targets),

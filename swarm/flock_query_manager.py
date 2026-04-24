@@ -752,7 +752,7 @@ def store_evaluation(
     query: FlockQuery,
     run_id: str,
     round_number: int,
-) -> int:
+) -> tuple[int, float]:
     """Write an evaluation result into the ConditionStore.
 
     Creates a new 'evaluation' row linking back to the evaluated
@@ -767,11 +767,15 @@ def store_evaluation(
         round_number: Current evaluation round.
 
     Returns:
-        Number of new rows created (1 for the evaluation + any new findings).
+        Tuple of (rows_created, score_magnitude) where rows_created
+        is the count of new rows (1 evaluation + any new findings)
+        and score_magnitude is the total absolute change across all
+        updated flags (used for convergence detection).
     """
     import json
 
     rows_created = 0
+    score_magnitude = 0.0
 
     # 1. Create the evaluation row itself
     eval_fact = (
@@ -812,7 +816,9 @@ def store_evaluation(
     # 2. Apply score deltas to evaluated conditions
     if evaluation.score_delta:
         for target_id in evaluation.condition_ids_evaluated:
-            _apply_score_delta(store, target_id, evaluation.score_delta)
+            score_magnitude += _apply_score_delta(
+                store, target_id, evaluation.score_delta,
+            )
 
     # 3. Store any new findings generated during evaluation
     for finding in evaluation.new_findings:
@@ -838,14 +844,14 @@ def store_evaluation(
             )
             rows_created += 1
 
-    return rows_created
+    return rows_created, score_magnitude
 
 
 def _apply_score_delta(
     store: "ConditionStore",
     condition_id: int,
     delta: dict[str, float],
-) -> None:
+) -> float:
     """Apply score adjustments from an evaluation to a condition.
 
     Uses weighted averaging: new_score = 0.7 * old + 0.3 * evaluation.
@@ -855,6 +861,11 @@ def _apply_score_delta(
         store: The ConditionStore.
         condition_id: Which condition to update.
         delta: Map of flag name → evaluation's score for that flag.
+
+    Returns:
+        Total absolute magnitude of score changes across all flags.
+        As scores stabilize across rounds this approaches zero, which
+        is what drives convergence detection.
     """
     flag_columns = {
         "confidence", "trust_score", "novelty_score",
@@ -862,24 +873,35 @@ def _apply_score_delta(
         "fabrication_risk",
     }
 
+    total_magnitude = 0.0
     for flag_name, eval_score in delta.items():
         if flag_name not in flag_columns:
             continue
         try:
-            # Weighted average: keep 70% of existing score, blend 30% from evaluation
             with _get_store_lock(store):
+                # Read old value to compute change magnitude
+                old_row = store.conn.execute(
+                    f"SELECT {flag_name} FROM conditions WHERE id = ?",
+                    [condition_id],
+                ).fetchone()
+                old_value = old_row[0] if old_row else 0.5
+                new_value = old_value * 0.7 + eval_score * 0.3
+                total_magnitude += abs(new_value - old_value)
+
                 store.conn.execute(
                     f"UPDATE conditions "
-                    f"SET {flag_name} = ({flag_name} * 0.7) + (? * 0.3), "
+                    f"SET {flag_name} = ?, "
                     f"    score_version = score_version + 1 "
                     f"WHERE id = ?",
-                    [eval_score, condition_id],
+                    [new_value, condition_id],
                 )
         except Exception as exc:
             logger.warning(
                 "condition_id=<%d>, flag=<%s>, error=<%s> | score delta application failed",
                 condition_id, flag_name, exc,
             )
+
+    return total_magnitude
 
 
 # ---------------------------------------------------------------------------
@@ -994,7 +1016,7 @@ class FlockQueryManager:
             round_queries = 0
             round_evaluations = 0
             round_new_findings = 0
-            round_score_updates = 0
+            round_score_magnitude = 0.0
 
             await _emit({
                 "type": "flock_round_start",
@@ -1057,14 +1079,13 @@ class FlockQueryManager:
                         evaluation = _parse_evaluation_result(
                             response, query, elapsed,
                         )
-                        rows = store_evaluation(
+                        rows, magnitude = store_evaluation(
                             self.store, evaluation, query,
                             run_id, round_num,
                         )
                         round_evaluations += 1
                         round_new_findings += len(evaluation.new_findings)
-                        if evaluation.score_delta:
-                            round_score_updates += 1
+                        round_score_magnitude += magnitude
                         round_queries += 1
                         clone_queries += 1
 
@@ -1085,15 +1106,15 @@ class FlockQueryManager:
 
             # Round metrics
             round_time = time.monotonic() - round_start
-            # Convergence = fraction of queries that produced meaningful
-            # information gain (score updates OR new findings).  All query
-            # types produce score_delta (VALIDATE→confidence, VERIFY→
-            # fabrication_risk, etc.), so this counts every type, not just
-            # ENRICH/BRIDGE which are the only ones that produce new_findings.
-            round_information_gain = round_score_updates + round_new_findings
-            convergence_score = (
-                round_information_gain / max(round_queries, 1)
+            # Convergence = average absolute score change per query.
+            # As the ConditionStore stabilises across rounds, evaluations
+            # keep running but the blended scores barely move.  The
+            # magnitude tracks that: early rounds shift scores by large
+            # amounts; later rounds produce near-zero deltas.
+            avg_magnitude = (
+                round_score_magnitude / max(round_queries, 1)
             )
+            convergence_score = avg_magnitude
 
             round_metrics = QueryRoundMetrics(
                 round_number=round_num,
@@ -1113,16 +1134,16 @@ class FlockQueryManager:
                 "round": round_num,
                 "queries": round_queries,
                 "evaluations": round_evaluations,
-                "score_updates": round_score_updates,
+                "score_magnitude": round(round_score_magnitude, 4),
                 "new_findings": round_new_findings,
-                "convergence_score": round(convergence_score, 3),
+                "convergence_score": round(convergence_score, 4),
                 "elapsed_s": round(round_time, 1),
             })
 
             logger.info(
-                "round=<%d>, queries=<%d>, evals=<%d>, score_updates=<%d>, "
-                "new_findings=<%d>, convergence=<%.3f>, elapsed_s=<%.1f> | round complete",
-                round_num, round_queries, round_evaluations, round_score_updates,
+                "round=<%d>, queries=<%d>, evals=<%d>, score_magnitude=<%.4f>, "
+                "new_findings=<%d>, convergence=<%.4f>, elapsed_s=<%.1f> | round complete",
+                round_num, round_queries, round_evaluations, round_score_magnitude,
                 round_new_findings, convergence_score, round_time,
             )
 
