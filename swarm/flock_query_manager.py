@@ -822,10 +822,41 @@ def store_evaluation(
 
     # 2. Apply score deltas to evaluated conditions
     if evaluation.score_delta:
-        for target_id in evaluation.condition_ids_evaluated:
+        if (
+            evaluation.query_type == QueryType.ADJUDICATE
+            and len(evaluation.condition_ids_evaluated) == 2
+        ):
+            # Asymmetric application: the evaluator's confidence is
+            # confidence in the verdict, not in both claims equally.
+            # side_a = condition_ids_evaluated[0]
+            # side_b = condition_ids_evaluated[1]
+            verdict_lower = evaluation.verdict.lower()
+            eval_conf = evaluation.score_delta.get("confidence", 0.5)
+            if verdict_lower == "side_a":
+                winner_delta = {"confidence": eval_conf}
+                loser_delta = {"confidence": max(0.1, 1.0 - eval_conf)}
+            elif verdict_lower == "side_b":
+                winner_delta = {"confidence": max(0.1, 1.0 - eval_conf)}
+                loser_delta = {"confidence": eval_conf}
+            elif verdict_lower == "both_valid":
+                # Both sides are conditionally true — moderate boost
+                winner_delta = {"confidence": min(1.0, eval_conf * 0.8)}
+                loser_delta = {"confidence": min(1.0, eval_conf * 0.8)}
+            else:
+                # "neither" or unrecognised — penalise both
+                winner_delta = {"confidence": max(0.1, 0.5 - eval_conf * 0.3)}
+                loser_delta = {"confidence": max(0.1, 0.5 - eval_conf * 0.3)}
             score_magnitude += _apply_score_delta(
-                store, target_id, evaluation.score_delta,
+                store, evaluation.condition_ids_evaluated[0], winner_delta,
             )
+            score_magnitude += _apply_score_delta(
+                store, evaluation.condition_ids_evaluated[1], loser_delta,
+            )
+        else:
+            for target_id in evaluation.condition_ids_evaluated:
+                score_magnitude += _apply_score_delta(
+                    store, target_id, evaluation.score_delta,
+                )
 
     # 3. Store any new findings generated during evaluation
     for finding in evaluation.new_findings:
