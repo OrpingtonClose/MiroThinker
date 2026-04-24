@@ -1622,14 +1622,17 @@ def _store_aggregate_research_targets(
     for direction in directions:
         try:
             with lock:
+                cid = store._next_id
+                store._next_id += 1
                 store.conn.execute(
                     "INSERT INTO conditions "
-                    "(fact, angle, row_type, source_model, source_run, "
+                    "(id, fact, angle, row_type, source_model, source_run, "
                     " consider_for_use, expansion_gap, expansion_priority, "
                     " expansion_fulfilled, score_version) "
-                    "VALUES (?, 'aggregate', 'research_target', ?, ?, "
+                    "VALUES (?, ?, 'aggregate', 'research_target', ?, ?, "
                     " TRUE, ?, ?, FALSE, 1)",
                     [
+                        cid,
                         (
                             f"[AGGREGATE R{round_number}] "
                             f"{direction['search_query']} "
