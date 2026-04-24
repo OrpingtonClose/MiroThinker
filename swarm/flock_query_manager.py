@@ -2092,6 +2092,7 @@ class FlockQueryManager:
         config: FlockQueryManagerConfig | None = None,
         complete_for_clone: Callable[[CloneContext], Awaitable[Callable[[str], Awaitable[str]]]] | None = None,
         mcp_research_fn: Callable[[str], Awaitable[int]] | None = None,
+        fallback_complete: Callable[[str], Awaitable[str]] | None = None,
     ) -> None:
         self.store = store
         self.config = config or FlockQueryManagerConfig()
@@ -2106,7 +2107,11 @@ class FlockQueryManager:
         if self.config.backend_config is not None:
             from swarm.backend import wrap_complete
 
-            self._backend = wrap_complete(complete, self.config.backend_config)
+            self._backend = wrap_complete(
+                complete,
+                self.config.backend_config,
+                fallback_complete=fallback_complete,
+            )
             self.complete = self._backend
             logger.info(
                 "backend=<%s>, tier=<%s> | flock using risk-aware backend",

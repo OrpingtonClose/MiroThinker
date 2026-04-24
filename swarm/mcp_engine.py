@@ -648,11 +648,19 @@ class MCPSwarmEngine:
                     # remote API.  Falls back to the engine's default.
                     flock_complete_fn = config.flock_complete or self.complete
 
+                    # When using a remote backend, local vLLM is the
+                    # fallback — if OpenRouter circuit-breaks, degrade
+                    # to the engine's default completion function.
+                    flock_fallback_fn: CompleteFn | None = None
+                    if config.flock_complete is not None:
+                        flock_fallback_fn = self.complete
+
                     flock_manager = FlockQueryManager(
                         store=self.store,
                         complete=flock_complete_fn,
                         config=flock_config,
                         mcp_research_fn=mcp_research_fn,
+                        fallback_complete=flock_fallback_fn,
                     )
                     flock_result = await flock_manager.run(
                         clones=clones,

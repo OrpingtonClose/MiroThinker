@@ -498,9 +498,19 @@ class RiskAwareBackend:
                 try:
                     response = await self._complete(prompt)
 
+                    # Treat empty responses as failures — many
+                    # completion functions swallow exceptions and
+                    # return "" instead of raising.  Without this
+                    # check, retries/circuit-breaker/fallback never
+                    # activate for silent failures (e.g. HTTP 429
+                    # caught inside _openrouter_complete).
+                    if not response:
+                        msg = "backend returned empty response"
+                        raise RuntimeError(msg)
+
                     # Success — reset circuit breaker and cache
                     self._consecutive_failures = 0
-                    if self._cache is not None and response:
+                    if self._cache is not None:
                         self._cache.put(prompt, response)
 
                     return response
