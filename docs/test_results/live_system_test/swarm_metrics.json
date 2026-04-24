@@ -1,0 +1,68 @@
+{
+  "model": "deepseek-v3.2",
+  "api_base": "https://api.venice.ai/api/v1",
+  "started_at": 1776993448.4805684,
+  "gossip_elapsed_s": 3514.7157611349994,
+  "corpus_chars": 22928,
+  "venice_total_calls": 23,
+  "venice_total_prompt_chars": 1825970,
+  "venice_total_output_chars": 279045,
+  "venice_total_latency_s": 6448.66,
+  "venice_errors": [],
+  "corpus_delta_events": [
+    {
+      "call": 0,
+      "chars": 2779
+    },
+    {
+      "call": 1,
+      "chars": 2909
+    },
+    {
+      "call": 2,
+      "chars": 0,
+      "skipped": true
+    }
+  ],
+  "swarm_metrics": {
+    "total_llm_calls": 23,
+    "total_workers": 4,
+    "gossip_rounds_executed": 3,
+    "gossip_rounds_configured": 3,
+    "gossip_converged_early": false,
+    "serendipity_produced": true,
+    "phase_times": {
+      "corpus_analysis": 22.295341619999817,
+      "map": 483.6656498399989,
+      "gossip": 2331.273637844999,
+      "serendipity": 330.0206125069999,
+      "queen_merge": 347.45985484099947
+    },
+    "worker_input_chars": [
+      11824,
+      6795,
+      5125,
+      4937
+    ],
+    "worker_output_chars": [
+      16847,
+      16685,
+      16758,
+      16856
+    ],
+    "total_elapsed_s": 3514.7154199079996,
+    "gossip_info_gain": [
+      0.9405095696696331,
+      0.5669942473633749,
+      0.835155058464667
+    ],
+    "degradations": []
+  },
+  "angles_detected": [
+    "AMPK transduction",
+    "PAG stress-column gating",
+    "trenbolone-induced myofiber insulin resistance",
+    "sulfation capacity"
+  ],
+  "progress_event_count": 10
+}

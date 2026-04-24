@@ -1,0 +1,236 @@
+[
+  {
+    "size_tokens": 32000,
+    "num_trials": 6,
+    "correct": 3,
+    "accuracy": 0.5,
+    "avg_latency_ms": 1171.7,
+    "max_latency_ms": 1875.4,
+    "avg_prompt_tokens": 27444.0,
+    "errors": 0,
+    "trials": [
+      {
+        "size": 32000,
+        "case": "needle@0.1",
+        "expected": true,
+        "predicted": false,
+        "correct": false,
+        "raw": "**ANSWER WITH EXACTLY RELEVANT OR NOT_RELEVANT:**\n\n**RELEV",
+        "latency_ms": 1875.4,
+        "prompt_tokens": 27436,
+        "error": null
+      },
+      {
+        "size": 32000,
+        "case": "needle@0.5",
+        "expected": true,
+        "predicted": false,
+        "correct": false,
+        "raw": "**FUROSEMIDE** IRREVERSIBLY INHIBITS **NA/K/2CL",
+        "latency_ms": 1201.6,
+        "prompt_tokens": 27382,
+        "error": null
+      },
+      {
+        "size": 32000,
+        "case": "needle@0.9",
+        "expected": true,
+        "predicted": false,
+        "correct": false,
+        "raw": "**FUROSEMIDE** IRREVERSIBLY INHIBITS **NA\u207a/K",
+        "latency_ms": 1118.2,
+        "prompt_tokens": 27504,
+        "error": null
+      },
+      {
+        "size": 32000,
+        "case": "no_needle_0",
+        "expected": false,
+        "predicted": false,
+        "correct": true,
+        "raw": ". CIPROFLOXACIN IS A BETA-LACTAM THAT INHIBITS BACTERIAL CEL",
+        "latency_ms": 961.0,
+        "prompt_tokens": 27405,
+        "error": null
+      },
+      {
+        "size": 32000,
+        "case": "no_needle_1",
+        "expected": false,
+        "predicted": false,
+        "correct": true,
+        "raw": "NEVER ASK \"WHAT IS THE DIFFERENCE BETWEEN X AND Y?\" ASK \"WHA",
+        "latency_ms": 938.1,
+        "prompt_tokens": 27423,
+        "error": null
+      },
+      {
+        "size": 32000,
+        "case": "no_needle_2",
+        "expected": false,
+        "predicted": false,
+        "correct": true,
+        "raw": "**FUROSEMIDE** IS A **DIURETIC** THAT **IN",
+        "latency_ms": 936.1,
+        "prompt_tokens": 27512,
+        "error": null
+      }
+    ]
+  },
+  {
+    "size_tokens": 65000,
+    "num_trials": 6,
+    "correct": 3,
+    "accuracy": 0.5,
+    "avg_latency_ms": 1457.4,
+    "max_latency_ms": 1844.0,
+    "avg_prompt_tokens": 55654,
+    "errors": 0,
+    "trials": [
+      {
+        "size": 65000,
+        "case": "needle@0.1",
+        "expected": true,
+        "predicted": false,
+        "correct": false,
+        "raw": "NEVER STOP. WARFARIN IS A VITAMIN K ANTAGONIST; INR MONITORI",
+        "latency_ms": 1844.0,
+        "prompt_tokens": 55509,
+        "error": null
+      },
+      {
+        "size": 65000,
+        "case": "needle@0.5",
+        "expected": true,
+        "predicted": false,
+        "correct": false,
+        "raw": "24-HOUR COVER. WARFARIN IS A VITAMIN K ANTAGONIST; INR",
+        "latency_ms": 1527.0,
+        "prompt_tokens": 55522,
+        "error": null
+      },
+      {
+        "size": 65000,
+        "case": "needle@0.9",
+        "expected": true,
+        "predicted": false,
+        "correct": false,
+        "raw": "FUROSEMIDE IS A DIHYDROPYRIDINE CALCIUM-CHANNEL BLOCKER FOR",
+        "latency_ms": 1347.9,
+        "prompt_tokens": 55764,
+        "error": null
+      },
+      {
+        "size": 65000,
+        "case": "no_needle_0",
+        "expected": false,
+        "predicted": false,
+        "correct": true,
+        "raw": "FUROSEMIDE INHIBITS NA/K/2CL COTRANSPORT IN THE",
+        "latency_ms": 1351.2,
+        "prompt_tokens": 55710,
+        "error": null
+      },
+      {
+        "size": 65000,
+        "case": "no_needle_1",
+        "expected": false,
+        "predicted": false,
+        "correct": true,
+        "raw": "STOP. WARFARIN IS A VITAMIN K ANTAGONIST; INR MONITORING IS ",
+        "latency_ms": 1338.1,
+        "prompt_tokens": 55746,
+        "error": null
+      },
+      {
+        "size": 65000,
+        "case": "no_needle_2",
+        "expected": false,
+        "predicted": false,
+        "correct": true,
+        "raw": "**LEVOTHYROXINE** IS A SYNTHETIC **T4 HORMONE REPLACEMENT**",
+        "latency_ms": 1336.0,
+        "prompt_tokens": 55673,
+        "error": null
+      }
+    ]
+  },
+  {
+    "size_tokens": 100000,
+    "num_trials": 6,
+    "correct": 3,
+    "accuracy": 0.5,
+    "avg_latency_ms": 2006.8,
+    "max_latency_ms": 2581.6,
+    "avg_prompt_tokens": 85562.0,
+    "errors": 0,
+    "trials": [
+      {
+        "size": 100000,
+        "case": "needle@0.1",
+        "expected": true,
+        "predicted": false,
+        "correct": false,
+        "raw": "**ANSWER:**  \n**LISINOPRIL** IS AN **ACE INHIBITOR**",
+        "latency_ms": 2581.6,
+        "prompt_tokens": 85438,
+        "error": null
+      },
+      {
+        "size": 100000,
+        "case": "needle@0.5",
+        "expected": true,
+        "predicted": false,
+        "correct": false,
+        "raw": "WHAT IS THE DIFFERENCE BETWEEN LEVOTHYROXINE AND METFORMIN? ",
+        "latency_ms": 2130.1,
+        "prompt_tokens": 85315,
+        "error": null
+      },
+      {
+        "size": 100000,
+        "case": "needle@0.9",
+        "expected": true,
+        "predicted": false,
+        "correct": false,
+        "raw": "**ANSWER: ACETAMINOPHEN MECHANISM IS WEAK COX INHIBITION WIT",
+        "latency_ms": 2021.3,
+        "prompt_tokens": 85746,
+        "error": null
+      },
+      {
+        "size": 100000,
+        "case": "no_needle_0",
+        "expected": false,
+        "predicted": false,
+        "correct": true,
+        "raw": "24-HOUR COVER. OMEPRAZOLE IRREVERSIBLY INHIBITS H+/K",
+        "latency_ms": 1764.9,
+        "prompt_tokens": 85608,
+        "error": null
+      },
+      {
+        "size": 100000,
+        "case": "no_needle_1",
+        "expected": false,
+        "predicted": false,
+        "correct": true,
+        "raw": "24-HOUR COVER. OMEPRAZOLE IRREVERSIBLY INHIBITS H+/K",
+        "latency_ms": 1772.9,
+        "prompt_tokens": 85789,
+        "error": null
+      },
+      {
+        "size": 100000,
+        "case": "no_needle_2",
+        "expected": false,
+        "predicted": false,
+        "correct": true,
+        "raw": "THE USER ASKS: \"ANSWER WITH EXACTLY RELEVANT OR NOT_RELEVANT",
+        "latency_ms": 1770.0,
+        "prompt_tokens": 85478,
+        "error": null
+      }
+    ]
+  }
+]

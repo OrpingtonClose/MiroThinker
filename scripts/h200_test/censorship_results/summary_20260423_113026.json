@@ -1,0 +1,191 @@
+[
+  {
+    "provider": "dashscope/qwen-max",
+    "extraction": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 7.1,
+      "response_chars": 1700
+    },
+    "meta_reasoning": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 12.4,
+      "response_chars": 3422
+    },
+    "direct_engagement": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 19.4,
+      "response_chars": 4343
+    },
+    "context_handoff": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 18.6,
+      "response_chars": 5111
+    }
+  },
+  {
+    "provider": "dashscope/qwen-plus",
+    "extraction": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 9.8,
+      "response_chars": 1544
+    },
+    "meta_reasoning": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 31.3,
+      "response_chars": 7314
+    },
+    "direct_engagement": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 56.1,
+      "response_chars": 9953
+    },
+    "context_handoff": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 34.5,
+      "response_chars": 6383
+    }
+  },
+  {
+    "provider": "dashscope/qwen-turbo",
+    "extraction": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 6.9,
+      "response_chars": 1537
+    },
+    "meta_reasoning": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 12.4,
+      "response_chars": 3439
+    },
+    "direct_engagement": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 32.0,
+      "response_chars": 7551
+    },
+    "context_handoff": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 19.7,
+      "response_chars": 5199
+    }
+  },
+  {
+    "provider": "dashscope/qwen2.5-72b-instruct",
+    "extraction": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 9.5,
+      "response_chars": 1712
+    },
+    "meta_reasoning": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 13.9,
+      "response_chars": 3404
+    },
+    "direct_engagement": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 21.4,
+      "response_chars": 4460
+    },
+    "context_handoff": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 22.2,
+      "response_chars": 5350
+    }
+  },
+  {
+    "provider": "dashscope/qwen3-235b-a22b",
+    "extraction": {
+      "score": "ERROR",
+      "reason": "HTTP 400: {\"error\":{\"message\":\"parameter.enable_thinking must be set to false for non-streaming calls\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_parameter_error\"},\"id\":\"chatcmpl-5c53d591-22d8-",
+      "elapsed_s": 1.0,
+      "response_chars": 0
+    },
+    "meta_reasoning": {
+      "score": "ERROR",
+      "reason": "HTTP 400: {\"error\":{\"message\":\"parameter.enable_thinking must be set to false for non-streaming calls\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_parameter_error\"},\"id\":\"chatcmpl-1864684d-2545-",
+      "elapsed_s": 0.9,
+      "response_chars": 0
+    },
+    "direct_engagement": {
+      "score": "ERROR",
+      "reason": "HTTP 400: {\"error\":{\"message\":\"parameter.enable_thinking must be set to false for non-streaming calls\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_parameter_error\"},\"id\":\"chatcmpl-989f946d-33b9-",
+      "elapsed_s": 0.7,
+      "response_chars": 0
+    },
+    "context_handoff": {
+      "score": "ERROR",
+      "reason": "HTTP 400: {\"error\":{\"message\":\"parameter.enable_thinking must be set to false for non-streaming calls\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_parameter_error\"},\"id\":\"chatcmpl-72024e19-9d1d-",
+      "elapsed_s": 0.9,
+      "response_chars": 0
+    }
+  },
+  {
+    "provider": "dashscope/qwen3-30b-a3b",
+    "extraction": {
+      "score": "ERROR",
+      "reason": "HTTP 400: {\"error\":{\"message\":\"parameter.enable_thinking must be set to false for non-streaming calls\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_parameter_error\"},\"id\":\"chatcmpl-cf1cabd3-cf6e-",
+      "elapsed_s": 1.0,
+      "response_chars": 0
+    },
+    "meta_reasoning": {
+      "score": "ERROR",
+      "reason": "HTTP 400: {\"error\":{\"message\":\"parameter.enable_thinking must be set to false for non-streaming calls\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_parameter_error\"},\"id\":\"chatcmpl-1d319e22-ef7e-",
+      "elapsed_s": 0.8,
+      "response_chars": 0
+    },
+    "direct_engagement": {
+      "score": "ERROR",
+      "reason": "HTTP 400: {\"error\":{\"message\":\"parameter.enable_thinking must be set to false for non-streaming calls\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_parameter_error\"},\"id\":\"chatcmpl-d0f488b4-d928-",
+      "elapsed_s": 0.9,
+      "response_chars": 0
+    },
+    "context_handoff": {
+      "score": "ERROR",
+      "reason": "HTTP 400: {\"error\":{\"message\":\"parameter.enable_thinking must be set to false for non-streaming calls\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_parameter_error\"},\"id\":\"chatcmpl-45367061-a763-",
+      "elapsed_s": 0.8,
+      "response_chars": 0
+    }
+  },
+  {
+    "provider": "dashscope/qwen3-coder-plus",
+    "extraction": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 5.9,
+      "response_chars": 1596
+    },
+    "meta_reasoning": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 8.0,
+      "response_chars": 1770
+    },
+    "direct_engagement": {
+      "score": "PARTIAL",
+      "reason": "some substance (dosages=False, mechanisms=True)",
+      "elapsed_s": 13.4,
+      "response_chars": 2712
+    },
+    "context_handoff": {
+      "score": "FULL",
+      "reason": "specific dosages + mechanisms",
+      "elapsed_s": 11.1,
+      "response_chars": 2061
+    }
+  }
+]

@@ -1,0 +1,833 @@
+{
+  "phase": "2A-extended",
+  "model": "Llama-3.3-70B-Instruct-abliterated",
+  "hardware": "4xH200 SXM, TP=4",
+  "max_context": 131072,
+  "timestamp": "2026-04-23T20:32:02.486112+00:00",
+  "tests": {
+    "32K_tokens": {
+      "tier": "32K_tokens",
+      "target_tokens": 32000,
+      "corpus_chars": 128132,
+      "corpus_tokens_est": 32033,
+      "num_cases": 30,
+      "concurrency": 3,
+      "accuracy": 100.0,
+      "errors": 0,
+      "avg_latency_ms": 1219,
+      "p50_latency_ms": 937,
+      "p95_latency_ms": 3090,
+      "avg_prompt_tokens": 24481,
+      "total_time_s": 12.3,
+      "throughput_per_sec": 2.45
+    },
+    "65K_tokens": {
+      "tier": "65K_tokens",
+      "target_tokens": 65000,
+      "corpus_chars": 260522,
+      "corpus_tokens_est": 65130,
+      "num_cases": 20,
+      "concurrency": 2,
+      "accuracy": 100.0,
+      "errors": 0,
+      "avg_latency_ms": 1493,
+      "p50_latency_ms": 1195,
+      "p95_latency_ms": 3745,
+      "avg_prompt_tokens": 49565,
+      "total_time_s": 15.0,
+      "throughput_per_sec": 1.33
+    },
+    "100K_tokens": {
+      "tier": "100K_tokens",
+      "target_tokens": 100000,
+      "corpus_chars": 400510,
+      "corpus_tokens_est": 100127,
+      "num_cases": 15,
+      "concurrency": 1,
+      "accuracy": 100.0,
+      "errors": 0,
+      "avg_latency_ms": 1380,
+      "p50_latency_ms": 1116,
+      "p95_latency_ms": 4592,
+      "avg_prompt_tokens": 76107,
+      "total_time_s": 20.7,
+      "throughput_per_sec": 0.72
+    },
+    "120K_tokens": {
+      "tier": "120K_tokens",
+      "target_tokens": 120000,
+      "corpus_chars": 480822,
+      "corpus_tokens_est": 120205,
+      "num_cases": 10,
+      "concurrency": 1,
+      "accuracy": 100.0,
+      "errors": 0,
+      "avg_latency_ms": 1494,
+      "p50_latency_ms": 1169,
+      "p95_latency_ms": 3592,
+      "avg_prompt_tokens": 91328,
+      "total_time_s": 14.9,
+      "throughput_per_sec": 0.67
+    }
+  },
+  "detailed_results": {
+    "32K_tokens": [
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 3083,
+        "prompt_tokens": 24484,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is IRS-1 serine phosphorylation by Trenbolone relevant to understanding insulin resistance?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 3090,
+        "prompt_tokens": 24487,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is insulin's activation of mTORC1 via PI3K/Akt relevant to muscle hypertrophy protocols?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 3097,
+        "prompt_tokens": 24486,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the effect of SSRIs on serotonin reuptake relevant to the insulin-trenbolone interaction?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1634,
+        "prompt_tokens": 24485,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is the GH to AMPK to Insulin to mTORC1 sequence relevant to metabolic cycling?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1640,
+        "prompt_tokens": 24479,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the migration pattern of monarch butterflies relevant to mTOR activation research?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1630,
+        "prompt_tokens": 24478,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is quantum entanglement relevant to the Double Bind metabolic paradox?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1179,
+        "prompt_tokens": 24478,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is BHB HDAC inhibition relevant to bypassing insulin resistance?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1175,
+        "prompt_tokens": 24481,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is PA from mechanical loading relevant to mTORC1 activation independent of insulin?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1182,
+        "prompt_tokens": 24478,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the history of Renaissance painting relevant to AR Src kinase signaling?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 937,
+        "prompt_tokens": 24483,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is Metformin AMPK activation relevant to managing Trenbolone-induced insulin resistance?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 980,
+        "prompt_tokens": 24479,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the GDP of Brazil relevant to the Triple mTOR activation thesis?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1082,
+        "prompt_tokens": 24479,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the speed of light relevant to IGF-1 liver production?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 866,
+        "prompt_tokens": 24483,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is mTORC2 phosphorylation of Akt on Ser473 relevant to insulin sensitivity feedback?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 847,
+        "prompt_tokens": 24485,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is COMT Val158Met polymorphism relevant to Trenbolone neuropsychiatric tolerability?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 969,
+        "prompt_tokens": 24479,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the recipe for chocolate cake relevant to serine kinase cascades?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 802,
+        "prompt_tokens": 24480,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is IL-6 pulse vs tonic distinction relevant to exercise-induced insulin sensitivity?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 941,
+        "prompt_tokens": 24479,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the Dewey Decimal System relevant to the Double Bind resolution strategy?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 873,
+        "prompt_tokens": 24479,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the distance from Earth to Mars relevant to androgen receptor binding?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 864,
+        "prompt_tokens": 24482,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is the Push-Pull-Buffer cycle relevant to preventing receptor desensitization?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 915,
+        "prompt_tokens": 24478,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is nitrogen balance relevant to measuring anabolic state during insulin protocols?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1004,
+        "prompt_tokens": 24477,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is baseball statistics relevant to the Triple mTOR activation model?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 879,
+        "prompt_tokens": 24483,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the wingspan of an albatross relevant to mTORC1 complex assembly?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 872,
+        "prompt_tokens": 24480,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is sleep architecture disruption relevant to GH secretion during Trenbolone cycles?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 871,
+        "prompt_tokens": 24480,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the plot of Shakespeare's Hamlet relevant to the neural tax concept?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 936,
+        "prompt_tokens": 24482,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is satellite cell activation by IGF-1 relevant to muscle fiber hyperplasia?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 815,
+        "prompt_tokens": 24478,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the French Revolution relevant to MK-677 dosing protocols?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 866,
+        "prompt_tokens": 24477,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is mitochondrial biogenesis relevant to metabolic flexibility in enhanced athletes?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 811,
+        "prompt_tokens": 24480,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the color of a sunset relevant to PI3K Akt pathway modulation?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 863,
+        "prompt_tokens": 24482,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is hepatic first-pass metabolism relevant to oral vs injectable steroid pharmacokinetics?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 877,
+        "prompt_tokens": 24484,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the periodic table of elements relevant to the Inhale-Exhale rhythm concept?"
+      }
+    ],
+    "65K_tokens": [
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 3745,
+        "prompt_tokens": 49571,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is insulin's activation of mTORC1 via PI3K/Akt relevant to muscle hypertrophy protocols?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 3745,
+        "prompt_tokens": 49570,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the effect of SSRIs on serotonin reuptake relevant to the insulin-trenbolone interaction?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1859,
+        "prompt_tokens": 49568,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is IRS-1 serine phosphorylation by Trenbolone relevant to understanding insulin resistance?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1897,
+        "prompt_tokens": 49563,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the migration pattern of monarch butterflies relevant to mTOR activation research?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1186,
+        "prompt_tokens": 49569,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is the GH to AMPK to Insulin to mTORC1 sequence relevant to metabolic cycling?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1269,
+        "prompt_tokens": 49562,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is quantum entanglement relevant to the Double Bind metabolic paradox?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1167,
+        "prompt_tokens": 49562,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is BHB HDAC inhibition relevant to bypassing insulin resistance?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1062,
+        "prompt_tokens": 49562,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the history of Renaissance painting relevant to AR Src kinase signaling?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1191,
+        "prompt_tokens": 49565,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is PA from mechanical loading relevant to mTORC1 activation independent of insulin?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1192,
+        "prompt_tokens": 49563,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the GDP of Brazil relevant to the Triple mTOR activation thesis?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1196,
+        "prompt_tokens": 49567,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is Metformin AMPK activation relevant to managing Trenbolone-induced insulin resistance?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1217,
+        "prompt_tokens": 49563,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the speed of light relevant to IGF-1 liver production?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1178,
+        "prompt_tokens": 49567,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is mTORC2 phosphorylation of Akt on Ser473 relevant to insulin sensitivity feedback?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1178,
+        "prompt_tokens": 49563,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the recipe for chocolate cake relevant to serine kinase cascades?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1199,
+        "prompt_tokens": 49569,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is COMT Val158Met polymorphism relevant to Trenbolone neuropsychiatric tolerability?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1199,
+        "prompt_tokens": 49563,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the Dewey Decimal System relevant to the Double Bind resolution strategy?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1195,
+        "prompt_tokens": 49564,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is IL-6 pulse vs tonic distinction relevant to exercise-induced insulin sensitivity?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1172,
+        "prompt_tokens": 49563,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the distance from Earth to Mars relevant to androgen receptor binding?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 942,
+        "prompt_tokens": 49566,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is the Push-Pull-Buffer cycle relevant to preventing receptor desensitization?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1062,
+        "prompt_tokens": 49561,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is baseball statistics relevant to the Triple mTOR activation model?"
+      }
+    ],
+    "100K_tokens": [
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 4592,
+        "prompt_tokens": 76112,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is insulin's activation of mTORC1 via PI3K/Akt relevant to muscle hypertrophy protocols?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1641,
+        "prompt_tokens": 76111,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the effect of SSRIs on serotonin reuptake relevant to the insulin-trenbolone interaction?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1170,
+        "prompt_tokens": 76109,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is IRS-1 serine phosphorylation by Trenbolone relevant to understanding insulin resistance?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1116,
+        "prompt_tokens": 76104,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the migration pattern of monarch butterflies relevant to mTOR activation research?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1114,
+        "prompt_tokens": 76110,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is the GH to AMPK to Insulin to mTORC1 sequence relevant to metabolic cycling?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1113,
+        "prompt_tokens": 76103,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is quantum entanglement relevant to the Double Bind metabolic paradox?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1074,
+        "prompt_tokens": 76103,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is BHB HDAC inhibition relevant to bypassing insulin resistance?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1132,
+        "prompt_tokens": 76103,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the history of Renaissance painting relevant to AR Src kinase signaling?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1121,
+        "prompt_tokens": 76106,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is PA from mechanical loading relevant to mTORC1 activation independent of insulin?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1120,
+        "prompt_tokens": 76104,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the GDP of Brazil relevant to the Triple mTOR activation thesis?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1104,
+        "prompt_tokens": 76108,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is Metformin AMPK activation relevant to managing Trenbolone-induced insulin resistance?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1114,
+        "prompt_tokens": 76104,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the speed of light relevant to IGF-1 liver production?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1097,
+        "prompt_tokens": 76108,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is mTORC2 phosphorylation of Akt on Ser473 relevant to insulin sensitivity feedback?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1119,
+        "prompt_tokens": 76104,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the recipe for chocolate cake relevant to serine kinase cascades?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1071,
+        "prompt_tokens": 76110,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is COMT Val158Met polymorphism relevant to Trenbolone neuropsychiatric tolerability?"
+      }
+    ],
+    "120K_tokens": [
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 3592,
+        "prompt_tokens": 91334,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is insulin's activation of mTORC1 via PI3K/Akt relevant to muscle hypertrophy protocols?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1890,
+        "prompt_tokens": 91333,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the effect of SSRIs on serotonin reuptake relevant to the insulin-trenbolone interaction?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1352,
+        "prompt_tokens": 91331,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is IRS-1 serine phosphorylation by Trenbolone relevant to understanding insulin resistance?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1160,
+        "prompt_tokens": 91326,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the migration pattern of monarch butterflies relevant to mTOR activation research?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1161,
+        "prompt_tokens": 91332,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is the GH to AMPK to Insulin to mTORC1 sequence relevant to metabolic cycling?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1126,
+        "prompt_tokens": 91325,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is quantum entanglement relevant to the Double Bind metabolic paradox?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1157,
+        "prompt_tokens": 91325,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is BHB HDAC inhibition relevant to bypassing insulin resistance?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1177,
+        "prompt_tokens": 91325,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the history of Renaissance painting relevant to AR Src kinase signaling?"
+      },
+      {
+        "parsed_answer": "RELEVANT",
+        "latency_ms": 1155,
+        "prompt_tokens": 91328,
+        "completion_tokens": 4,
+        "error": null,
+        "expected": "RELEVANT",
+        "correct": true,
+        "query": "Is PA from mechanical loading relevant to mTORC1 activation independent of insulin?"
+      },
+      {
+        "parsed_answer": "NOT_RELEVANT",
+        "latency_ms": 1169,
+        "prompt_tokens": 91326,
+        "completion_tokens": 5,
+        "error": null,
+        "expected": "NOT_RELEVANT",
+        "correct": true,
+        "query": "Is the GDP of Brazil relevant to the Triple mTOR activation thesis?"
+      }
+    ]
+  }
+}

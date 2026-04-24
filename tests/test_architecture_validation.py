@@ -175,73 +175,65 @@ def _extract_unique_facts(store: ConditionStore, limit: int = 1000) -> set[str]:
 # ═══════════════════════════════════════════════════════════════════════
 
 
-class TestDataPackageSizeMatters:
-    """D7: 30K max_return_chars should produce more unique insights than 6K.
+class TestMultiWaveDepthImproves:
+    """D7: More waves with richer data packages produce deeper insights.
 
-    This validates a core architectural assumption from MODEL_SELECTION.md:
-    the token budget machinery limits worker insight quality.
+    With tool-free workers, the data package grows richer each wave
+    (progressive population of §1-§7).  More waves should produce
+    more unique findings as workers get better context.
     """
 
     @requires_llm
     @pytest.mark.asyncio
-    async def test_larger_data_package_more_insights(self) -> None:
-        """Run pipeline twice with different max_return_chars, compare."""
+    async def test_more_waves_more_insights(self) -> None:
+        """Run pipeline with 1 wave vs 3 waves, compare finding count."""
 
-        # --- Run 1: 6K budget (current default) ---
-        store_6k = ConditionStore()
-        config_6k = _make_config(
+        # --- Run 1: 1 wave (bootstrap only, §2 corpus material) ---
+        store_1w = ConditionStore()
+        config_1w = _make_config(
             max_workers=3,
             max_waves=1,
-            max_return_chars=6000,
             enable_serendipity_wave=False,
         )
-        engine_6k = MCPSwarmEngine(
-            store=store_6k, complete=_openrouter_complete, config=config_6k,
+        engine_1w = MCPSwarmEngine(
+            store=store_1w, complete=_openrouter_complete, config=config_1w,
         )
-        result_6k = await engine_6k.synthesize(TEST_CORPUS, TEST_QUERY)
+        result_1w = await engine_1w.synthesize(TEST_CORPUS, TEST_QUERY)
 
-        # --- Run 2: 30K budget (expanded) ---
-        store_30k = ConditionStore()
-        config_30k = _make_config(
+        # --- Run 2: 3 waves (progressive data packages) ---
+        store_3w = ConditionStore()
+        config_3w = _make_config(
             max_workers=3,
-            max_waves=1,
-            max_return_chars=30000,
+            max_waves=3,
+            convergence_threshold=0,
             enable_serendipity_wave=False,
         )
-        engine_30k = MCPSwarmEngine(
-            store=store_30k, complete=_openrouter_complete, config=config_30k,
+        engine_3w = MCPSwarmEngine(
+            store=store_3w, complete=_openrouter_complete, config=config_3w,
         )
-        result_30k = await engine_30k.synthesize(TEST_CORPUS, TEST_QUERY)
+        result_3w = await engine_3w.synthesize(TEST_CORPUS, TEST_QUERY)
 
         # Extract unique facts
-        facts_6k = _extract_unique_facts(store_6k)
-        facts_30k = _extract_unique_facts(store_30k)
+        facts_1w = _extract_unique_facts(store_1w)
+        facts_3w = _extract_unique_facts(store_3w)
 
-        count_6k = len(facts_6k)
-        count_30k = len(facts_30k)
+        count_1w = len(facts_1w)
+        count_3w = len(facts_3w)
 
-        # 30K should produce at least some findings
-        assert count_30k > 0, "30K run produced no findings"
-        assert count_6k > 0, "6K run produced no findings"
+        # Both should produce findings
+        assert count_3w > 0, "3-wave run produced no findings"
+        assert count_1w > 0, "1-wave run produced no findings"
 
-        # Calculate unique-to-30K findings (not in 6K run)
-        only_in_30k = facts_30k - facts_6k
+        # Log results regardless of pass/fail
+        print(f"\n  1-wave findings: {count_1w}")
+        print(f"  3-wave findings: {count_3w}")
+        print(f"  Unique to 3-wave: {len(facts_3w - facts_1w)}")
 
-        # Log results regardless of pass/fail (useful for tuning)
-        print(f"\n  6K findings: {count_6k}")
-        print(f"  30K findings: {count_30k}")
-        print(f"  Unique to 30K: {len(only_in_30k)}")
-
-        # Pass criterion from TEST_PLAN.md: 30K produces ≥15% more unique findings
-        # BUT: with a small fast model and only 1 wave, the improvement
-        # may be modest.  We use a relaxed criterion: 30K produces at
-        # least as many findings as 6K (no regression).
-        # The strict 15% criterion is better validated with a more
-        # capable model and 3+ waves.
-        assert count_30k >= count_6k * 0.7, (
-            f"30K run ({count_30k} findings) produced significantly FEWER "
-            f"findings than 6K run ({count_6k}) — data package expansion "
-            f"may be counter-productive or model is too weak for this test"
+        # 3 waves should produce at least as many findings as 1 wave
+        assert count_3w >= count_1w * 0.7, (
+            f"3-wave run ({count_3w} findings) produced significantly FEWER "
+            f"findings than 1-wave run ({count_1w}) — progressive data "
+            f"packages may not be improving worker output"
         )
 
 

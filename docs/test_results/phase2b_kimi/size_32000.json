@@ -1,0 +1,78 @@
+{
+  "size_tokens": 32000,
+  "num_trials": 6,
+  "correct": 3,
+  "accuracy": 0.5,
+  "avg_latency_ms": 1171.7,
+  "max_latency_ms": 1875.4,
+  "avg_prompt_tokens": 27444.0,
+  "errors": 0,
+  "trials": [
+    {
+      "size": 32000,
+      "case": "needle@0.1",
+      "expected": true,
+      "predicted": false,
+      "correct": false,
+      "raw": "**ANSWER WITH EXACTLY RELEVANT OR NOT_RELEVANT:**\n\n**RELEV",
+      "latency_ms": 1875.4,
+      "prompt_tokens": 27436,
+      "error": null
+    },
+    {
+      "size": 32000,
+      "case": "needle@0.5",
+      "expected": true,
+      "predicted": false,
+      "correct": false,
+      "raw": "**FUROSEMIDE** IRREVERSIBLY INHIBITS **NA/K/2CL",
+      "latency_ms": 1201.6,
+      "prompt_tokens": 27382,
+      "error": null
+    },
+    {
+      "size": 32000,
+      "case": "needle@0.9",
+      "expected": true,
+      "predicted": false,
+      "correct": false,
+      "raw": "**FUROSEMIDE** IRREVERSIBLY INHIBITS **NA\u207a/K",
+      "latency_ms": 1118.2,
+      "prompt_tokens": 27504,
+      "error": null
+    },
+    {
+      "size": 32000,
+      "case": "no_needle_0",
+      "expected": false,
+      "predicted": false,
+      "correct": true,
+      "raw": ". CIPROFLOXACIN IS A BETA-LACTAM THAT INHIBITS BACTERIAL CEL",
+      "latency_ms": 961.0,
+      "prompt_tokens": 27405,
+      "error": null
+    },
+    {
+      "size": 32000,
+      "case": "no_needle_1",
+      "expected": false,
+      "predicted": false,
+      "correct": true,
+      "raw": "NEVER ASK \"WHAT IS THE DIFFERENCE BETWEEN X AND Y?\" ASK \"WHA",
+      "latency_ms": 938.1,
+      "prompt_tokens": 27423,
+      "error": null
+    },
+    {
+      "size": 32000,
+      "case": "no_needle_2",
+      "expected": false,
+      "predicted": false,
+      "correct": true,
+      "raw": "**FUROSEMIDE** IS A **DIURETIC** THAT **IN",
+      "latency_ms": 936.1,
+      "prompt_tokens": 27512,
+      "error": null
+    }
+  ]
+}

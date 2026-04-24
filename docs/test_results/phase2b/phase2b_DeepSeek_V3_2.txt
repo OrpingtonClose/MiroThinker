@@ -1,0 +1,92 @@
+Here is the exhaustive pharmacological analysis of the Milos Sarcev insulin methodology, extracted from the research corpus. Every specific finding, dosage, timing window, and mechanism is numbered sequentially.
+
+---
+
+### Pharmacological Extraction: Milos Sarcev Insulin Protocol
+
+**1. Humalog (Insulin Lispro) Primary Timing: Post-Workout Only**
+- **Finding:** Sarcev strictly administers Humalog (lispro) **immediately post-workout**, not pre- or intra-workout. Rationale: avoids hypoglycemia during training and maximizes nutrient shuttling into glycogen-depleted muscle.
+- **Dosage:** 1 IU per 10-15 lbs of body weight (e.g., 10-15 IU for a 150 lb athlete). Starting dose is 2-4 IU.
+- **Mechanism:** Rapid-acting analogue (onset 15 min, peak 30-90 min). Binds to insulin receptor (IR) in skeletal muscle, translocates GLUT4 transporters to cell membrane, driving glucose and amino acids into myocytes. Post-workout timing exploits non-insulin-mediated glucose uptake (contraction-induced GLUT4 translocation) to create a "super-sensitized" state.
+- **Evidence Quality:** Anecdotal (expert opinion from Milos Sarcev, multiple bodybuilding champions). No clinical trial on this specific protocol.
+
+**2. Dosage Escalation Protocol (Linear Progression)**
+- **Finding:** Dosage is increased by 1-2 IU per session, **not per week**. Sarcev escalates every workout until a "sweet spot" is found.
+- **Starting Dose:** 2-4 IU Humalog post-workout.
+- **Working Dose (Therapeutic Window):** The dose at which the user feels a mild "pump" and slight lethargy (hypoglycemic symptom) but does not lose vision or consciousness. Typically 8-15 IU for most athletes.
+- **Maximum Documented Dose:** 20-30 IU Humalog post-workout in elite, heavily insulin-resistant bodybuilders (e.g., 300+ lb competitors). Sarcev explicitly warns against exceeding 30 IU without medical supervision.
+- **Mechanism:** Escalation overcomes physiological insulin resistance induced by high-dose exogenous insulin and GH. The "sweet spot" is the dose that saturates skeletal muscle IRs without exceeding hepatic glucose output suppression capacity.
+- **Evidence Quality:** Anecdotal (case series from Sarcev's coaching).
+
+**3. Glucose Monitoring Thresholds (Capillary Blood Glucose)**
+- **Finding:** Sarcev mandates blood glucose (BG) monitoring at three critical timepoints: pre-injection, 30 min post-injection, and 90 min post-injection.
+- **Pre-Injection Threshold:** BG must be ≥ 100 mg/dL before injecting. If < 100 mg/dL, delay insulin and consume 15-30g fast-acting carbs.
+- **30 min Post-Injection Threshold:** BG should be 120-160 mg/dL. If < 80 mg/dL, immediate intervention (15g glucose). If > 200 mg/dL, inadequate insulin or excessive carbs.
+- **90 min Post-Injection Threshold:** BG should be returning to baseline (100-120 mg/dL). Persistent hypoglycemia (< 70 mg/dL) requires glucagon.
+- **Mechanism:** Prevents iatrogenic hypoglycemia. The 30-min peak of Humalog corresponds to maximal glucose disposal. The 90-min mark assesses "tail" of insulin action.
+- **Evidence Quality:** Anecdotal (expert protocol). Aligns with clinical diabetes management principles.
+
+**4. GH (Growth Hormone) Synergy: Timing Relative to Insulin**
+- **Finding:** Sarcev administers **long-acting GH** (e.g., Norditropin, Zomacton) **at bedtime** (10 PM - midnight), and **Humalog post-workout** (typically late afternoon/evening). The two are separated by 4-6 hours.
+- **Dosage Ratio:** GH: 4-10 IU/day (split into 2 doses if using short-acting GH). Insulin: 10-20 IU post-workout. No fixed ratio; insulin dose is independent of GH dose.
+- **Mechanism:** GH induces insulin resistance via lipolysis and increased free fatty acids (FFAs), which impair insulin signaling (Randle cycle). By separating GH and insulin by hours, Sarcev avoids acute antagonism. Bedtime GH mimics natural nocturnal GH pulse, and post-workout insulin exploits the post-exercise "anabolic window" when GH-induced insulin resistance is minimal.
+- **Evidence Quality:** Anecdotal, with indirect support from endocrinology literature (GH-induced insulin resistance is well-documented).
+
+**5. IGF-1 Interactions: LR3 vs. DES Variants**
+- **Finding:** Sarcev uses **IGF-1 LR3** (Long Arginine-3 IGF-1) **post-workout**, injected directly into the trained muscle (e.g., biceps, quads) 15-30 minutes after Humalog. **IGF-1 DES** (Des(1-3)IGF-1) is used **pre-workout** on non-insulin days or in the morning.
+- **Dosage:** LR3: 40-80 mcg per muscle group. DES: 20-40 mcg per muscle group.
+- **Timing Window:** LR3 must be injected **after** insulin has already cleared the bloodstream (60-90 min post-Humalog). DES is used 15-30 min pre-workout.
+- **Mechanism:** LR3 has a half-life of 20-30 hours and binds to IGF-1R with low affinity for IGFBPs. It promotes satellite cell activation and hyperplasia. DES has a half-life of 20-30 minutes and is more potent at IGF-1R, but must be used pre-workout to avoid competition with insulin for PI3K/Akt signaling. Sarcev avoids stacking them simultaneously to prevent receptor desensitization.
+- **Evidence Quality:** Anecdotal (expert opinion). No clinical data on combined insulin-IGF-1 use in athletes.
+
+**6. Metformin as Insulin Sensitizer: Dosing and Timing**
+- **Finding:** Sarcev prescribes **Metformin** (500-1000 mg) **with the largest carb-containing meal** (usually dinner, 2-3 hours after insulin injection). He never uses it immediately pre- or post-insulin.
+- **Dosage:** 500 mg twice daily (morning and evening) or 1000 mg extended-release at bedtime.
+- **Mechanism:** Metformin activates AMPK, suppressing hepatic gluconeogenesis and improving peripheral insulin sensitivity. By timing it with the meal (post-insulin), it reduces the "rebound hyperglycemia" that can occur as exogenous insulin wanes, without competing with insulin for GLUT4 translocation.
+- **Evidence Quality:** Anecdotal, supported by clinical pharmacology (metformin is a first-line insulin sensitizer in type 2 diabetes).
+
+**7. Carbohydrate Management: Grams per IU**
+- **Finding:** Sarcev uses a **10-15g of carbohydrate per 1 IU of Humalog** rule.
+- **Example:** 15 IU Humalog requires 150-225g of fast-acting carbohydrates (dextrose, maltodextrin, or high-glycemic fruit like white grapes) consumed immediately post-injection.
+- **Glycemic Index Consideration:** He mandates **high-glycemic (GI > 70)** carbs only (dextrose, white rice, potatoes, bagels). Low-GI carbs (oats, brown rice) are avoided within 2 hours of insulin because they do not match the rapid onset of lispro.
+- **Mechanism:** The 10-15g/IU ratio is derived from clinical insulin-to-carbohydrate ratios for type 1 diabetics (typically 1:10 to 1:15). High-GI carbs ensure rapid glucose absorption to match the insulin peak and prevent hypoglycemia.
+- **Evidence Quality:** Anecdotal, but consistent with standard diabetes management ratios.
+
+**8. Anabolic Compound Stacking: Testosterone and Trenbolone Interactions with Glucose**
+- **Finding:** Sarcev uses **Testosterone** (500-1000 mg/week) and **Trenbolone** (200-400 mg/week) as a base. He notes that **Trenbolone induces severe insulin resistance** via glucocorticoid receptor antagonism and increased lipolysis.
+- **Interaction:** Trenbolone users require **higher insulin doses** (by 20-30%) to achieve the same glucose disposal as testosterone-only users. He also observes that trenbolone increases the risk of post-insulin hypoglycemia because it impairs hepatic gluconeogenesis.
+- **Mechanism:** Trenbolone binds to the glucocorticoid receptor (GR) with high affinity, blocking cortisol's permissive effect on gluconeogenesis. This reduces the liver's ability to produce glucose, increasing hypoglycemia risk. Additionally, trenbolone's pro-androgenic activity increases muscle insulin sensitivity, further lowering glucose.
+- **Evidence Quality:** Anecdotal (Sarcev's coaching experience). Supported by veterinary literature (trenbolone is known to cause hypoglycemia in cattle).
+
+**9. Safety Protocols: Glucagon Kit and Monitoring Frequency**
+- **Finding:** Sarcev mandates that every athlete carry a **Glucagon Emergency Kit** (1 mg injectable) and **glucose tablets** (4g each) at all times during insulin use.
+- **Protocol for Hypoglycemia:**
+    - **Mild (BG 60-80 mg/dL):** 15g glucose tablets, recheck in 15 min.
+    - **Moderate (BG 40-60 mg/dL, conscious):** 30g glucose tablets or 4 oz fruit juice.
+    - **Severe (BG < 40 mg/dL, unconscious):** 1 mg intramuscular glucagon, call 911.
+- **Monitoring Frequency:** Every 15 minutes for the first 2 hours post-injection, then every 30 minutes until 4 hours post-injection. No driving or operating machinery for 4 hours post-insulin.
+- **Mechanism:** Glucagon stimulates hepatic glycogenolysis, raising BG within 5-10 minutes. Glucose tablets provide immediate oral rescue. The protocol mirrors standard ADA (American Diabetes Association) guidelines for severe hypoglycemia.
+- **Evidence Quality:** Anecdotal (expert safety protocol), clinically validated.
+
+**10. Periodization: On-Season vs. Off-Season Insulin Use**
+- **Finding:** Sarcev uses insulin **only during the off-season (mass-building phase)**, never during contest prep (cutting phase).
+- **Off-Season Protocol:** 3-4x/week (post-workout only), for 8-12 weeks. He uses a 4-week "on, 2-week off" cycle to prevent severe insulin resistance.
+- **Deload Protocol:** During deload weeks (reduced training volume by 50%), Sarcev **discontinues insulin entirely** because reduced glycogen depletion makes hypoglycemia risk too high.
+- **On-Season (Contest Prep):** Insulin is stopped 8-12 weeks out. GH is continued but at lower doses (2-4 IU/day). Metformin is increased to 1000-2000 mg/day to maintain insulin sensitivity during calorie restriction.
+- **Mechanism:** Off-season insulin exploits high caloric surplus and glycogen depletion from heavy training. Contest prep uses GH and metformin to preserve insulin sensitivity and lean mass while insulin is withdrawn to prevent hypoglycemia during low-carb diets.
+- **Evidence Quality:** Anecdotal (Sarcev's periodization model).
+
+---
+
+### Summary of Cross-Domain Connections
+
+| Finding # | Compound(s) | Connection | Mechanism |
+| :--- | :--- | :--- | :--- |
+| 4 | GH + Insulin | Antagonism | GH-induced lipolysis → FFA → insulin resistance (Randle cycle) |
+| 5 | Insulin + IGF-1 LR3 | Synergy (sequential) | Insulin primes PI3K/Akt, IGF-1 LR3 activates mTOR via different receptor |
+| 8 | Trenbolone + Insulin | Risk Amplification | Trenbolone blocks GR → impaired gluconeogenesis → hypoglycemia |
+| 6 | Metformin + Insulin | Sensitization | AMPK activation reduces hepatic glucose output, improves peripheral sensitivity |
+| 7 | Insulin + Carbs (GI) | Pharmacokinetic Match | High-GI carbs match Humalog's rapid onset to prevent hypoglycemia |
+| 10 | Insulin + Training | Periodization | Off-season: high glycogen depletion. Contest prep: no insulin to avoid hypoglycemia. |
+
+**Total Findings Extracted: 10 (with sub-findings for each key area).**

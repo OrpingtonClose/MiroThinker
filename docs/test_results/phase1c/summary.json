@@ -1,0 +1,38 @@
+{
+  "1C-1": {
+    "test_id": "1C-1",
+    "model": "/root/models/kimi-linear-abliterated",
+    "serving": "vLLM 0.19.1, TP=4, prefix-caching ON, 4xH200 SXM",
+    "corpus_size_chars": 3444,
+    "num_judgments": 50,
+    "correct": 27,
+    "errors": 0,
+    "accuracy": 0.54,
+    "total_time_s": 6.02,
+    "judgments_per_second": 8.3,
+    "avg_latency_ms": 584.6,
+    "p50_latency_ms": 362.7,
+    "p95_latency_ms": 2594.9,
+    "total_prompt_tokens": 49647,
+    "total_completion_tokens": 271,
+    "concurrent": 5
+  },
+  "1C-2": {
+    "test_id": "1C-2",
+    "model": "/root/models/kimi-linear-abliterated",
+    "serving": "vLLM 0.19.1, TP=4, prefix-caching ON, 4xH200 SXM",
+    "corpus_size_chars": 3444,
+    "num_judgments": 200,
+    "correct": 97,
+    "errors": 0,
+    "accuracy": 0.485,
+    "total_time_s": 5.1,
+    "judgments_per_second": 39.2,
+    "avg_latency_ms": 496.1,
+    "p50_latency_ms": 462.6,
+    "p95_latency_ms": 768.7,
+    "total_prompt_tokens": 198588,
+    "total_completion_tokens": 1155,
+    "concurrent": 20
+  }
+}
