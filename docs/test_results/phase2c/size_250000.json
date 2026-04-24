@@ -1,0 +1,78 @@
+{
+  "size_tokens": 250000,
+  "num_trials": 6,
+  "correct": 6,
+  "accuracy": 1.0,
+  "avg_latency_ms": 32589.2,
+  "max_latency_ms": 41281.9,
+  "avg_prompt_tokens": 221958.0,
+  "errors": 0,
+  "trials": [
+    {
+      "size": 250000,
+      "case": "needle@0.1",
+      "expected": true,
+      "predicted": true,
+      "correct": true,
+      "raw": "RELEVANT",
+      "latency_ms": 41281.9,
+      "prompt_tokens": 222110,
+      "error": null
+    },
+    {
+      "size": 250000,
+      "case": "needle@0.5",
+      "expected": true,
+      "predicted": true,
+      "correct": true,
+      "raw": "RELEVANT",
+      "latency_ms": 37219.9,
+      "prompt_tokens": 221458,
+      "error": null
+    },
+    {
+      "size": 250000,
+      "case": "needle@0.9",
+      "expected": true,
+      "predicted": true,
+      "correct": true,
+      "raw": "RELEVANT",
+      "latency_ms": 30700.3,
+      "prompt_tokens": 221953,
+      "error": null
+    },
+    {
+      "size": 250000,
+      "case": "no_needle_0",
+      "expected": false,
+      "predicted": false,
+      "correct": true,
+      "raw": "NOT_RELEVANT",
+      "latency_ms": 29217.5,
+      "prompt_tokens": 221963,
+      "error": null
+    },
+    {
+      "size": 250000,
+      "case": "no_needle_1",
+      "expected": false,
+      "predicted": false,
+      "correct": true,
+      "raw": "NOT_RELEVANT",
+      "latency_ms": 28466.8,
+      "prompt_tokens": 222177,
+      "error": null
+    },
+    {
+      "size": 250000,
+      "case": "no_needle_2",
+      "expected": false,
+      "predicted": false,
+      "correct": true,
+      "raw": "NOT_RELEVANT",
+      "latency_ms": 28649.1,
+      "prompt_tokens": 222090,
+      "error": null
+    }
+  ]
+}
