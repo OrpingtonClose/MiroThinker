@@ -60,6 +60,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from swarm.backend import BackendConfig, RiskAwareBackend
+
 if TYPE_CHECKING:
     from corpus import ConditionStore
 
@@ -772,6 +774,7 @@ class FlockQueryManagerConfig:
     enable_challenge: bool = True
     query_relevance_boost: float = 2.0
     serendipity_floor: float = 0.4
+    backend_config: BackendConfig | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1758,10 +1761,27 @@ class FlockQueryManager:
         mcp_research_fn: Callable[[str], Awaitable[int]] | None = None,
     ) -> None:
         self.store = store
-        self.complete = complete
         self.config = config or FlockQueryManagerConfig()
         self._complete_for_clone = complete_for_clone
         self._mcp_research_fn = mcp_research_fn
+
+        # Wrap the complete function with risk-aware protection if a
+        # backend config is provided.  The wrapper is a drop-in
+        # CompleteFn — rate limiting, caching, retries, and fallback
+        # are transparent to the rest of the pipeline.
+        self._backend: RiskAwareBackend | None = None
+        if self.config.backend_config is not None:
+            from swarm.backend import wrap_complete
+
+            self._backend = wrap_complete(complete, self.config.backend_config)
+            self.complete = self._backend
+            logger.info(
+                "backend=<%s>, tier=<%s> | flock using risk-aware backend",
+                self.config.backend_config.name,
+                self.config.backend_config.risk_tier.value,
+            )
+        else:
+            self.complete = complete
 
     async def run(
         self,
@@ -2030,6 +2050,26 @@ class FlockQueryManager:
             result.total_new_findings, result.wasted_bridge_queries,
             result.elapsed_s, result.convergence_reason,
         )
+
+        # Emit backend telemetry if using a risk-aware backend
+        if self._backend is not None:
+            backend_summary = self._backend.summary()
+            logger.info(
+                "backend=<%s>, tier=<%s>, calls=<%d>, cache_hits=<%d>, "
+                "cache_rate=<%.1f%%>, failures=<%d>, throttles=<%d> | "
+                "backend metrics",
+                backend_summary["backend"],
+                backend_summary["risk_tier"],
+                backend_summary["total_calls"],
+                backend_summary["cache_hits"],
+                backend_summary["cache_hit_rate"] * 100,
+                backend_summary["failures"],
+                backend_summary["throttle_events"],
+            )
+            await _emit({
+                "type": "flock_backend_metrics",
+                **backend_summary,
+            })
 
         return result
 

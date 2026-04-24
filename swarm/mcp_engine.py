@@ -60,6 +60,7 @@ from swarm.angles import (
     extract_required_angles,
     merge_angles,
 )
+from swarm.backend import BackendConfig
 
 if TYPE_CHECKING:
     from corpus import ConditionStore
@@ -124,6 +125,12 @@ class MCPSwarmConfig:
         enable_mcp_research: Run MCP-powered external data acquisition
             between waves.  Uses gradient flags to identify gaps and
             fans out across available search APIs.
+        flock_backend_config: Optional backend risk configuration for the
+            Flock evaluation phase.  When provided, the FlockQueryManager
+            wraps its completion function with risk-aware protection
+            (rate limiting, caching, retries, fallback).  Use this to
+            point the Flock at a remote API (e.g. OpenRouter free tier)
+            while the worker phase uses local vLLM.
     """
 
     max_workers: int = 7
@@ -149,6 +156,7 @@ class MCPSwarmConfig:
     flock_max_queries_per_round: int = 500
     flock_batch_size: int = 20
     enable_mcp_research: bool = True
+    flock_backend_config: BackendConfig | None = None
 
 
 class MCPSwarmEngine:
@@ -608,6 +616,7 @@ class MCPSwarmEngine:
                         max_rounds=config.flock_max_rounds,
                         max_queries_per_round=config.flock_max_queries_per_round,
                         batch_size=config.flock_batch_size,
+                        backend_config=config.flock_backend_config,
                     )
 
                     # Wire interleaved MCP research into the Flock loop
