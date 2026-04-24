@@ -1394,6 +1394,7 @@ def _gather_aggregate_state(
                 "WHERE consider_for_use = TRUE "
                 "AND expansion_gap != '' "
                 "AND expansion_fulfilled = FALSE "
+                "AND row_type != 'research_target' "
                 "ORDER BY expansion_priority DESC "
                 "LIMIT ?",
                 [max_gaps],

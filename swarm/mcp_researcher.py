@@ -209,6 +209,7 @@ def select_research_targets(
                 "WHERE consider_for_use = TRUE "
                 "AND expansion_gap != '' "
                 "AND expansion_fulfilled = FALSE "
+                "AND row_type != 'research_target' "
                 "AND expansion_priority > ? "
                 "ORDER BY expansion_priority DESC "
                 "LIMIT ?",
