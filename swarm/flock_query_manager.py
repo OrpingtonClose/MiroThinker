@@ -957,6 +957,7 @@ class FlockQueryManager:
         """
         t0 = time.monotonic()
         result = FlockSwarmResult()
+        store = self.store
 
         async def _emit(event: dict) -> None:
             if on_event:
@@ -964,6 +965,29 @@ class FlockQueryManager:
                     await on_event(event)
                 except Exception:
                     pass
+
+        # Bootstrap: promote unscored findings so query filters can match.
+        # ConditionStore defaults score_version to 0 and only
+        # _apply_score_delta increments it — but _apply_score_delta is
+        # only reachable AFTER queries are selected.  Without this step
+        # all queries require score_version > 0 and nothing ever matches.
+        try:
+            lock = _get_store_lock(store)
+            with lock:
+                bootstrapped = store.conn.execute(
+                    "UPDATE conditions "
+                    "SET score_version = 1 "
+                    "WHERE score_version = 0 "
+                    "AND row_type = 'finding' "
+                    "AND consider_for_use = TRUE"
+                ).rowcount
+            if bootstrapped:
+                logger.info(
+                    "bootstrapped=<%d> | promoted unscored findings to score_version=1",
+                    bootstrapped,
+                )
+        except Exception as exc:
+            logger.warning("error=<%s> | bootstrap scoring failed", exc)
 
         for round_num in range(1, self.config.max_rounds + 1):
             round_start = time.monotonic()
