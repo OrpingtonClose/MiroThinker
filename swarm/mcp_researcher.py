@@ -159,6 +159,8 @@ def select_research_targets(
     2. Unfulfilled expansion gaps → workers explicitly asked for data
     3. Low specificity + high relevance → need concrete enrichment
     4. Low trust_score + high actionability → need better sources
+    5. Stuck conditions → evaluated 3+ times with <0.1 information_gain
+    6. Cross-angle bridge → high-relevance pairs from different angles
 
     Args:
         store: The ConditionStore.
@@ -169,7 +171,7 @@ def select_research_targets(
         Sorted list of ResearchTargets, highest priority first.
     """
     targets: list[ResearchTarget] = []
-    max_per_type = config.max_targets // 4
+    max_per_type = config.max_targets // 6
     lock = _get_store_lock(store)
 
     # --- Type 1: High fabrication risk → verify against authoritative sources ---

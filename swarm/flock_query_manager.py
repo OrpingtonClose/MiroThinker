@@ -520,7 +520,7 @@ def select_queries(
     try:
         with lock:
             validate_rows = store.conn.execute(
-                "SELECT id, fact, novelty_score, confidence, angle "
+                "SELECT id, fact, novelty_score, confidence, angle, evaluation_count "
                 "FROM conditions "
                 "WHERE consider_for_use = TRUE "
                 "AND row_type = 'finding' "
@@ -531,7 +531,7 @@ def select_queries(
                 "LIMIT ?",
                 [_limit_for("validate")],
             ).fetchall()
-        for cid, fact, novelty, conf, angle in validate_rows:
+        for cid, fact, novelty, conf, angle, eval_count in validate_rows:
             priority = (novelty - conf) * 1.5
             queries.append(FlockQuery(
                 query_type=QueryType.VALIDATE,
@@ -539,7 +539,7 @@ def select_queries(
                 target_condition_ids=[cid],
                 source_angle=clone_angle,
                 priority=priority,
-                metadata={"original_angle": angle, "novelty": novelty, "confidence": conf},
+                metadata={"original_angle": angle, "novelty": novelty, "confidence": conf, "evaluation_count": eval_count},
             ))
     except Exception as exc:
         logger.warning("error=<%s> | VALIDATE query selection failed", exc)
@@ -549,7 +549,7 @@ def select_queries(
         with lock:
             contra_rows = store.conn.execute(
                 "SELECT c.id, c.fact, c.angle, c.confidence, "
-                "       c.contradiction_partner, c2.fact, c2.angle "
+                "       c.contradiction_partner, c2.fact, c2.angle, c.evaluation_count "
                 "FROM conditions c "
                 "LEFT JOIN conditions c2 ON c.contradiction_partner = c2.id "
                 "WHERE c.consider_for_use = TRUE "
@@ -560,7 +560,7 @@ def select_queries(
                 "LIMIT ?",
                 [_limit_for("adjudicate")],
             ).fetchall()
-        for cid, fact, angle, conf, partner_id, partner_fact, partner_angle in contra_rows:
+        for cid, fact, angle, conf, partner_id, partner_fact, partner_angle, eval_count in contra_rows:
             if partner_fact is None:
                 continue
             priority = 0.8 * config.contradiction_boost
@@ -572,7 +572,7 @@ def select_queries(
                 target_condition_ids=[cid, partner_id],
                 source_angle=clone_angle,
                 priority=priority,
-                metadata={"side_a_angle": angle, "side_b_angle": partner_angle},
+                metadata={"side_a_angle": angle, "side_b_angle": partner_angle, "evaluation_count": eval_count},
             ))
     except Exception as exc:
         logger.warning("error=<%s> | ADJUDICATE query selection failed", exc)
@@ -581,7 +581,7 @@ def select_queries(
     try:
         with lock:
             verify_rows = store.conn.execute(
-                "SELECT id, fact, fabrication_risk, angle, source_url "
+                "SELECT id, fact, fabrication_risk, angle, source_url, evaluation_count "
                 "FROM conditions "
                 "WHERE consider_for_use = TRUE "
                 "AND row_type = 'finding' "
@@ -591,7 +591,7 @@ def select_queries(
                 "LIMIT ?",
                 [config.fabrication_risk_floor, _limit_for("verify")],
             ).fetchall()
-        for cid, fact, fab_risk, angle, source_url in verify_rows:
+        for cid, fact, fab_risk, angle, source_url, eval_count in verify_rows:
             priority = fab_risk * 1.2
             queries.append(FlockQuery(
                 query_type=QueryType.VERIFY,
@@ -599,7 +599,7 @@ def select_queries(
                 target_condition_ids=[cid],
                 source_angle=clone_angle,
                 priority=priority,
-                metadata={"fabrication_risk": fab_risk, "original_angle": angle},
+                metadata={"fabrication_risk": fab_risk, "original_angle": angle, "evaluation_count": eval_count},
             ))
     except Exception as exc:
         logger.warning("error=<%s> | VERIFY query selection failed", exc)
@@ -608,7 +608,7 @@ def select_queries(
     try:
         with lock:
             enrich_rows = store.conn.execute(
-                "SELECT id, fact, specificity_score, relevance_score, angle "
+                "SELECT id, fact, specificity_score, relevance_score, angle, evaluation_count "
                 "FROM conditions "
                 "WHERE consider_for_use = TRUE "
                 "AND row_type = 'finding' "
@@ -619,7 +619,7 @@ def select_queries(
                 "LIMIT ?",
                 [config.specificity_ceiling, _limit_for("enrich")],
             ).fetchall()
-        for cid, fact, spec, rel, angle in enrich_rows:
+        for cid, fact, spec, rel, angle, eval_count in enrich_rows:
             priority = (rel - spec) * 1.0
             queries.append(FlockQuery(
                 query_type=QueryType.ENRICH,
@@ -627,7 +627,7 @@ def select_queries(
                 target_condition_ids=[cid],
                 source_angle=clone_angle,
                 priority=priority,
-                metadata={"specificity": spec, "relevance": rel, "original_angle": angle},
+                metadata={"specificity": spec, "relevance": rel, "original_angle": angle, "evaluation_count": eval_count},
             ))
     except Exception as exc:
         logger.warning("error=<%s> | ENRICH query selection failed", exc)
@@ -636,7 +636,7 @@ def select_queries(
     try:
         with lock:
             ground_rows = store.conn.execute(
-                "SELECT id, fact, actionability_score, angle "
+                "SELECT id, fact, actionability_score, angle, evaluation_count "
                 "FROM conditions "
                 "WHERE consider_for_use = TRUE "
                 "AND row_type = 'finding' "
@@ -647,7 +647,7 @@ def select_queries(
                 "LIMIT ?",
                 [_limit_for("ground")],
             ).fetchall()
-        for cid, fact, action_score, angle in ground_rows:
+        for cid, fact, action_score, angle, eval_count in ground_rows:
             priority = action_score * 0.9
             queries.append(FlockQuery(
                 query_type=QueryType.GROUND,
@@ -655,7 +655,7 @@ def select_queries(
                 target_condition_ids=[cid],
                 source_angle=clone_angle,
                 priority=priority,
-                metadata={"actionability": action_score, "original_angle": angle},
+                metadata={"actionability": action_score, "original_angle": angle, "evaluation_count": eval_count},
             ))
     except Exception as exc:
         logger.warning("error=<%s> | GROUND query selection failed", exc)
@@ -664,7 +664,7 @@ def select_queries(
     try:
         with lock:
             bridge_rows = store.conn.execute(
-                "SELECT id, fact, angle, relevance_score, novelty_score "
+                "SELECT id, fact, angle, relevance_score, novelty_score, evaluation_count "
                 "FROM conditions "
                 "WHERE consider_for_use = TRUE "
                 "AND row_type = 'finding' "
@@ -676,7 +676,7 @@ def select_queries(
                 [clone_angle, config.cross_angle_min_relevance,
                  _limit_for("bridge")],
             ).fetchall()
-        for cid, fact, angle, rel, nov in bridge_rows:
+        for cid, fact, angle, rel, nov, eval_count in bridge_rows:
             priority = nov * rel * 1.3
             queries.append(FlockQuery(
                 query_type=QueryType.BRIDGE,
@@ -684,7 +684,7 @@ def select_queries(
                 target_condition_ids=[cid],
                 source_angle=clone_angle,
                 priority=priority,
-                metadata={"from_angle": angle, "relevance": rel, "novelty": nov},
+                metadata={"from_angle": angle, "relevance": rel, "novelty": nov, "evaluation_count": eval_count},
             ))
     except Exception as exc:
         logger.warning("error=<%s> | BRIDGE query selection failed", exc)
