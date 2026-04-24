@@ -61,6 +61,7 @@ from swarm.angles import (
     merge_angles,
 )
 from swarm.backend import BackendConfig
+from swarm.config import CompleteFn
 
 if TYPE_CHECKING:
     from corpus import ConditionStore
@@ -131,6 +132,12 @@ class MCPSwarmConfig:
             (rate limiting, caching, retries, fallback).  Use this to
             point the Flock at a remote API (e.g. OpenRouter free tier)
             while the worker phase uses local vLLM.
+        flock_complete: Optional completion function for the Flock phase.
+            When provided, the FlockQueryManager uses this instead of the
+            engine's default ``complete`` function.  This is the actual
+            callable that targets the remote API — ``flock_backend_config``
+            provides only the risk-tier metadata (rate limits, caching,
+            retries).  Both must be set together for remote Flock backends.
     """
 
     max_workers: int = 7
@@ -157,6 +164,7 @@ class MCPSwarmConfig:
     flock_batch_size: int = 20
     enable_mcp_research: bool = True
     flock_backend_config: BackendConfig | None = None
+    flock_complete: CompleteFn | None = None
 
 
 class MCPSwarmEngine:
@@ -635,9 +643,14 @@ class MCPSwarmEngine:
 
                         mcp_research_fn = _interleaved_research
 
+                    # Use the dedicated Flock completion function when
+                    # provided — this is the actual callable targeting the
+                    # remote API.  Falls back to the engine's default.
+                    flock_complete_fn = config.flock_complete or self.complete
+
                     flock_manager = FlockQueryManager(
                         store=self.store,
-                        complete=self.complete,
+                        complete=flock_complete_fn,
                         config=flock_config,
                         mcp_research_fn=mcp_research_fn,
                     )

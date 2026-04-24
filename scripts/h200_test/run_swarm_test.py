@@ -689,6 +689,7 @@ def main() -> None:
             enable_rolling_summaries=not args.no_rolling_summaries,
             report_max_chars=args.report_max_chars,
             flock_backend_config=flock_backend_config,
+            flock_complete=_flock_fn,
         )
 
         # The MCP engine needs a simple completion function for

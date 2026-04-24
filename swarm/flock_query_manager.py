@@ -1372,7 +1372,7 @@ def _gather_aggregate_state(
         with lock:
             # Top findings by information_gain — what the swarm values most
             top_rows = store.conn.execute(
-                "SELECT id, fact, angle, information_gain, confidence, novelty "
+                "SELECT id, fact, angle, information_gain, confidence, novelty_score "
                 "FROM conditions "
                 "WHERE consider_for_use = TRUE "
                 "AND row_type = 'finding' "
