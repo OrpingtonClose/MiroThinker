@@ -867,8 +867,8 @@ def store_evaluation(
                 """INSERT INTO conditions
                    (id, fact, source_type, row_type,
                     consider_for_use, angle, confidence,
-                    created_at, phase, parent_ids)
-                   VALUES (?, ?, ?, ?, TRUE, ?, ?, ?, 'flock_discovery', ?)""",
+                    created_at, phase, parent_ids, score_version)
+                   VALUES (?, ?, ?, ?, TRUE, ?, ?, ?, 'flock_discovery', ?, 1)""",
                 [
                     fid,
                     finding["fact"],
