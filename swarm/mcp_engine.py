@@ -874,8 +874,9 @@ class MCPSwarmEngine:
         Prioritizes worker-generated insights over raw corpus paragraphs.
         """
         max_chars = self.config.report_max_chars
-        # Reserve space for the prompt framing
-        framing_budget = 800
+        # Reserve space for the prompt framing (anti-hallucination + confidence
+        # tiers + expanded instructions ≈ 1700 chars; pad to 2000 for safety)
+        framing_budget = 2000
         findings_budget = max_chars - framing_budget
 
         # Gather top findings per angle, preferring worker analysis
