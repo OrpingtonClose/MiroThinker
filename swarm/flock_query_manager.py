@@ -1174,31 +1174,12 @@ def select_queries(
 # Prompt builders — short, focused evaluation prompts
 # ---------------------------------------------------------------------------
 
-def _research_frame(research_query: str) -> str:
-    """Build the research-question framing block for evaluation prompts.
-
-    Every prompt gets this preamble so the model evaluates with respect
-    to the user's research objective.  When no query is set the block
-    is empty — backward compatible.
-    """
-    if not research_query:
-        return ""
-    return (
-        f"RESEARCH OBJECTIVE (primary relevance signal):\n"
-        f'"{research_query}"\n'
-        f"All evaluation below must converge toward answering this question.\n"
-        f"Prioritise findings that advance, refine, or challenge the objective.\n"
-        f"Cross-domain connections are welcome when they illuminate the objective "
-        f"from an unexpected angle.\n\n"
-    )
-
 
 def _build_validate_prompt(
     fact: str, origin_angle: str, evaluator_angle: str,
     research_query: str = "",
 ) -> str:
     return (
-        f"{_research_frame(research_query)}"
         f"EVALUATE from your {evaluator_angle} expertise.\n"
         f"A researcher studying {origin_angle} claims:\n"
         f'"{fact}"\n\n'
@@ -1217,7 +1198,6 @@ def _build_adjudicate_prompt(
     research_query: str = "",
 ) -> str:
     return (
-        f"{_research_frame(research_query)}"
         f"ADJUDICATE from your {evaluator_angle} expertise.\n"
         f"Two findings contradict each other:\n\n"
         f"SIDE A ({angle_a}):\n\"{fact_a}\"\n\n"
@@ -1237,7 +1217,6 @@ def _build_verify_prompt(
 ) -> str:
     source_text = source_url if source_url else "(no source cited)"
     return (
-        f"{_research_frame(research_query)}"
         f"VERIFY from your {evaluator_angle} expertise.\n"
         f"This finding has been flagged as potentially fabricated:\n"
         f'"{fact}"\n'
@@ -1254,7 +1233,6 @@ def _build_enrich_prompt(
     research_query: str = "",
 ) -> str:
     return (
-        f"{_research_frame(research_query)}"
         f"ENRICH from your {evaluator_angle} expertise.\n"
         f"This finding from {origin_angle} is relevant but lacks specifics:\n"
         f'"{fact}"\n\n'
@@ -1272,7 +1250,6 @@ def _build_ground_prompt(
     research_query: str = "",
 ) -> str:
     return (
-        f"{_research_frame(research_query)}"
         f"GROUND from your {evaluator_angle} expertise.\n"
         f"This actionable finding needs evidence grounding:\n"
         f'"{fact}"\n\n'
@@ -1290,7 +1267,6 @@ def _build_bridge_prompt(
     research_query: str = "",
 ) -> str:
     return (
-        f"{_research_frame(research_query)}"
         f"BRIDGE from your {evaluator_angle} expertise.\n"
         f"This finding comes from {origin_angle}:\n"
         f'"{fact}"\n\n'
@@ -1313,7 +1289,6 @@ def _build_synthesize_prompt(
         f"  [{a}] {f}" for f, a in zip(facts, angles)
     )
     return (
-        f"{_research_frame(research_query)}"
         f"SYNTHESIZE from your {evaluator_angle} expertise.\n"
         f"These related findings span multiple angles:\n"
         f"{findings_block}\n\n"
@@ -1332,7 +1307,6 @@ def _build_challenge_prompt(
     research_query: str = "",
 ) -> str:
     return (
-        f"{_research_frame(research_query)}"
         f"CHALLENGE from your {evaluator_angle} expertise.\n"
         f"This high-confidence finding from {origin_angle} needs stress-testing:\n"
         f'"{fact}"\n\n'
@@ -2087,8 +2061,12 @@ class FlockQueryManager:
         research_line = ""
         if self.config.research_query:
             research_line = (
-                f"RESEARCH OBJECTIVE: \"{self.config.research_query}\"\n"
-                f"All evaluations must converge toward this objective.\n\n"
+                f"RESEARCH OBJECTIVE (primary relevance signal):\n"
+                f"\"{self.config.research_query}\"\n"
+                f"All evaluations must converge toward answering this question.\n"
+                f"Prioritise findings that advance, refine, or challenge the objective.\n"
+                f"Cross-domain connections are welcome when they illuminate the "
+                f"objective from an unexpected angle.\n\n"
             )
         prefix = (
             f"{research_line}"
