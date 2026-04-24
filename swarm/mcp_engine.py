@@ -308,10 +308,6 @@ class MCPSwarmEngine:
         )
 
         # ── Phase 1-N: Worker waves ──────────────────────────────────
-        # Accumulate worker outputs per angle across waves.
-        # Used by Flock evaluation phase to build clone contexts.
-        prior_outputs: dict[str, str] = {}
-
         wave = 0
         for wave in range(1, config.max_waves + 1):
             phase_start = time.monotonic()
@@ -390,15 +386,6 @@ class MCPSwarmEngine:
                 if isinstance(r, dict):
                     metrics.worker_results.append(r)
                     wave_tool_calls += r.get("tool_calls", 0)
-                    # Accumulate worker output for Flock clone contexts.
-                    # Each wave's response is appended so the clone holds
-                    # the full reasoning chain across all waves.
-                    angle_key = r.get("angle", "")
-                    response_text = r.get("response", "")
-                    if angle_key and response_text:
-                        prior_outputs[angle_key] = (
-                            prior_outputs.get(angle_key, "") + "\n" + response_text
-                        ).strip()
 
             metrics.total_tool_calls += wave_tool_calls
 
@@ -579,10 +566,12 @@ class MCPSwarmEngine:
             })
 
         # ── Flock evaluation phase ────────────────────────────────────
-        # Mass flag-driven queries against cached clone perspectives.
-        # Each worker's accumulated reasoning becomes a clone context.
+        # Mass flag-driven queries against clone perspectives built from
+        # the store's emergent angle distribution.  Clones are NOT the
+        # pre-assigned worker angles — they're the perspectives that
+        # actually accumulated the most findings through worker reasoning.
         # Thousands of queries simulate an incredibly large swarm.
-        if config.enable_flock_evaluation and prior_outputs:
+        if config.enable_flock_evaluation:
             phase_start = time.monotonic()
             await _emit({
                 "type": "swarm_phase",
@@ -591,34 +580,57 @@ class MCPSwarmEngine:
 
             try:
                 from swarm.flock_query_manager import (
-                    CloneContext,
                     FlockQueryManager,
                     FlockQueryManagerConfig,
+                    bootstrap_score_version,
+                    select_flock_clones,
                 )
 
-                # Build clone contexts from worker transcripts
-                clones = [
-                    CloneContext(
-                        angle=angle,
-                        context_summary=output,
-                        context_tokens=len(output) // 3,
-                        wave=wave,
-                        worker_id=f"clone_{angle}",
-                    )
-                    for angle, output in prior_outputs.items()
-                    if output
-                ]
+                # Bootstrap score_version BEFORE clone selection — findings
+                # default to score_version=0 and all flag-based queries
+                # require score_version > 0.  Without this step,
+                # select_flock_clones finds zero angles.
+                bootstrap_score_version(self.store)
+
+                # Build clone contexts from STORE STATE, not pre-assigned
+                # worker angles.  select_flock_clones queries the store for
+                # the top-N most represented angles by finding count — these
+                # are the perspectives that actually emerged from the swarm's
+                # reasoning, not the ones we prescribed.
+                clones = select_flock_clones(
+                    self.store,
+                    max_clones=config.max_workers,
+                )
 
                 if clones:
                     flock_config = FlockQueryManagerConfig(
+                        research_query=query,
                         max_rounds=config.flock_max_rounds,
                         max_queries_per_round=config.flock_max_queries_per_round,
                         batch_size=config.flock_batch_size,
                     )
+
+                    # Wire interleaved MCP research into the Flock loop
+                    # so external data is acquired between evaluation rounds
+                    mcp_research_fn = None
+                    if config.enable_mcp_research:
+                        from swarm.mcp_researcher import run_mcp_research_round
+
+                        async def _interleaved_research(rid: str) -> int:
+                            result = await run_mcp_research_round(
+                                store=self.store,
+                                run_id=rid,
+                                complete=self.complete,
+                            )
+                            return result.findings_stored
+
+                        mcp_research_fn = _interleaved_research
+
                     flock_manager = FlockQueryManager(
                         store=self.store,
                         complete=self.complete,
                         config=flock_config,
+                        mcp_research_fn=mcp_research_fn,
                     )
                     flock_result = await flock_manager.run(
                         clones=clones,
@@ -643,6 +655,7 @@ class MCPSwarmEngine:
                         "total_queries": flock_result.total_queries,
                         "total_evaluations": flock_result.total_evaluations,
                         "total_new_findings": flock_result.total_new_findings,
+                        "wasted_bridge_queries": flock_result.wasted_bridge_queries,
                         "convergence_reason": flock_result.convergence_reason,
                         "elapsed_s": round(flock_result.elapsed_s, 1),
                     })

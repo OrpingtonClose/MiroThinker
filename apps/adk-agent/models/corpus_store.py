@@ -289,7 +289,14 @@ class CorpusStore:
 
                 -- Swarm lineage (unified with LineageStore)
                 phase TEXT DEFAULT '',
-                parent_ids TEXT DEFAULT ''
+                parent_ids TEXT DEFAULT '',
+
+                -- Flock evaluation tracking
+                evaluation_count INTEGER DEFAULT 0,
+                last_evaluated_at TEXT DEFAULT '',
+                evaluator_angles TEXT DEFAULT '',
+                mcp_research_status TEXT DEFAULT '',
+                information_gain FLOAT DEFAULT 0.0
             )
         """)
 
@@ -299,6 +306,7 @@ class CorpusStore:
         # Ensure lineage columns exist on databases created before the
         # swarm/lineage unification.  Idempotent.
         self._ensure_lineage_columns()
+        self._ensure_flock_tracking_columns()
 
     def _migrate_from_v1(self) -> None:
         """Migrate from v1 schema (satellite tables) to single-table architecture.
@@ -485,6 +493,23 @@ class CorpusStore:
             except Exception:
                 # Duplicate-column errors are expected when the column
                 # was created by _setup_tables() on a fresh database.
+                pass
+
+    def _ensure_flock_tracking_columns(self) -> None:
+        """Backfill Flock evaluation tracking columns on pre-existing databases."""
+        for col, typedef in (
+            ("evaluation_count", "INTEGER DEFAULT 0"),
+            ("last_evaluated_at", "TEXT DEFAULT ''"),
+            ("evaluator_angles", "TEXT DEFAULT ''"),
+            ("mcp_research_status", "TEXT DEFAULT ''"),
+            ("information_gain", "FLOAT DEFAULT 0.0"),
+        ):
+            try:
+                self.conn.execute(
+                    f"ALTER TABLE conditions ADD COLUMN IF NOT EXISTS "
+                    f"{col} {typedef}"
+                )
+            except Exception:
                 pass
 
     # ------------------------------------------------------------------

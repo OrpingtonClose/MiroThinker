@@ -40,6 +40,9 @@ from swarm.flock_query_manager import (
     FlockQueryManagerConfig,
     FlockSwarmResult,
     QueryType,
+    compute_priority_decay,
+    compute_query_budget,
+    update_evaluation_tracking,
 )
 from swarm.lineage import InMemoryLineageStore, LineageEntry, LineageStore
 from swarm.mcp_researcher import (
@@ -66,5 +69,8 @@ __all__ = [
     "SwarmMetrics",
     "SwarmQualityManifest",
     "SwarmResult",
+    "compute_priority_decay",
+    "compute_query_budget",
     "run_mcp_research_round",
+    "update_evaluation_tracking",
 ]
