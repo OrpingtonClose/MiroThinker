@@ -60,6 +60,7 @@ def _resolve_angles_path() -> Path:
 
 def _load_angles_data() -> dict:
     """Load and cache the raw JSON data."""
+    _empty: dict = {"angles": [], "confidence_tiers": "", "swarm_query": ""}
     path = _resolve_angles_path()
     if not path.exists():
         logger.error(
@@ -67,10 +68,14 @@ def _load_angles_data() -> dict:
             "place angles.json at the default path",
             path,
         )
-        return {"angles": [], "confidence_tiers": "", "swarm_query": ""}
+        return _empty
 
-    with open(path) as f:
-        data = json.load(f)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.error("path=<%s>, error=<%s> | failed to parse angles JSON", path, exc)
+        return _empty
 
     logger.info(
         "path=<%s>, angle_count=<%d> | loaded angle definitions",
@@ -79,19 +84,27 @@ def _load_angles_data() -> dict:
     return data
 
 
+def _build_angles(raw: list[dict]) -> list[AngleDefinition]:
+    """Build AngleDefinition list, skipping malformed entries."""
+    angles: list[AngleDefinition] = []
+    for i, a in enumerate(raw):
+        try:
+            angles.append(AngleDefinition(
+                label=a["label"],
+                description=a["description"],
+                enrichment_queries=a.get("enrichment_queries", []),
+                key_compounds=a.get("key_compounds", []),
+                key_interactions=a.get("key_interactions", []),
+            ))
+        except (KeyError, TypeError) as exc:
+            logger.warning("index=<%d>, error=<%s> | skipping malformed angle entry", i, exc)
+    return angles
+
+
 # Load once at import time
 _DATA = _load_angles_data()
 
-ALL_ANGLES: list[AngleDefinition] = [
-    AngleDefinition(
-        label=a["label"],
-        description=a["description"],
-        enrichment_queries=a.get("enrichment_queries", []),
-        key_compounds=a.get("key_compounds", []),
-        key_interactions=a.get("key_interactions", []),
-    )
-    for a in _DATA.get("angles", [])
-]
+ALL_ANGLES: list[AngleDefinition] = _build_angles(_DATA.get("angles", []))
 
 REQUIRED_ANGLE_LABELS: list[str] = [a.label for a in ALL_ANGLES]
 
