@@ -221,7 +221,9 @@ class CorpusStore:
                 source_type TEXT DEFAULT '',
                 source_ref TEXT DEFAULT '',
 
-                -- Row type: 'finding' | 'similarity' | 'contradiction' | 'raw' | 'synthesis' | 'thought' | 'insight'
+                -- Row type: 'finding' | 'similarity' | 'contradiction' | 'raw'
+                --           'synthesis' | 'thought' | 'insight'
+                --           'evaluation' | 'mcp_finding'
                 row_type TEXT DEFAULT 'finding',
 
                 -- Hierarchical relationships (parent-child in the SAME table)
@@ -605,6 +607,204 @@ class CorpusStore:
             [angle],
         ).fetchall()
         return [self._row_to_lineage_dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Flag-driven query helpers (used by FlockQueryManager)
+    # ------------------------------------------------------------------
+
+    def get_high_novelty_low_confidence(
+        self, novelty_min: float = 0.6, confidence_max: float = 0.4,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return scored findings with high novelty but low confidence.
+
+        These are the most valuable targets for VALIDATE queries —
+        novel claims that haven't been confirmed yet.
+        """
+        rows = self.conn.execute(
+            """SELECT id, fact, angle, novelty_score, confidence,
+                      specificity_score, fabrication_risk
+               FROM conditions
+               WHERE consider_for_use = TRUE
+                 AND row_type = 'finding'
+                 AND novelty_score > ?
+                 AND confidence < ?
+                 AND score_version > 0
+               ORDER BY (novelty_score - confidence) DESC
+               LIMIT ?""",
+            [novelty_min, confidence_max, limit],
+        ).fetchall()
+        return [
+            {"id": r[0], "fact": r[1], "angle": r[2],
+             "novelty_score": r[3], "confidence": r[4],
+             "specificity_score": r[5], "fabrication_risk": r[6]}
+            for r in rows
+        ]
+
+    def get_contradictions(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Return conditions flagged as contradictions with their partners.
+
+        Used for ADJUDICATE queries — each pair represents a genuine
+        disagreement that needs expert arbitration.
+        """
+        rows = self.conn.execute(
+            """SELECT c.id, c.fact, c.angle, c.confidence,
+                      c.contradiction_partner,
+                      c2.fact AS partner_fact, c2.angle AS partner_angle
+               FROM conditions c
+               LEFT JOIN conditions c2 ON c.contradiction_partner = c2.id
+               WHERE c.consider_for_use = TRUE
+                 AND c.contradiction_flag = TRUE
+                 AND c.row_type = 'finding'
+                 AND c2.fact IS NOT NULL
+               ORDER BY c.confidence DESC
+               LIMIT ?""",
+            [limit],
+        ).fetchall()
+        return [
+            {"id": r[0], "fact": r[1], "angle": r[2], "confidence": r[3],
+             "partner_id": r[4], "partner_fact": r[5], "partner_angle": r[6]}
+            for r in rows
+        ]
+
+    def get_high_fabrication_risk(
+        self, risk_min: float = 0.4, limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return findings with high fabrication risk.
+
+        Used for VERIFY queries — claims that need cross-checking
+        against authoritative sources.
+        """
+        rows = self.conn.execute(
+            """SELECT id, fact, angle, fabrication_risk, source_url, trust_score
+               FROM conditions
+               WHERE consider_for_use = TRUE
+                 AND row_type = 'finding'
+                 AND fabrication_risk > ?
+                 AND score_version > 0
+               ORDER BY fabrication_risk DESC
+               LIMIT ?""",
+            [risk_min, limit],
+        ).fetchall()
+        return [
+            {"id": r[0], "fact": r[1], "angle": r[2],
+             "fabrication_risk": r[3], "source_url": r[4], "trust_score": r[5]}
+            for r in rows
+        ]
+
+    def get_low_specificity_high_relevance(
+        self, specificity_max: float = 0.4, relevance_min: float = 0.5,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return relevant findings that lack specifics.
+
+        Used for ENRICH queries — claims that need concrete data,
+        numbers, citations, or mechanisms added.
+        """
+        rows = self.conn.execute(
+            """SELECT id, fact, angle, specificity_score, relevance_score
+               FROM conditions
+               WHERE consider_for_use = TRUE
+                 AND row_type = 'finding'
+                 AND specificity_score < ?
+                 AND relevance_score > ?
+                 AND score_version > 0
+               ORDER BY (relevance_score - specificity_score) DESC
+               LIMIT ?""",
+            [specificity_max, relevance_min, limit],
+        ).fetchall()
+        return [
+            {"id": r[0], "fact": r[1], "angle": r[2],
+             "specificity_score": r[3], "relevance_score": r[4]}
+            for r in rows
+        ]
+
+    def get_ungrounded_actionable(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Return actionable findings that lack verification.
+
+        Used for GROUND queries — claims with high practical value
+        that need supporting evidence.
+        """
+        rows = self.conn.execute(
+            """SELECT id, fact, angle, actionability_score, verification_status
+               FROM conditions
+               WHERE consider_for_use = TRUE
+                 AND row_type = 'finding'
+                 AND actionability_score > 0.6
+                 AND (verification_status = '' OR verification_status IS NULL)
+                 AND score_version > 0
+               ORDER BY actionability_score DESC
+               LIMIT ?""",
+            [limit],
+        ).fetchall()
+        return [
+            {"id": r[0], "fact": r[1], "angle": r[2],
+             "actionability_score": r[3], "verification_status": r[4]}
+            for r in rows
+        ]
+
+    def get_cross_angle_bridges(
+        self, exclude_angle: str, relevance_min: float = 0.3,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return findings from other angles suitable for cross-evaluation.
+
+        Used for BRIDGE queries — findings from foreign domains that
+        might interact with the evaluator's expertise.
+        """
+        rows = self.conn.execute(
+            """SELECT id, fact, angle, relevance_score, novelty_score
+               FROM conditions
+               WHERE consider_for_use = TRUE
+                 AND row_type = 'finding'
+                 AND angle != ?
+                 AND relevance_score > ?
+                 AND score_version > 0
+               ORDER BY (novelty_score * relevance_score) DESC
+               LIMIT ?""",
+            [exclude_angle, relevance_min, limit],
+        ).fetchall()
+        return [
+            {"id": r[0], "fact": r[1], "angle": r[2],
+             "relevance_score": r[3], "novelty_score": r[4]}
+            for r in rows
+        ]
+
+    def get_flag_summary(self) -> dict[str, Any]:
+        """Return aggregate flag statistics for the entire store.
+
+        Useful for the FlockQueryManager to decide which query types
+        to prioritize in each round.
+        """
+        row = self.conn.execute(
+            """SELECT
+                 COUNT(*) AS total,
+                 COUNT(*) FILTER (WHERE score_version > 0) AS scored,
+                 COUNT(*) FILTER (WHERE contradiction_flag = TRUE) AS contradictions,
+                 AVG(confidence) FILTER (WHERE score_version > 0) AS avg_confidence,
+                 AVG(novelty_score) FILTER (WHERE score_version > 0) AS avg_novelty,
+                 AVG(fabrication_risk) FILTER (WHERE score_version > 0) AS avg_fabrication,
+                 AVG(specificity_score) FILTER (WHERE score_version > 0) AS avg_specificity,
+                 AVG(relevance_score) FILTER (WHERE score_version > 0) AS avg_relevance,
+                 AVG(actionability_score) FILTER (WHERE score_version > 0) AS avg_actionability,
+                 COUNT(*) FILTER (WHERE row_type = 'evaluation') AS evaluations,
+                 COUNT(*) FILTER (WHERE row_type = 'mcp_finding') AS mcp_findings
+               FROM conditions
+               WHERE consider_for_use = TRUE"""
+        ).fetchone()
+        return {
+            "total_active": row[0],
+            "scored": row[1],
+            "contradictions": row[2],
+            "avg_confidence": round(row[3] or 0, 3),
+            "avg_novelty": round(row[4] or 0, 3),
+            "avg_fabrication_risk": round(row[5] or 0, 3),
+            "avg_specificity": round(row[6] or 0, 3),
+            "avg_relevance": round(row[7] or 0, 3),
+            "avg_actionability": round(row[8] or 0, 3),
+            "evaluations": row[9],
+            "mcp_findings": row[10],
+        }
 
     def get_lineage_chain(self, condition_id: int) -> list[dict[str, Any]]:
         """Walk the parent DAG from *condition_id* back to its root(s).
