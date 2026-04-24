@@ -170,20 +170,22 @@ def select_research_targets(
     """
     targets: list[ResearchTarget] = []
     max_per_type = config.max_targets // 4
+    lock = _get_store_lock(store)
 
     # --- Type 1: High fabrication risk → verify against authoritative sources ---
     try:
-        fab_rows = store.conn.execute(
-            "SELECT id, fact, angle, fabrication_risk "
-            "FROM conditions "
-            "WHERE consider_for_use = TRUE "
-            "AND row_type = 'finding' "
-            "AND fabrication_risk > ? "
-            "AND score_version > 0 "
-            "ORDER BY fabrication_risk DESC "
-            "LIMIT ?",
-            [config.min_fabrication_risk, max_per_type],
-        ).fetchall()
+        with lock:
+            fab_rows = store.conn.execute(
+                "SELECT id, fact, angle, fabrication_risk "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND row_type = 'finding' "
+                "AND fabrication_risk > ? "
+                "AND score_version > 0 "
+                "ORDER BY fabrication_risk DESC "
+                "LIMIT ?",
+                [config.min_fabrication_risk, max_per_type],
+            ).fetchall()
         for cid, fact, angle, fab_risk in fab_rows:
             targets.append(ResearchTarget(
                 condition_id=cid,
@@ -198,17 +200,18 @@ def select_research_targets(
 
     # --- Type 2: Unfulfilled expansion gaps ---
     try:
-        gap_rows = store.conn.execute(
-            "SELECT id, fact, angle, expansion_gap, expansion_priority "
-            "FROM conditions "
-            "WHERE consider_for_use = TRUE "
-            "AND expansion_gap != '' "
-            "AND expansion_fulfilled = FALSE "
-            "AND expansion_priority > ? "
-            "ORDER BY expansion_priority DESC "
-            "LIMIT ?",
-            [config.min_expansion_priority, max_per_type],
-        ).fetchall()
+        with lock:
+            gap_rows = store.conn.execute(
+                "SELECT id, fact, angle, expansion_gap, expansion_priority "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND expansion_gap != '' "
+                "AND expansion_fulfilled = FALSE "
+                "AND expansion_priority > ? "
+                "ORDER BY expansion_priority DESC "
+                "LIMIT ?",
+                [config.min_expansion_priority, max_per_type],
+            ).fetchall()
         for cid, fact, angle, gap, priority in gap_rows:
             targets.append(ResearchTarget(
                 condition_id=cid,
@@ -223,18 +226,19 @@ def select_research_targets(
 
     # --- Type 3: Low specificity + high relevance ---
     try:
-        spec_rows = store.conn.execute(
-            "SELECT id, fact, angle, specificity_score, relevance_score "
-            "FROM conditions "
-            "WHERE consider_for_use = TRUE "
-            "AND row_type = 'finding' "
-            "AND specificity_score < ? "
-            "AND relevance_score > 0.5 "
-            "AND score_version > 0 "
-            "ORDER BY (relevance_score - specificity_score) DESC "
-            "LIMIT ?",
-            [config.max_specificity_for_enrichment, max_per_type],
-        ).fetchall()
+        with lock:
+            spec_rows = store.conn.execute(
+                "SELECT id, fact, angle, specificity_score, relevance_score "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND row_type = 'finding' "
+                "AND specificity_score < ? "
+                "AND relevance_score > 0.5 "
+                "AND score_version > 0 "
+                "ORDER BY (relevance_score - specificity_score) DESC "
+                "LIMIT ?",
+                [config.max_specificity_for_enrichment, max_per_type],
+            ).fetchall()
         for cid, fact, angle, spec, rel in spec_rows:
             targets.append(ResearchTarget(
                 condition_id=cid,
@@ -249,18 +253,19 @@ def select_research_targets(
 
     # --- Type 4: Low trust + high actionability ---
     try:
-        trust_rows = store.conn.execute(
-            "SELECT id, fact, angle, trust_score, actionability_score "
-            "FROM conditions "
-            "WHERE consider_for_use = TRUE "
-            "AND row_type = 'finding' "
-            "AND trust_score < 0.4 "
-            "AND actionability_score > 0.6 "
-            "AND score_version > 0 "
-            "ORDER BY (actionability_score - trust_score) DESC "
-            "LIMIT ?",
-            [max_per_type],
-        ).fetchall()
+        with lock:
+            trust_rows = store.conn.execute(
+                "SELECT id, fact, angle, trust_score, actionability_score "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND row_type = 'finding' "
+                "AND trust_score < 0.4 "
+                "AND actionability_score > 0.6 "
+                "AND score_version > 0 "
+                "ORDER BY (actionability_score - trust_score) DESC "
+                "LIMIT ?",
+                [max_per_type],
+            ).fetchall()
         for cid, fact, angle, trust, action in trust_rows:
             targets.append(ResearchTarget(
                 condition_id=cid,

@@ -307,21 +307,23 @@ def select_queries(
     """
     queries: list[FlockQuery] = []
     clone_angle = clone.angle
+    lock = _get_store_lock(store)
 
     # --- VALIDATE: high novelty, low confidence ---
     try:
-        validate_rows = store.conn.execute(
-            "SELECT id, fact, novelty_score, confidence, angle "
-            "FROM conditions "
-            "WHERE consider_for_use = TRUE "
-            "AND row_type = 'finding' "
-            "AND novelty_score > 0.6 "
-            "AND confidence < 0.4 "
-            "AND score_version > 0 "
-            "ORDER BY (novelty_score - confidence) DESC "
-            "LIMIT ?",
-            [config.max_queries_per_round // 6],
-        ).fetchall()
+        with lock:
+            validate_rows = store.conn.execute(
+                "SELECT id, fact, novelty_score, confidence, angle "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND row_type = 'finding' "
+                "AND novelty_score > 0.6 "
+                "AND confidence < 0.4 "
+                "AND score_version > 0 "
+                "ORDER BY (novelty_score - confidence) DESC "
+                "LIMIT ?",
+                [config.max_queries_per_round // 6],
+            ).fetchall()
         for cid, fact, novelty, conf, angle in validate_rows:
             priority = (novelty - conf) * 1.5
             queries.append(FlockQuery(
@@ -337,19 +339,20 @@ def select_queries(
 
     # --- ADJUDICATE: contradictions ---
     try:
-        contra_rows = store.conn.execute(
-            "SELECT c.id, c.fact, c.angle, c.confidence, "
-            "       c.contradiction_partner, c2.fact, c2.angle "
-            "FROM conditions c "
-            "LEFT JOIN conditions c2 ON c.contradiction_partner = c2.id "
-            "WHERE c.consider_for_use = TRUE "
-            "AND c.contradiction_flag = TRUE "
-            "AND c.row_type = 'finding' "
-            "AND c.score_version > 0 "
-            "ORDER BY c.confidence DESC "
-            "LIMIT ?",
-            [config.max_queries_per_round // 6],
-        ).fetchall()
+        with lock:
+            contra_rows = store.conn.execute(
+                "SELECT c.id, c.fact, c.angle, c.confidence, "
+                "       c.contradiction_partner, c2.fact, c2.angle "
+                "FROM conditions c "
+                "LEFT JOIN conditions c2 ON c.contradiction_partner = c2.id "
+                "WHERE c.consider_for_use = TRUE "
+                "AND c.contradiction_flag = TRUE "
+                "AND c.row_type = 'finding' "
+                "AND c.score_version > 0 "
+                "ORDER BY c.confidence DESC "
+                "LIMIT ?",
+                [config.max_queries_per_round // 6],
+            ).fetchall()
         for cid, fact, angle, conf, partner_id, partner_fact, partner_angle in contra_rows:
             if partner_fact is None:
                 continue
@@ -369,17 +372,18 @@ def select_queries(
 
     # --- VERIFY: high fabrication risk ---
     try:
-        verify_rows = store.conn.execute(
-            "SELECT id, fact, fabrication_risk, angle, source_url "
-            "FROM conditions "
-            "WHERE consider_for_use = TRUE "
-            "AND row_type = 'finding' "
-            "AND fabrication_risk > ? "
-            "AND score_version > 0 "
-            "ORDER BY fabrication_risk DESC "
-            "LIMIT ?",
-            [config.fabrication_risk_floor, config.max_queries_per_round // 6],
-        ).fetchall()
+        with lock:
+            verify_rows = store.conn.execute(
+                "SELECT id, fact, fabrication_risk, angle, source_url "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND row_type = 'finding' "
+                "AND fabrication_risk > ? "
+                "AND score_version > 0 "
+                "ORDER BY fabrication_risk DESC "
+                "LIMIT ?",
+                [config.fabrication_risk_floor, config.max_queries_per_round // 6],
+            ).fetchall()
         for cid, fact, fab_risk, angle, source_url in verify_rows:
             priority = fab_risk * 1.2
             queries.append(FlockQuery(
@@ -395,18 +399,19 @@ def select_queries(
 
     # --- ENRICH: low specificity, high relevance ---
     try:
-        enrich_rows = store.conn.execute(
-            "SELECT id, fact, specificity_score, relevance_score, angle "
-            "FROM conditions "
-            "WHERE consider_for_use = TRUE "
-            "AND row_type = 'finding' "
-            "AND specificity_score < ? "
-            "AND relevance_score > 0.5 "
-            "AND score_version > 0 "
-            "ORDER BY (relevance_score - specificity_score) DESC "
-            "LIMIT ?",
-            [config.specificity_ceiling, config.max_queries_per_round // 6],
-        ).fetchall()
+        with lock:
+            enrich_rows = store.conn.execute(
+                "SELECT id, fact, specificity_score, relevance_score, angle "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND row_type = 'finding' "
+                "AND specificity_score < ? "
+                "AND relevance_score > 0.5 "
+                "AND score_version > 0 "
+                "ORDER BY (relevance_score - specificity_score) DESC "
+                "LIMIT ?",
+                [config.specificity_ceiling, config.max_queries_per_round // 6],
+            ).fetchall()
         for cid, fact, spec, rel, angle in enrich_rows:
             priority = (rel - spec) * 1.0
             queries.append(FlockQuery(
@@ -422,18 +427,19 @@ def select_queries(
 
     # --- GROUND: high actionability, unverified ---
     try:
-        ground_rows = store.conn.execute(
-            "SELECT id, fact, actionability_score, angle "
-            "FROM conditions "
-            "WHERE consider_for_use = TRUE "
-            "AND row_type = 'finding' "
-            "AND actionability_score > 0.6 "
-            "AND (verification_status = '' OR verification_status IS NULL) "
-            "AND score_version > 0 "
-            "ORDER BY actionability_score DESC "
-            "LIMIT ?",
-            [config.max_queries_per_round // 6],
-        ).fetchall()
+        with lock:
+            ground_rows = store.conn.execute(
+                "SELECT id, fact, actionability_score, angle "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND row_type = 'finding' "
+                "AND actionability_score > 0.6 "
+                "AND (verification_status = '' OR verification_status IS NULL) "
+                "AND score_version > 0 "
+                "ORDER BY actionability_score DESC "
+                "LIMIT ?",
+                [config.max_queries_per_round // 6],
+            ).fetchall()
         for cid, fact, action_score, angle in ground_rows:
             priority = action_score * 0.9
             queries.append(FlockQuery(
@@ -449,19 +455,20 @@ def select_queries(
 
     # --- BRIDGE: cross-angle findings ---
     try:
-        bridge_rows = store.conn.execute(
-            "SELECT id, fact, angle, relevance_score, novelty_score "
-            "FROM conditions "
-            "WHERE consider_for_use = TRUE "
-            "AND row_type = 'finding' "
-            "AND angle != ? "
-            "AND relevance_score > ? "
-            "AND score_version > 0 "
-            "ORDER BY (novelty_score * relevance_score) DESC "
-            "LIMIT ?",
-            [clone_angle, config.cross_angle_min_relevance,
-             config.max_queries_per_round // 6],
-        ).fetchall()
+        with lock:
+            bridge_rows = store.conn.execute(
+                "SELECT id, fact, angle, relevance_score, novelty_score "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND row_type = 'finding' "
+                "AND angle != ? "
+                "AND relevance_score > ? "
+                "AND score_version > 0 "
+                "ORDER BY (novelty_score * relevance_score) DESC "
+                "LIMIT ?",
+                [clone_angle, config.cross_angle_min_relevance,
+                 config.max_queries_per_round // 6],
+            ).fetchall()
         for cid, fact, angle, rel, nov in bridge_rows:
             priority = nov * rel * 1.3
             queries.append(FlockQuery(
@@ -856,6 +863,9 @@ def _apply_score_delta(
 
     Uses weighted averaging: new_score = 0.7 * old + 0.3 * evaluation.
     This prevents a single evaluation from dominating the score.
+    All changed flags are written in a single UPDATE statement and
+    score_version is incremented exactly once per evaluation, matching
+    the pattern in corpus_store.py ``_score_single``.
 
     Args:
         store: The ConditionStore.
@@ -873,33 +883,45 @@ def _apply_score_delta(
         "fabrication_risk",
     }
 
+    # Filter to valid flags
+    applicable = {k: v for k, v in delta.items() if k in flag_columns}
+    if not applicable:
+        return 0.0
+
     total_magnitude = 0.0
-    for flag_name, eval_score in delta.items():
-        if flag_name not in flag_columns:
-            continue
-        try:
-            with _get_store_lock(store):
-                # Read old value to compute change magnitude
-                old_row = store.conn.execute(
-                    f"SELECT {flag_name} FROM conditions WHERE id = ?",
-                    [condition_id],
-                ).fetchone()
-                old_value = old_row[0] if old_row else 0.5
+    try:
+        with _get_store_lock(store):
+            # Read all current values in one query
+            cols = ", ".join(applicable.keys())
+            old_row = store.conn.execute(
+                f"SELECT {cols} FROM conditions WHERE id = ?",
+                [condition_id],
+            ).fetchone()
+            if not old_row:
+                return 0.0
+
+            # Compute new values and accumulate magnitude
+            set_clauses: list[str] = []
+            params: list[float] = []
+            for i, (flag_name, eval_score) in enumerate(applicable.items()):
+                old_value = old_row[i] if old_row[i] is not None else 0.5
                 new_value = old_value * 0.7 + eval_score * 0.3
                 total_magnitude += abs(new_value - old_value)
+                set_clauses.append(f"{flag_name} = ?")
+                params.append(new_value)
 
-                store.conn.execute(
-                    f"UPDATE conditions "
-                    f"SET {flag_name} = ?, "
-                    f"    score_version = score_version + 1 "
-                    f"WHERE id = ?",
-                    [new_value, condition_id],
-                )
-        except Exception as exc:
-            logger.warning(
-                "condition_id=<%d>, flag=<%s>, error=<%s> | score delta application failed",
-                condition_id, flag_name, exc,
+            # Single UPDATE: all flags + one score_version increment
+            set_clauses.append("score_version = score_version + 1")
+            params.append(condition_id)
+            store.conn.execute(
+                f"UPDATE conditions SET {', '.join(set_clauses)} WHERE id = ?",
+                params,
             )
+    except Exception as exc:
+        logger.warning(
+            "condition_id=<%d>, error=<%s> | score delta application failed",
+            condition_id, exc,
+        )
 
     return total_magnitude
 
