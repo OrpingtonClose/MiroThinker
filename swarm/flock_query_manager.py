@@ -158,12 +158,27 @@ class FlockEvaluation:
 class CloneContext:
     """A cached clone perspective in vLLM.
 
+    Each clone can run on a different model — they take turns, never
+    simultaneous, so the VRAM constraint is per-clone not aggregate.
+    This enables a multi-model roster: Ling for deep scientific
+    reasoning, Qwen3.6 for speed, a smaller model for bulk, etc.
+
     Attributes:
         angle: The research angle this clone represents.
         context_summary: Compressed reasoning summary for this perspective.
         context_tokens: Estimated token count of the cached context.
         wave: Which wave this clone's reasoning comes from.
         worker_id: The original worker ID.
+        model_id: Model identifier for this clone (e.g. ``Ling-2.5-1T``,
+            ``Qwen3-235B-A22B``).  When set, the caller should route
+            queries for this clone to the appropriate vLLM endpoint.
+            Empty string means use the default model.
+        base_url: Optional vLLM endpoint URL for this clone's model.
+            Allows different clones to target different vLLM instances
+            (e.g. one on TP=8 for a 1T model, another on TP=1 for 27B).
+        model_kwargs: Extra model parameters for this clone (e.g.
+            ``{"temperature": 0.1}`` for high-precision evaluation vs
+            ``{"temperature": 0.7}`` for creative bridging).
     """
 
     angle: str
@@ -171,6 +186,9 @@ class CloneContext:
     context_tokens: int = 0
     wave: int = 0
     worker_id: str = ""
+    model_id: str = ""
+    base_url: str = ""
+    model_kwargs: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -884,6 +902,22 @@ class FlockQueryManager:
             clones=[clone_a, clone_b, clone_c],
             run_id="run_001",
         )
+
+    Multi-model usage (clones take turns, never simultaneous):
+        async def route_to_model(clone: CloneContext) -> Callable:
+            return make_vllm_client(clone.base_url, clone.model_id)
+
+        manager = FlockQueryManager(
+            store=condition_store,
+            complete=default_llm_fn,        # fallback
+            complete_for_clone=route_to_model,  # per-clone routing
+        )
+        result = await manager.run(clones=[
+            CloneContext(angle="lipid_metabolism", model_id="Ling-2.5-1T",
+                         base_url="http://gpu1:8000/v1"),
+            CloneContext(angle="mTORC1_signaling", model_id="Qwen3.6-27B",
+                         base_url="http://gpu2:8000/v1"),
+        ], run_id="run_001")
     """
 
     def __init__(
@@ -891,10 +925,12 @@ class FlockQueryManager:
         store: "ConditionStore",
         complete: Callable[[str], Awaitable[str]],
         config: FlockQueryManagerConfig | None = None,
+        complete_for_clone: Callable[[CloneContext], Awaitable[Callable[[str], Awaitable[str]]]] | None = None,
     ) -> None:
         self.store = store
         self.complete = complete
         self.config = config or FlockQueryManagerConfig()
+        self._complete_for_clone = complete_for_clone
 
     async def run(
         self,
@@ -942,15 +978,33 @@ class FlockQueryManager:
                 "clones": [c.angle for c in clones],
             })
 
-            # Each clone takes a turn
+            # Each clone takes a turn — clones are never simultaneous,
+            # so each can use a different model (evict one, load the next)
             for clone in clones:
                 clone_start = time.monotonic()
                 clone_queries = 0
+
+                # Resolve per-clone completion function (model routing)
+                clone_complete = self.complete
+                if self._complete_for_clone and clone.model_id:
+                    try:
+                        clone_complete = await self._complete_for_clone(clone)
+                        logger.info(
+                            "round=<%d>, clone=<%s>, model=<%s> | using per-clone model",
+                            round_num, clone.angle, clone.model_id,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "round=<%d>, clone=<%s>, model=<%s>, error=<%s> | "
+                            "per-clone model resolution failed, using default",
+                            round_num, clone.angle, clone.model_id, exc,
+                        )
 
                 await _emit({
                     "type": "flock_clone_start",
                     "round": round_num,
                     "clone_angle": clone.angle,
+                    "model_id": clone.model_id or "default",
                 })
 
                 # Select queries based on current flag state
@@ -968,7 +1022,9 @@ class FlockQueryManager:
                 # Fire queries in batches
                 for batch_start in range(0, len(queries), self.config.batch_size):
                     batch = queries[batch_start:batch_start + self.config.batch_size]
-                    batch_results = await self._fire_batch(batch, clone)
+                    batch_results = await self._fire_batch(
+                        batch, clone, clone_complete,
+                    )
 
                     for query, (response, elapsed) in zip(batch, batch_results):
                         if not response:
@@ -990,14 +1046,15 @@ class FlockQueryManager:
 
                 clone_time = time.monotonic() - clone_start
                 logger.info(
-                    "round=<%d>, clone=<%s>, queries=<%d>, elapsed_s=<%.1f> | clone turn complete",
-                    round_num, clone.angle, clone_queries, clone_time,
+                    "round=<%d>, clone=<%s>, model=<%s>, queries=<%d>, elapsed_s=<%.1f> | clone turn complete",
+                    round_num, clone.angle, clone.model_id or "default", clone_queries, clone_time,
                 )
 
                 await _emit({
                     "type": "flock_clone_complete",
                     "round": round_num,
                     "clone_angle": clone.angle,
+                    "model_id": clone.model_id or "default",
                     "queries": clone_queries,
                     "elapsed_s": round(clone_time, 1),
                 })
@@ -1077,6 +1134,7 @@ class FlockQueryManager:
         self,
         queries: list[FlockQuery],
         clone: CloneContext,
+        complete_fn: Callable[[str], Awaitable[str]] | None = None,
     ) -> list[tuple[str, float]]:
         """Fire a batch of queries against the Flock engine.
 
@@ -1086,10 +1144,15 @@ class FlockQueryManager:
         Args:
             queries: Batch of queries to fire.
             clone: The current clone perspective.
+            complete_fn: Completion callable for this clone.  When
+                ``None``, falls back to ``self.complete``.  This allows
+                different clones to target different models/endpoints.
 
         Returns:
             List of (response_text, elapsed_seconds) tuples.
         """
+        _complete = complete_fn or self.complete
+
         async def _single(query: FlockQuery) -> tuple[str, float]:
             # Prepend clone context to the query prompt
             full_prompt = (
@@ -1102,14 +1165,14 @@ class FlockQueryManager:
             )
             t0 = time.monotonic()
             try:
-                response = await self.complete(full_prompt)
+                response = await _complete(full_prompt)
                 elapsed = time.monotonic() - t0
                 return (response, elapsed)
             except Exception as exc:
                 elapsed = time.monotonic() - t0
                 logger.warning(
-                    "query_type=<%s>, error=<%s>, elapsed_s=<%.1f> | query failed",
-                    query.query_type.value, exc, elapsed,
+                    "query_type=<%s>, model=<%s>, error=<%s>, elapsed_s=<%.1f> | query failed",
+                    query.query_type.value, clone.model_id or "default", exc, elapsed,
                 )
                 return ("", elapsed)
 
