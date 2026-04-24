@@ -934,6 +934,7 @@ class FlockQueryManager:
             round_queries = 0
             round_evaluations = 0
             round_new_findings = 0
+            round_score_updates = 0
 
             await _emit({
                 "type": "flock_round_start",
@@ -982,6 +983,8 @@ class FlockQueryManager:
                         )
                         round_evaluations += 1
                         round_new_findings += len(evaluation.new_findings)
+                        if evaluation.score_delta:
+                            round_score_updates += 1
                         round_queries += 1
                         clone_queries += 1
 
@@ -1001,8 +1004,14 @@ class FlockQueryManager:
 
             # Round metrics
             round_time = time.monotonic() - round_start
+            # Convergence = fraction of queries that produced meaningful
+            # information gain (score updates OR new findings).  All query
+            # types produce score_delta (VALIDATE→confidence, VERIFY→
+            # fabrication_risk, etc.), so this counts every type, not just
+            # ENRICH/BRIDGE which are the only ones that produce new_findings.
+            round_information_gain = round_score_updates + round_new_findings
             convergence_score = (
-                round_new_findings / max(round_queries, 1)
+                round_information_gain / max(round_queries, 1)
             )
 
             round_metrics = QueryRoundMetrics(
@@ -1023,15 +1032,16 @@ class FlockQueryManager:
                 "round": round_num,
                 "queries": round_queries,
                 "evaluations": round_evaluations,
+                "score_updates": round_score_updates,
                 "new_findings": round_new_findings,
                 "convergence_score": round(convergence_score, 3),
                 "elapsed_s": round(round_time, 1),
             })
 
             logger.info(
-                "round=<%d>, queries=<%d>, evals=<%d>, new_findings=<%d>, "
-                "convergence=<%.3f>, elapsed_s=<%.1f> | round complete",
-                round_num, round_queries, round_evaluations,
+                "round=<%d>, queries=<%d>, evals=<%d>, score_updates=<%d>, "
+                "new_findings=<%d>, convergence=<%.3f>, elapsed_s=<%.1f> | round complete",
+                round_num, round_queries, round_evaluations, round_score_updates,
                 round_new_findings, convergence_score, round_time,
             )
 
