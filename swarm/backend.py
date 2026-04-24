@@ -183,13 +183,17 @@ class BackendConfig:
         model: str,
         api_base: str,
         *,
-        rpm: int = 120,
+        rpm: int = 600,
         api_key_env: str = "",
         fallback: BackendConfig | None = None,
     ) -> BackendConfig:
         """Create a paid API backend config.
 
-        Moderate rate limiting, optional caching.
+        Paid APIs are first-class external services — call them
+        frequently and without shame.  The only protection is basic
+        retry/timeout handling and a generous RPM ceiling to avoid
+        accidental self-DoS.  No artificial throttling, no caching
+        (responses are unique), high concurrency.
         """
         return cls(
             name=name,
@@ -197,12 +201,12 @@ class BackendConfig:
             api_base=api_base,
             risk_tier=BackendRiskTier.PAID_API,
             max_requests_per_minute=rpm,
-            min_request_interval_s=0.1,
+            min_request_interval_s=0.0,
             max_retries=3,
-            retry_base_delay_s=2.0,
+            retry_base_delay_s=1.0,
             enable_cache=False,
             api_key_env=api_key_env,
-            batch_concurrency=20,
+            batch_concurrency=40,
             fallback=fallback,
         )
 

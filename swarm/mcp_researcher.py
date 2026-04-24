@@ -171,7 +171,7 @@ def select_research_targets(
         Sorted list of ResearchTargets, highest priority first.
     """
     targets: list[ResearchTarget] = []
-    max_per_type = config.max_targets // 6
+    max_per_type = config.max_targets // 7
     lock = _get_store_lock(store)
 
     # --- Type 1: High fabrication risk → verify against authoritative sources ---
@@ -347,6 +347,34 @@ def select_research_targets(
             ))
     except Exception as exc:
         logger.warning("error=<%s> | cross-angle bridge target selection failed", exc)
+
+    # --- Type 7: Aggregate research targets from Flock AGGREGATE queries ---
+    # These are strategic directions produced by cross-clone synthesis.
+    # They represent the swarm's collective judgment on what external
+    # research would be most valuable — higher priority than individual gaps.
+    try:
+        with lock:
+            agg_rows = store.conn.execute(
+                "SELECT id, fact, expansion_gap, expansion_priority "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND row_type = 'research_target' "
+                "AND expansion_fulfilled = FALSE "
+                "ORDER BY expansion_priority DESC "
+                "LIMIT ?",
+                [max_per_type],
+            ).fetchall()
+        for cid, fact, search_query, priority in agg_rows:
+            targets.append(ResearchTarget(
+                condition_id=cid,
+                fact=fact,
+                angle="aggregate",
+                reason="aggregate_research_plan",
+                search_queries=[search_query] if search_query else [],
+                priority=min(priority + 0.1, 1.0),  # boost above individual targets
+            ))
+    except Exception as exc:
+        logger.warning("error=<%s> | aggregate target selection failed", exc)
 
     # Sort by priority and cap
     targets.sort(key=lambda t: t.priority, reverse=True)
