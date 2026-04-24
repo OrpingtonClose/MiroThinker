@@ -50,6 +50,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _get_store_lock(store: "ConditionStore") -> Any:
+    """Return the store's write lock, supporting both CorpusStore and ConditionStore."""
+    return getattr(store, "_write_lock", getattr(store, "_lock", None))
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -569,7 +574,7 @@ def store_research_results(
         if not fact or len(fact) < 30:
             continue
 
-        with store._write_lock:
+        with _get_store_lock(store):
             cid = store._next_id
             store._next_id += 1
             store.conn.execute(

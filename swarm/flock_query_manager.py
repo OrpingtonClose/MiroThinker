@@ -64,6 +64,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _get_store_lock(store: "ConditionStore") -> Any:
+    """Return the store's write lock, supporting both CorpusStore and ConditionStore.
+
+    CorpusStore (adk-agent) uses ``_write_lock`` while ConditionStore
+    (strands-agent) uses ``_lock``.  This helper transparently picks
+    whichever is available.
+    """
+    return getattr(store, "_write_lock", getattr(store, "_lock", None))
+
+
 # ---------------------------------------------------------------------------
 # Query types — each driven by specific flag combinations
 # ---------------------------------------------------------------------------
@@ -755,7 +765,7 @@ def store_evaluation(
         "elapsed_s": evaluation.elapsed_s,
     }
 
-    with store._write_lock:
+    with _get_store_lock(store):
         cid = store._next_id
         store._next_id += 1
         store.conn.execute(
@@ -784,7 +794,7 @@ def store_evaluation(
 
     # 3. Store any new findings generated during evaluation
     for finding in evaluation.new_findings:
-        with store._write_lock:
+        with _get_store_lock(store):
             fid = store._next_id
             store._next_id += 1
             store.conn.execute(
@@ -835,7 +845,7 @@ def _apply_score_delta(
             continue
         try:
             # Weighted average: keep 70% of existing score, blend 30% from evaluation
-            with store._write_lock:
+            with _get_store_lock(store):
                 store.conn.execute(
                     f"UPDATE conditions "
                     f"SET {flag_name} = ({flag_name} * 0.7) + (? * 0.3), "
@@ -930,6 +940,7 @@ class FlockQueryManager:
             # Each clone takes a turn
             for clone in clones:
                 clone_start = time.monotonic()
+                clone_queries = 0
 
                 await _emit({
                     "type": "flock_clone_start",
@@ -968,18 +979,19 @@ class FlockQueryManager:
                         round_evaluations += 1
                         round_new_findings += len(evaluation.new_findings)
                         round_queries += 1
+                        clone_queries += 1
 
                 clone_time = time.monotonic() - clone_start
                 logger.info(
                     "round=<%d>, clone=<%s>, queries=<%d>, elapsed_s=<%.1f> | clone turn complete",
-                    round_num, clone.angle, round_queries, clone_time,
+                    round_num, clone.angle, clone_queries, clone_time,
                 )
 
                 await _emit({
                     "type": "flock_clone_complete",
                     "round": round_num,
                     "clone_angle": clone.angle,
-                    "queries": round_queries,
+                    "queries": clone_queries,
                     "elapsed_s": round(clone_time, 1),
                 })
 
