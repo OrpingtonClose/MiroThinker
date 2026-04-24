@@ -684,13 +684,17 @@ def _parse_evaluation_result(
                     "confidence": score_delta.get("confidence", 0.5),
                 })
 
-    # For VERIFY, adjust fabrication_risk based on verdict
-    if query.query_type == QueryType.VERIFY:
-        if "verified" in verdict.lower():
+    # For VERIFY, adjust fabrication_risk based on structured verdict only.
+    # When verdict_match fails, verdict is the entire raw response —
+    # substring matching against free text would produce false positives
+    # (e.g. "could not be verified" matching "verified").
+    if query.query_type == QueryType.VERIFY and verdict_match:
+        verdict_lower = verdict.lower()
+        if verdict_lower == "verified":
             score_delta["fabrication_risk"] = 0.1
-        elif "fabricated" in verdict.lower():
+        elif "fabricated" in verdict_lower:
             score_delta["fabrication_risk"] = 0.9
-        elif "partially" in verdict.lower():
+        elif "partially" in verdict_lower:
             score_delta["fabrication_risk"] = 0.5
 
     # For CHALLENGE, adjust confidence if challenge succeeds
