@@ -77,6 +77,59 @@ def _get_store_lock(store: "ConditionStore") -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Bootstrap — promote unscored findings so flag-based queries can match
+# ---------------------------------------------------------------------------
+
+
+def bootstrap_score_version(store: "ConditionStore") -> int:
+    """Promote unscored findings from score_version=0 to score_version=1.
+
+    ConditionStore defaults score_version to 0.  All flag-driven query
+    filters (select_queries, select_flock_clones, build_clone_context)
+    require score_version > 0 so that only quality-assessed findings
+    participate.  This function must be called BEFORE any of those
+    queries to ensure findings are visible.
+
+    Idempotent: only touches rows where score_version is still 0.
+
+    Args:
+        store: The ConditionStore.
+
+    Returns:
+        Number of findings promoted.
+    """
+    lock = _get_store_lock(store)
+    try:
+        with lock:
+            # Count first — DuckDB rowcount returns -1 for UPDATE
+            row = store.conn.execute(
+                "SELECT COUNT(*) FROM conditions "
+                "WHERE score_version = 0 "
+                "AND row_type = 'finding' "
+                "AND consider_for_use = TRUE"
+            ).fetchone()
+            bootstrapped = row[0] if row else 0
+
+            if bootstrapped > 0:
+                store.conn.execute(
+                    "UPDATE conditions "
+                    "SET score_version = 1 "
+                    "WHERE score_version = 0 "
+                    "AND row_type = 'finding' "
+                    "AND consider_for_use = TRUE"
+                )
+        if bootstrapped:
+            logger.info(
+                "bootstrapped=<%d> | promoted unscored findings to score_version=1",
+                bootstrapped,
+            )
+        return bootstrapped
+    except Exception as exc:
+        logger.warning("error=<%s> | bootstrap scoring failed", exc)
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # Clone selection — build clones from store state, not pre-assigned angles
 # ---------------------------------------------------------------------------
 
@@ -1669,27 +1722,10 @@ class FlockQueryManager:
                     pass
 
         # Bootstrap: promote unscored findings so query filters can match.
-        # ConditionStore defaults score_version to 0 and only
-        # _apply_score_delta increments it — but _apply_score_delta is
-        # only reachable AFTER queries are selected.  Without this step
-        # all queries require score_version > 0 and nothing ever matches.
-        try:
-            lock = _get_store_lock(store)
-            with lock:
-                bootstrapped = store.conn.execute(
-                    "UPDATE conditions "
-                    "SET score_version = 1 "
-                    "WHERE score_version = 0 "
-                    "AND row_type = 'finding' "
-                    "AND consider_for_use = TRUE"
-                ).rowcount
-            if bootstrapped:
-                logger.info(
-                    "bootstrapped=<%d> | promoted unscored findings to score_version=1",
-                    bootstrapped,
-                )
-        except Exception as exc:
-            logger.warning("error=<%s> | bootstrap scoring failed", exc)
+        # Called here as a safety net — mcp_engine also calls it before
+        # select_flock_clones, but this ensures correctness if run() is
+        # called directly without prior bootstrap.
+        bootstrap_score_version(store)
 
         # Adaptive scheduling state: per-type score magnitudes from prior round
         prior_type_magnitudes: dict[str, float] | None = None

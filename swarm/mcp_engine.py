@@ -582,8 +582,15 @@ class MCPSwarmEngine:
                 from swarm.flock_query_manager import (
                     FlockQueryManager,
                     FlockQueryManagerConfig,
+                    bootstrap_score_version,
                     select_flock_clones,
                 )
+
+                # Bootstrap score_version BEFORE clone selection — findings
+                # default to score_version=0 and all flag-based queries
+                # require score_version > 0.  Without this step,
+                # select_flock_clones finds zero angles.
+                bootstrap_score_version(self.store)
 
                 # Build clone contexts from STORE STATE, not pre-assigned
                 # worker angles.  select_flock_clones queries the store for
