@@ -60,6 +60,8 @@ from swarm.angles import (
     extract_required_angles,
     merge_angles,
 )
+from swarm.backend import BackendConfig
+from swarm.config import CompleteFn
 
 if TYPE_CHECKING:
     from corpus import ConditionStore
@@ -124,6 +126,18 @@ class MCPSwarmConfig:
         enable_mcp_research: Run MCP-powered external data acquisition
             between waves.  Uses gradient flags to identify gaps and
             fans out across available search APIs.
+        flock_backend_config: Optional backend risk configuration for the
+            Flock evaluation phase.  When provided, the FlockQueryManager
+            wraps its completion function with risk-aware protection
+            (rate limiting, caching, retries, fallback).  Use this to
+            point the Flock at a remote API (e.g. OpenRouter free tier)
+            while the worker phase uses local vLLM.
+        flock_complete: Optional completion function for the Flock phase.
+            When provided, the FlockQueryManager uses this instead of the
+            engine's default ``complete`` function.  This is the actual
+            callable that targets the remote API — ``flock_backend_config``
+            provides only the risk-tier metadata (rate limits, caching,
+            retries).  Both must be set together for remote Flock backends.
     """
 
     max_workers: int = 7
@@ -149,6 +163,8 @@ class MCPSwarmConfig:
     flock_max_queries_per_round: int = 500
     flock_batch_size: int = 20
     enable_mcp_research: bool = True
+    flock_backend_config: BackendConfig | None = None
+    flock_complete: CompleteFn | None = None
 
 
 class MCPSwarmEngine:
@@ -608,6 +624,7 @@ class MCPSwarmEngine:
                         max_rounds=config.flock_max_rounds,
                         max_queries_per_round=config.flock_max_queries_per_round,
                         batch_size=config.flock_batch_size,
+                        backend_config=config.flock_backend_config,
                     )
 
                     # Wire interleaved MCP research into the Flock loop
@@ -626,11 +643,24 @@ class MCPSwarmEngine:
 
                         mcp_research_fn = _interleaved_research
 
+                    # Use the dedicated Flock completion function when
+                    # provided — this is the actual callable targeting the
+                    # remote API.  Falls back to the engine's default.
+                    flock_complete_fn = config.flock_complete or self.complete
+
+                    # When using a remote backend, local vLLM is the
+                    # fallback — if OpenRouter circuit-breaks, degrade
+                    # to the engine's default completion function.
+                    flock_fallback_fn: CompleteFn | None = None
+                    if config.flock_complete is not None:
+                        flock_fallback_fn = self.complete
+
                     flock_manager = FlockQueryManager(
                         store=self.store,
-                        complete=self.complete,
+                        complete=flock_complete_fn,
                         config=flock_config,
                         mcp_research_fn=mcp_research_fn,
+                        fallback_complete=flock_fallback_fn,
                     )
                     flock_result = await flock_manager.run(
                         clones=clones,

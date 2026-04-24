@@ -39,6 +39,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Awaitable, Callable
 
 # Ensure repo root is importable
 _REPO_ROOT = str(Path(__file__).resolve().parents[2])
@@ -125,6 +126,185 @@ def make_complete_fn(
         )
 
     return _complete
+
+
+# ── OpenRouter completion function ───────────────────────────────────
+
+
+async def _openrouter_complete(
+    prompt: str,
+    model: str,
+    api_key: str,
+    max_tokens: int = 4096,
+    temperature: float = 0.3,
+) -> str:
+    """Call OpenRouter chat completions endpoint.
+
+    Uses the same chat format as vLLM (system + user message) for
+    compatibility with the Flock's prefix caching prompt structure.
+
+    Args:
+        prompt: The full prompt (system message content).
+        model: OpenRouter model identifier.
+        api_key: OpenRouter API key.
+        max_tokens: Max tokens per response.
+        temperature: Sampling temperature.
+
+    Returns:
+        The completion text, or empty string on failure.
+    """
+    import httpx
+
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": "Produce your analysis."},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        try:
+            resp = await client.post(
+                url,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if "error" in data:
+                logger.warning(
+                    "model=<%s>, error=<%s> | openrouter call returned error",
+                    model, data["error"],
+                )
+                return ""
+            return data["choices"][0]["message"]["content"]
+        except Exception:
+            logger.exception(
+                "model=<%s> | openrouter call failed", model,
+            )
+            return ""
+
+
+def make_openrouter_complete_fn(
+    model: str,
+    max_tokens: int = 4096,
+    temperature: float = 0.3,
+) -> Callable[[str], Awaitable[str]]:
+    """Create a CompleteFn targeting OpenRouter.
+
+    Reads OPENROUTER_API_KEY from environment.
+
+    Args:
+        model: OpenRouter model identifier.
+        max_tokens: Max tokens per response.
+        temperature: Sampling temperature.
+
+    Returns:
+        An async completion callable.
+    """
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        logger.warning("OPENROUTER_API_KEY not set — OpenRouter calls will fail")
+
+    async def _complete(prompt: str) -> str:
+        return await _openrouter_complete(
+            prompt, model, api_key, max_tokens, temperature,
+        )
+
+    return _complete
+
+
+# ── Flock backend resolution ─────────────────────────────────────────
+
+# Known OpenRouter models for the Flock evaluation phase.
+# Each entry maps a CLI choice to (model_id, BackendConfig factory).
+_FLOCK_BACKENDS: dict[str, tuple[str, str]] = {
+    "ling-free": ("inclusionai/ling-2.6-1t:free", "free_tier"),
+    "ling-flash-free": ("inclusionai/ling-2.6-flash:free", "free_tier"),
+    "deepseek-flash": ("deepseek/deepseek-v4-flash", "paid_api"),
+    "deepseek-pro": ("deepseek/deepseek-v4-pro", "paid_api"),
+}
+
+
+def resolve_flock_backend(
+    choice: str,
+    local_model: str,
+    local_api_base: str,
+    max_tokens: int = 4096,
+    temperature: float = 0.3,
+) -> tuple[Callable[[str], Awaitable[str]], "BackendConfig | None"]:
+    """Resolve the Flock backend from a CLI choice string.
+
+    Returns a (complete_fn, backend_config) tuple.  When choice is
+    "local", backend_config is None (no risk wrapping needed).
+
+    Args:
+        choice: CLI backend choice (e.g. "ling-free", "local").
+        local_model: Model for the local vLLM endpoint.
+        local_api_base: Local vLLM API base URL.
+        max_tokens: Max tokens per response.
+        temperature: Sampling temperature.
+
+    Returns:
+        Tuple of (completion_callable, optional_backend_config).
+    """
+    from swarm.backend import BackendConfig
+
+    if choice == "local":
+        fn = make_complete_fn(local_model, local_api_base, max_tokens, temperature)
+        return fn, None
+
+    if choice not in _FLOCK_BACKENDS:
+        logger.warning(
+            "flock_backend=<%s> | unknown backend, falling back to local", choice,
+        )
+        fn = make_complete_fn(local_model, local_api_base, max_tokens, temperature)
+        return fn, None
+
+    model_id, tier_name = _FLOCK_BACKENDS[choice]
+
+    # Build the raw completion function targeting OpenRouter
+    raw_fn = make_openrouter_complete_fn(model_id, max_tokens, temperature)
+
+    # Build a local fallback for when the remote backend fails
+    local_fallback = BackendConfig.self_hosted(
+        name="local-vllm-fallback",
+        model=local_model,
+        api_base=local_api_base,
+    )
+
+    # Build the risk-aware backend config
+    if tier_name == "free_tier":
+        backend_config = BackendConfig.free_tier(
+            name=choice,
+            model=model_id,
+            api_base="https://openrouter.ai/api/v1",
+            api_key_env="OPENROUTER_API_KEY",
+            fallback=local_fallback,
+        )
+    else:
+        backend_config = BackendConfig.paid_api(
+            name=choice,
+            model=model_id,
+            api_base="https://openrouter.ai/api/v1",
+            api_key_env="OPENROUTER_API_KEY",
+            fallback=local_fallback,
+        )
+
+    logger.info(
+        "flock_backend=<%s>, model=<%s>, tier=<%s> | "
+        "flock will use remote backend with risk-aware wrapping",
+        choice, model_id, tier_name,
+    )
+
+    return raw_fn, backend_config
 
 
 # ── Corpus loading ───────────────────────────────────────────────────
@@ -398,6 +578,19 @@ def main() -> None:
         "--report-max-chars", type=int, default=24000,
         help="Max prompt chars for report generation (default: 24000)",
     )
+    parser.add_argument(
+        "--flock-backend", default="local",
+        choices=["local", "ling-free", "ling-flash-free", "deepseek-flash", "deepseek-pro"],
+        help=(
+            "Backend for the Flock evaluation phase. "
+            "'local' uses the same vLLM endpoint as workers. "
+            "'ling-free' uses Ling 2.6-1T via OpenRouter free tier (HIGH RISK). "
+            "'ling-flash-free' uses Ling 2.6-Flash via OpenRouter free tier. "
+            "'deepseek-flash' uses DeepSeek V4-Flash via OpenRouter (paid). "
+            "'deepseek-pro' uses DeepSeek V4-Pro via OpenRouter (paid). "
+            "Default: local"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -468,6 +661,15 @@ def main() -> None:
         resolved_source_model = args.source_model or default_model
         resolved_source_run = args.source_run or f"run_{time.strftime('%Y%m%d_%H%M%S')}"
 
+        # Resolve Flock backend (local vLLM or remote API with risk tier)
+        _flock_fn, flock_backend_config = resolve_flock_backend(
+            choice=args.flock_backend,
+            local_model=default_model,
+            local_api_base=api_base,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
+        )
+
         mcp_config = MCPSwarmConfig(
             max_workers=config.max_workers,
             max_waves=args.waves,
@@ -486,6 +688,8 @@ def main() -> None:
             compact_every_n_waves=args.compact_every,
             enable_rolling_summaries=not args.no_rolling_summaries,
             report_max_chars=args.report_max_chars,
+            flock_backend_config=flock_backend_config,
+            flock_complete=_flock_fn,
         )
 
         # The MCP engine needs a simple completion function for
@@ -535,6 +739,13 @@ def main() -> None:
                     "compact_every_n_waves": args.compact_every,
                     "rolling_summaries_enabled": not args.no_rolling_summaries,
                     "report_max_chars": args.report_max_chars,
+                    "flock_backend": args.flock_backend,
+                    "flock_backend_model": (
+                        flock_backend_config.model if flock_backend_config else default_model
+                    ),
+                    "flock_backend_tier": (
+                        flock_backend_config.risk_tier.value if flock_backend_config else "self_hosted"
+                    ),
                     "total_elapsed_s": result.metrics.total_elapsed_s,
                     "total_waves": result.metrics.total_waves,
                     "total_findings_stored": result.metrics.total_findings_stored,
@@ -550,6 +761,10 @@ def main() -> None:
             print(f"  MCP SWARM TEST COMPLETE")
             print(f"{'═' * 60}")
             print(f"  Model:              {default_model}")
+            print(f"  Flock backend:      {args.flock_backend}")
+            if flock_backend_config:
+                print(f"  Flock model:        {flock_backend_config.model}")
+                print(f"  Flock risk tier:    {flock_backend_config.risk_tier.value}")
             print(f"  Source model:       {resolved_source_model}")
             print(f"  Source run:         {resolved_source_run}")
             print(f"  API base:           {api_base}")

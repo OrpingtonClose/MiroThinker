@@ -60,6 +60,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from swarm.backend import BackendConfig, RiskAwareBackend
+
 if TYPE_CHECKING:
     from corpus import ConditionStore
 
@@ -590,6 +592,11 @@ class QueryType(str, Enum):
     SYNTHESIZE = "synthesize"
     """Multiple related findings → combine into higher-order insight."""
 
+    AGGREGATE = "aggregate"
+    """Cross-clone strategic research planning → read all findings, gaps,
+    contradictions, and convergent themes to produce a prioritized
+    external research plan.  Fires once per round, not per-finding."""
+
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -772,6 +779,7 @@ class FlockQueryManagerConfig:
     enable_challenge: bool = True
     query_relevance_boost: float = 2.0
     serendipity_floor: float = 0.4
+    backend_config: BackendConfig | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1323,6 +1331,337 @@ def _build_challenge_prompt(
 
 
 # ---------------------------------------------------------------------------
+# Aggregate query — cross-clone strategic research planning
+# ---------------------------------------------------------------------------
+
+
+def _gather_aggregate_state(
+    store: "ConditionStore",
+    research_query: str,
+    max_findings: int = 30,
+    max_gaps: int = 15,
+    max_contradictions: int = 10,
+) -> dict[str, Any]:
+    """Gather cross-clone intelligence from the store for an AGGREGATE query.
+
+    Reads the full store state to identify:
+    - Top findings by information_gain (what the swarm finds most interesting)
+    - Open gaps (what's explicitly missing)
+    - Unresolved contradictions
+    - Convergent themes (angles that independently flagged similar findings)
+
+    Args:
+        store: The ConditionStore.
+        research_query: The user's research question.
+        max_findings: Maximum top findings to include.
+        max_gaps: Maximum open gaps to include.
+        max_contradictions: Maximum contradictions to include.
+
+    Returns:
+        Dict with keys: top_findings, open_gaps, contradictions, convergent_angles.
+    """
+    lock = _get_store_lock(store)
+    result: dict[str, Any] = {
+        "top_findings": [],
+        "open_gaps": [],
+        "contradictions": [],
+        "convergent_angles": [],
+    }
+
+    try:
+        with lock:
+            # Top findings by information_gain — what the swarm values most
+            top_rows = store.conn.execute(
+                "SELECT id, fact, angle, information_gain, confidence, novelty_score "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND row_type = 'finding' "
+                "AND score_version > 0 "
+                "ORDER BY information_gain DESC "
+                "LIMIT ?",
+                [max_findings],
+            ).fetchall()
+            result["top_findings"] = [
+                {"id": r[0], "fact": r[1], "angle": r[2],
+                 "info_gain": r[3], "confidence": r[4], "novelty": r[5]}
+                for r in top_rows
+            ]
+
+            # Open gaps — unfulfilled expansion requests
+            gap_rows = store.conn.execute(
+                "SELECT id, fact, angle, expansion_gap, expansion_priority "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND expansion_gap != '' "
+                "AND expansion_fulfilled = FALSE "
+                "AND row_type != 'research_target' "
+                "ORDER BY expansion_priority DESC "
+                "LIMIT ?",
+                [max_gaps],
+            ).fetchall()
+            result["open_gaps"] = [
+                {"id": r[0], "fact": r[1], "angle": r[2],
+                 "gap": r[3], "priority": r[4]}
+                for r in gap_rows
+            ]
+
+            # Unresolved contradictions
+            contra_rows = store.conn.execute(
+                "SELECT id, fact, angle, contradiction_partner "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND contradiction_flag = TRUE "
+                "AND score_version > 0 "
+                "ORDER BY information_gain DESC "
+                "LIMIT ?",
+                [max_contradictions],
+            ).fetchall()
+            result["contradictions"] = [
+                {"id": r[0], "fact": r[1], "angle": r[2],
+                 "partner": r[3]}
+                for r in contra_rows
+            ]
+
+            # Convergent angles — which angles have the most overlapping themes
+            # (identified by angles that share cluster_ids)
+            convergence_rows = store.conn.execute(
+                "SELECT cluster_id, COUNT(DISTINCT angle) as angle_count, "
+                "GROUP_CONCAT(DISTINCT angle) as angles "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND row_type = 'finding' "
+                "AND cluster_id >= 0 "
+                "GROUP BY cluster_id "
+                "HAVING angle_count >= 2 "
+                "ORDER BY angle_count DESC "
+                "LIMIT 10",
+            ).fetchall()
+            result["convergent_angles"] = [
+                {"cluster_id": r[0], "angle_count": r[1], "angles": r[2]}
+                for r in convergence_rows
+            ]
+
+    except Exception as exc:
+        logger.warning("error=<%s> | aggregate state gathering failed", exc)
+
+    return result
+
+
+def _build_aggregate_prompt(
+    state: dict[str, Any],
+    research_query: str,
+    round_number: int,
+) -> str:
+    """Build the AGGREGATE prompt from gathered store state.
+
+    Asks the model to synthesize across ALL clone perspectives and
+    produce a prioritized external research plan.
+
+    Args:
+        state: Output of ``_gather_aggregate_state``.
+        research_query: The user's research question.
+        round_number: Current Flock round.
+
+    Returns:
+        The full AGGREGATE prompt string.
+    """
+    # Build the findings block
+    findings_block = ""
+    for f in state["top_findings"]:
+        findings_block += (
+            f"  [{f['angle']}] (info_gain={f['info_gain']:.2f}, "
+            f"confidence={f['confidence']:.2f}) {f['fact']}\n"
+        )
+
+    # Build the gaps block
+    gaps_block = ""
+    for g in state["open_gaps"]:
+        gaps_block += (
+            f"  [{g['angle']}] (priority={g['priority']:.2f}) "
+            f"GAP: {g['gap']}\n"
+        )
+
+    # Build the contradictions block
+    contra_block = ""
+    for c in state["contradictions"]:
+        contra_block += (
+            f"  [{c['angle']}] {c['fact']} "
+            f"(contradicts: {c['partner']})\n"
+        )
+
+    # Build the convergence block
+    convergence_block = ""
+    for cv in state["convergent_angles"]:
+        convergence_block += (
+            f"  Cluster {cv['cluster_id']}: {cv['angle_count']} angles "
+            f"converge ({cv['angles']})\n"
+        )
+
+    return (
+        f"AGGREGATE RESEARCH PLANNING — Round {round_number}\n\n"
+        f"RESEARCH OBJECTIVE:\n\"{research_query}\"\n\n"
+        f"You have access to the complete state of a swarm of independent "
+        f"researchers who have been analyzing this objective. Below is "
+        f"their collective intelligence.\n\n"
+        f"TOP FINDINGS (by information gain):\n"
+        f"{findings_block or '  (none yet)\n'}\n"
+        f"OPEN GAPS (explicit data needs):\n"
+        f"{gaps_block or '  (none)\n'}\n"
+        f"UNRESOLVED CONTRADICTIONS:\n"
+        f"{contra_block or '  (none)\n'}\n"
+        f"CONVERGENT THEMES (multiple perspectives independently flagged):\n"
+        f"{convergence_block or '  (none)\n'}\n"
+        f"Given EVERYTHING above, produce exactly 5 highest-value external "
+        f"research directions. For each direction:\n\n"
+        f"DIRECTION_1:\n"
+        f"  SEARCH_QUERY: [exact query to search for]\n"
+        f"  SOURCE_TYPE: [academic_paper / clinical_trial / meta_analysis / "
+        f"forum_post / dataset / review_article / case_report / textbook]\n"
+        f"  WHY: [why this advances the research objective]\n"
+        f"  FILLS_GAPS: [which gap IDs this would address, or 'none']\n"
+        f"  RESOLVES_CONTRADICTIONS: [which contradiction IDs, or 'none']\n"
+        f"  PRIORITY: [0.0-1.0, where 1.0 = most urgent]\n\n"
+        f"DIRECTION_2:\n  ...\n\n"
+        f"Prioritize directions that:\n"
+        f"1. Resolve contradictions (highest value — conflicting data blocks convergence)\n"
+        f"2. Fill gaps where 2+ angles independently identified the same need\n"
+        f"3. Provide mechanistic evidence for convergent themes\n"
+        f"4. Address the research objective from angles the swarm hasn't explored yet\n"
+        f"5. Ground high-novelty findings with authoritative sources\n"
+    )
+
+
+def _parse_aggregate_response(
+    raw_response: str,
+    round_number: int,
+) -> list[dict[str, Any]]:
+    """Parse an AGGREGATE response into structured research directions.
+
+    Extracts DIRECTION blocks from the model's response.  Tolerant of
+    format variations.
+
+    Args:
+        raw_response: The model's raw text response.
+        round_number: Current Flock round.
+
+    Returns:
+        List of dicts with keys: search_query, source_type, why,
+        fills_gaps, resolves_contradictions, priority.
+    """
+    import re  # noqa: PLC0415
+
+    directions: list[dict[str, Any]] = []
+
+    # Split on DIRECTION_N: patterns
+    direction_blocks = re.split(r"DIRECTION_\d+:", raw_response)
+
+    for block in direction_blocks[1:]:  # skip preamble before DIRECTION_1
+        direction: dict[str, Any] = {
+            "search_query": "",
+            "source_type": "academic_paper",
+            "why": "",
+            "fills_gaps": "",
+            "resolves_contradictions": "",
+            "priority": 0.5,
+            "round": round_number,
+        }
+
+        # Extract fields
+        for field_name, key in [
+            ("SEARCH_QUERY", "search_query"),
+            ("SOURCE_TYPE", "source_type"),
+            ("WHY", "why"),
+            ("FILLS_GAPS", "fills_gaps"),
+            ("RESOLVES_CONTRADICTIONS", "resolves_contradictions"),
+        ]:
+            match = re.search(
+                rf"{field_name}:\s*(.+?)(?=\n\s*[A-Z_]+:|$)",
+                block, re.DOTALL,
+            )
+            if match:
+                direction[key] = match.group(1).strip()
+
+        # Extract priority
+        priority_match = re.search(r"PRIORITY:\s*([\d.]+)", block)
+        if priority_match:
+            try:
+                direction["priority"] = float(priority_match.group(1))
+            except ValueError:
+                pass
+
+        if direction["search_query"]:
+            directions.append(direction)
+
+    return directions
+
+
+def _store_aggregate_research_targets(
+    store: "ConditionStore",
+    directions: list[dict[str, Any]],
+    run_id: str,
+    round_number: int,
+) -> int:
+    """Store parsed AGGREGATE directions as research_target rows.
+
+    Creates rows with row_type='research_target' in the ConditionStore
+    so the MCP researcher can pick them up with higher priority than
+    individual-gap targets.
+
+    Args:
+        store: The ConditionStore.
+        directions: Parsed research directions.
+        run_id: Current run identifier.
+        round_number: Current Flock round.
+
+    Returns:
+        Number of targets stored.
+    """
+    lock = _get_store_lock(store)
+    stored = 0
+
+    for direction in directions:
+        try:
+            with lock:
+                cid = store._next_id
+                store._next_id += 1
+                store.conn.execute(
+                    "INSERT INTO conditions "
+                    "(id, fact, angle, row_type, source_model, source_run, "
+                    " consider_for_use, expansion_gap, expansion_priority, "
+                    " expansion_fulfilled, score_version) "
+                    "VALUES (?, ?, 'aggregate', 'research_target', ?, ?, "
+                    " TRUE, ?, ?, FALSE, 1)",
+                    [
+                        cid,
+                        (
+                            f"[AGGREGATE R{round_number}] "
+                            f"{direction['search_query']} "
+                            f"(source_type: {direction['source_type']}) — "
+                            f"{direction['why']}"
+                        ),
+                        f"flock_aggregate_{run_id}",
+                        run_id,
+                        direction["search_query"],
+                        min(direction["priority"] + 0.2, 1.0),  # boost vs individual gaps
+                    ],
+                )
+                stored += 1
+        except Exception as exc:
+            logger.warning(
+                "direction=<%s>, error=<%s> | failed to store aggregate target",
+                direction.get("search_query", "?"), exc,
+            )
+
+    if stored:
+        logger.info(
+            "round=<%d>, targets_stored=<%d> | aggregate research targets deposited",
+            round_number, stored,
+        )
+
+    return stored
+
+
+# ---------------------------------------------------------------------------
 # Result parsing
 # ---------------------------------------------------------------------------
 
@@ -1756,12 +2095,34 @@ class FlockQueryManager:
         config: FlockQueryManagerConfig | None = None,
         complete_for_clone: Callable[[CloneContext], Awaitable[Callable[[str], Awaitable[str]]]] | None = None,
         mcp_research_fn: Callable[[str], Awaitable[int]] | None = None,
+        fallback_complete: Callable[[str], Awaitable[str]] | None = None,
     ) -> None:
         self.store = store
-        self.complete = complete
         self.config = config or FlockQueryManagerConfig()
         self._complete_for_clone = complete_for_clone
         self._mcp_research_fn = mcp_research_fn
+
+        # Wrap the complete function with risk-aware protection if a
+        # backend config is provided.  The wrapper is a drop-in
+        # CompleteFn — rate limiting, caching, retries, and fallback
+        # are transparent to the rest of the pipeline.
+        self._backend: RiskAwareBackend | None = None
+        if self.config.backend_config is not None:
+            from swarm.backend import wrap_complete
+
+            self._backend = wrap_complete(
+                complete,
+                self.config.backend_config,
+                fallback_complete=fallback_complete,
+            )
+            self.complete = self._backend
+            logger.info(
+                "backend=<%s>, tier=<%s> | flock using risk-aware backend",
+                self.config.backend_config.name,
+                self.config.backend_config.risk_tier.value,
+            )
+        else:
+            self.complete = complete
 
     async def run(
         self,
@@ -1994,6 +2355,56 @@ class FlockQueryManager:
             # magnitudes to inform next round's budget allocation
             prior_type_magnitudes = round_type_magnitudes
 
+            # AGGREGATE query: synthesize across ALL clone perspectives
+            # to produce a prioritized external research plan.  Fires
+            # once per round — reads the full store state and asks
+            # "given everything, what's the best external research?"
+            if self.config.research_query and round_queries > 0:
+                try:
+                    agg_state = _gather_aggregate_state(
+                        self.store, self.config.research_query,
+                    )
+                    # Only fire if there's meaningful state to aggregate
+                    has_content = (
+                        len(agg_state["top_findings"]) >= 3
+                        or len(agg_state["open_gaps"]) >= 1
+                        or len(agg_state["contradictions"]) >= 1
+                    )
+                    if has_content:
+                        agg_prompt = _build_aggregate_prompt(
+                            agg_state, self.config.research_query, round_num,
+                        )
+                        agg_t0 = time.monotonic()
+                        agg_response = await self.complete(agg_prompt)
+                        agg_elapsed = time.monotonic() - agg_t0
+
+                        if agg_response:
+                            directions = _parse_aggregate_response(
+                                agg_response, round_num,
+                            )
+                            targets_stored = _store_aggregate_research_targets(
+                                self.store, directions, run_id, round_num,
+                            )
+
+                            await _emit({
+                                "type": "flock_aggregate",
+                                "round": round_num,
+                                "directions": len(directions),
+                                "targets_stored": targets_stored,
+                                "elapsed_s": round(agg_elapsed, 1),
+                            })
+                            logger.info(
+                                "round=<%d>, directions=<%d>, stored=<%d>, "
+                                "elapsed_s=<%.1f> | aggregate research plan generated",
+                                round_num, len(directions), targets_stored,
+                                agg_elapsed,
+                            )
+                except Exception as exc:
+                    logger.warning(
+                        "round=<%d>, error=<%s> | aggregate query failed",
+                        round_num, exc,
+                    )
+
             # Interleaved MCP research: after each round, trigger
             # external data acquisition for stuck/ungrounded findings.
             # This injects fresh external evidence into the store so
@@ -2030,6 +2441,26 @@ class FlockQueryManager:
             result.total_new_findings, result.wasted_bridge_queries,
             result.elapsed_s, result.convergence_reason,
         )
+
+        # Emit backend telemetry if using a risk-aware backend
+        if self._backend is not None:
+            backend_summary = self._backend.summary()
+            logger.info(
+                "backend=<%s>, tier=<%s>, calls=<%d>, cache_hits=<%d>, "
+                "cache_rate=<%.1f%%>, failures=<%d>, throttles=<%d> | "
+                "backend metrics",
+                backend_summary["backend"],
+                backend_summary["risk_tier"],
+                backend_summary["total_calls"],
+                backend_summary["cache_hits"],
+                backend_summary["cache_hit_rate"] * 100,
+                backend_summary["failures"],
+                backend_summary["throttle_events"],
+            )
+            await _emit({
+                "type": "flock_backend_metrics",
+                **backend_summary,
+            })
 
         return result
 
