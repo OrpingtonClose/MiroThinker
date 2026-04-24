@@ -783,11 +783,14 @@ def select_queries(
         except Exception as exc:
             logger.warning("error=<%s> | SYNTHESIZE query selection failed", exc)
 
-    # Apply priority decay based on evaluation_count
+    # Apply priority decay based on evaluation_count.
+    # CHALLENGE queries already have decay applied during construction,
+    # so skip them here to avoid double-decay.
     for query in queries:
-        if query.metadata.get("evaluation_count", 0) > 1:
+        eval_count = query.metadata.get("evaluation_count", 0)
+        if eval_count > 1 and query.query_type != QueryType.CHALLENGE:
             query.priority = compute_priority_decay(
-                query.metadata["evaluation_count"], query.priority,
+                eval_count, query.priority,
             )
 
     # Sort by priority descending, cap at max
