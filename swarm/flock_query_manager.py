@@ -731,6 +731,11 @@ class FlockQueryManagerConfig:
     """Configuration for the Flock Query Manager.
 
     Attributes:
+        research_query: The user's research question.  Acts as the
+            primary relevance signal — every query's priority is
+            weighted by how directly the finding serves this question.
+            Injected into every evaluation prompt so the model judges
+            with respect to the research objective.
         max_rounds: Maximum evaluation rounds before stopping.
         max_queries_per_round: Maximum queries per clone per round.
         batch_size: How many queries to fire in parallel.
@@ -744,8 +749,16 @@ class FlockQueryManagerConfig:
         cross_angle_min_relevance: Minimum relevance for BRIDGE queries.
         enable_synthesis: Whether to run SYNTHESIZE queries.
         enable_challenge: Whether to run CHALLENGE queries.
+        query_relevance_boost: Priority multiplier for findings whose
+            relevance_score is high relative to the research query.
+            Applied to VALIDATE, VERIFY, ENRICH, GROUND queries.
+        serendipity_floor: Minimum priority multiplier for BRIDGE,
+            SYNTHESIZE, and CHALLENGE queries.  Prevents cross-domain
+            insight from being killed by strict query relevance —
+            a dental finding bridged to trenbolone should survive.
     """
 
+    research_query: str = ""
     max_rounds: int = 10
     max_queries_per_round: int = 500
     batch_size: int = 20
@@ -757,6 +770,8 @@ class FlockQueryManagerConfig:
     cross_angle_min_relevance: float = 0.3
     enable_synthesis: bool = True
     enable_challenge: bool = True
+    query_relevance_boost: float = 2.0
+    serendipity_floor: float = 0.4
 
 
 # ---------------------------------------------------------------------------
@@ -813,7 +828,7 @@ def select_queries(
     try:
         with lock:
             validate_rows = store.conn.execute(
-                "SELECT id, fact, novelty_score, confidence, angle, evaluation_count "
+                "SELECT id, fact, novelty_score, confidence, angle, evaluation_count, relevance_score "
                 "FROM conditions "
                 "WHERE consider_for_use = TRUE "
                 "AND row_type = 'finding' "
@@ -824,15 +839,15 @@ def select_queries(
                 "LIMIT ?",
                 [_limit_for("validate")],
             ).fetchall()
-        for cid, fact, novelty, conf, angle, eval_count in validate_rows:
+        for cid, fact, novelty, conf, angle, eval_count, rel_score in validate_rows:
             priority = (novelty - conf) * 1.5
             queries.append(FlockQuery(
                 query_type=QueryType.VALIDATE,
-                prompt=_build_validate_prompt(fact, angle, clone_angle),
+                prompt=_build_validate_prompt(fact, angle, clone_angle, config.research_query),
                 target_condition_ids=[cid],
                 source_angle=clone_angle,
                 priority=priority,
-                metadata={"original_angle": angle, "novelty": novelty, "confidence": conf, "evaluation_count": eval_count},
+                metadata={"original_angle": angle, "novelty": novelty, "confidence": conf, "evaluation_count": eval_count, "relevance_score": rel_score or 0.5},
             ))
     except Exception as exc:
         logger.warning("error=<%s> | VALIDATE query selection failed", exc)
@@ -842,7 +857,8 @@ def select_queries(
         with lock:
             contra_rows = store.conn.execute(
                 "SELECT c.id, c.fact, c.angle, c.confidence, "
-                "       c.contradiction_partner, c2.fact, c2.angle, c.evaluation_count "
+                "       c.contradiction_partner, c2.fact, c2.angle, c.evaluation_count, "
+                "       c.relevance_score "
                 "FROM conditions c "
                 "LEFT JOIN conditions c2 ON c.contradiction_partner = c2.id "
                 "WHERE c.consider_for_use = TRUE "
@@ -853,7 +869,7 @@ def select_queries(
                 "LIMIT ?",
                 [_limit_for("adjudicate")],
             ).fetchall()
-        for cid, fact, angle, conf, partner_id, partner_fact, partner_angle, eval_count in contra_rows:
+        for cid, fact, angle, conf, partner_id, partner_fact, partner_angle, eval_count, rel_score in contra_rows:
             if partner_fact is None:
                 continue
             priority = 0.8 * config.contradiction_boost
@@ -861,11 +877,12 @@ def select_queries(
                 query_type=QueryType.ADJUDICATE,
                 prompt=_build_adjudicate_prompt(
                     fact, angle, partner_fact, partner_angle, clone_angle,
+                    research_query=config.research_query,
                 ),
                 target_condition_ids=[cid, partner_id],
                 source_angle=clone_angle,
                 priority=priority,
-                metadata={"side_a_angle": angle, "side_b_angle": partner_angle, "evaluation_count": eval_count},
+                metadata={"side_a_angle": angle, "side_b_angle": partner_angle, "evaluation_count": eval_count, "relevance_score": rel_score or 0.5},
             ))
     except Exception as exc:
         logger.warning("error=<%s> | ADJUDICATE query selection failed", exc)
@@ -874,7 +891,7 @@ def select_queries(
     try:
         with lock:
             verify_rows = store.conn.execute(
-                "SELECT id, fact, fabrication_risk, angle, source_url, evaluation_count "
+                "SELECT id, fact, fabrication_risk, angle, source_url, evaluation_count, relevance_score "
                 "FROM conditions "
                 "WHERE consider_for_use = TRUE "
                 "AND row_type = 'finding' "
@@ -884,15 +901,15 @@ def select_queries(
                 "LIMIT ?",
                 [config.fabrication_risk_floor, _limit_for("verify")],
             ).fetchall()
-        for cid, fact, fab_risk, angle, source_url, eval_count in verify_rows:
+        for cid, fact, fab_risk, angle, source_url, eval_count, rel_score in verify_rows:
             priority = fab_risk * 1.2
             queries.append(FlockQuery(
                 query_type=QueryType.VERIFY,
-                prompt=_build_verify_prompt(fact, angle, source_url, clone_angle),
+                prompt=_build_verify_prompt(fact, angle, source_url, clone_angle, config.research_query),
                 target_condition_ids=[cid],
                 source_angle=clone_angle,
                 priority=priority,
-                metadata={"fabrication_risk": fab_risk, "original_angle": angle, "evaluation_count": eval_count},
+                metadata={"fabrication_risk": fab_risk, "original_angle": angle, "evaluation_count": eval_count, "relevance_score": rel_score or 0.5},
             ))
     except Exception as exc:
         logger.warning("error=<%s> | VERIFY query selection failed", exc)
@@ -916,11 +933,11 @@ def select_queries(
             priority = (rel - spec) * 1.0
             queries.append(FlockQuery(
                 query_type=QueryType.ENRICH,
-                prompt=_build_enrich_prompt(fact, angle, clone_angle),
+                prompt=_build_enrich_prompt(fact, angle, clone_angle, config.research_query),
                 target_condition_ids=[cid],
                 source_angle=clone_angle,
                 priority=priority,
-                metadata={"specificity": spec, "relevance": rel, "original_angle": angle, "evaluation_count": eval_count},
+                metadata={"specificity": spec, "relevance": rel, "original_angle": angle, "evaluation_count": eval_count, "relevance_score": rel or 0.5},
             ))
     except Exception as exc:
         logger.warning("error=<%s> | ENRICH query selection failed", exc)
@@ -929,7 +946,7 @@ def select_queries(
     try:
         with lock:
             ground_rows = store.conn.execute(
-                "SELECT id, fact, actionability_score, angle, evaluation_count "
+                "SELECT id, fact, actionability_score, angle, evaluation_count, relevance_score "
                 "FROM conditions "
                 "WHERE consider_for_use = TRUE "
                 "AND row_type = 'finding' "
@@ -940,15 +957,15 @@ def select_queries(
                 "LIMIT ?",
                 [_limit_for("ground")],
             ).fetchall()
-        for cid, fact, action_score, angle, eval_count in ground_rows:
+        for cid, fact, action_score, angle, eval_count, rel_score in ground_rows:
             priority = action_score * 0.9
             queries.append(FlockQuery(
                 query_type=QueryType.GROUND,
-                prompt=_build_ground_prompt(fact, angle, clone_angle),
+                prompt=_build_ground_prompt(fact, angle, clone_angle, config.research_query),
                 target_condition_ids=[cid],
                 source_angle=clone_angle,
                 priority=priority,
-                metadata={"actionability": action_score, "original_angle": angle, "evaluation_count": eval_count},
+                metadata={"actionability": action_score, "original_angle": angle, "evaluation_count": eval_count, "relevance_score": rel_score or 0.5},
             ))
     except Exception as exc:
         logger.warning("error=<%s> | GROUND query selection failed", exc)
@@ -1011,11 +1028,11 @@ def select_queries(
             priority = nov * rel * 1.3
             queries.append(FlockQuery(
                 query_type=QueryType.BRIDGE,
-                prompt=_build_bridge_prompt(fact, angle, clone_angle),
+                prompt=_build_bridge_prompt(fact, angle, clone_angle, config.research_query),
                 target_condition_ids=[cid],
                 source_angle=clone_angle,
                 priority=priority,
-                metadata={"from_angle": angle, "relevance": rel, "novelty": nov, "evaluation_count": eval_count},
+                metadata={"from_angle": angle, "relevance": rel, "novelty": nov, "evaluation_count": eval_count, "relevance_score": rel or 0.5},
             ))
     except Exception as exc:
         logger.warning("error=<%s> | BRIDGE query selection failed", exc)
@@ -1025,7 +1042,7 @@ def select_queries(
         try:
             with lock:
                 challenge_rows = store.conn.execute(
-                    "SELECT id, fact, confidence, angle, evaluation_count "
+                    "SELECT id, fact, confidence, angle, evaluation_count, relevance_score "
                     "FROM conditions "
                     "WHERE consider_for_use = TRUE "
                     "AND row_type = 'finding' "
@@ -1036,12 +1053,12 @@ def select_queries(
                     "LIMIT ?",
                     [clone_angle, _limit_for("challenge")],
                 ).fetchall()
-            for cid, fact, conf, angle, eval_count in challenge_rows:
+            for cid, fact, conf, angle, eval_count, rel_score in challenge_rows:
                 base_priority = conf * 0.7
                 priority = compute_priority_decay(eval_count, base_priority)
                 queries.append(FlockQuery(
                     query_type=QueryType.CHALLENGE,
-                    prompt=_build_challenge_prompt(fact, angle, clone_angle),
+                    prompt=_build_challenge_prompt(fact, angle, clone_angle, config.research_query),
                     target_condition_ids=[cid],
                     source_angle=clone_angle,
                     priority=priority,
@@ -1049,6 +1066,7 @@ def select_queries(
                         "confidence": conf,
                         "original_angle": angle,
                         "evaluation_count": eval_count,
+                        "relevance_score": rel_score or 0.5,
                     },
                 ))
         except Exception as exc:
@@ -1101,7 +1119,7 @@ def select_queries(
 
                 queries.append(FlockQuery(
                     query_type=QueryType.SYNTHESIZE,
-                    prompt=_build_synthesize_prompt(facts, angles, clone_angle),
+                    prompt=_build_synthesize_prompt(facts, angles, clone_angle, config.research_query),
                     target_condition_ids=member_ids,
                     source_angle=clone_angle,
                     priority=priority,
@@ -1109,6 +1127,7 @@ def select_queries(
                         "cluster_id": cluster_id,
                         "cluster_size": cluster_size,
                         "unique_angles": unique_angles,
+                        "relevance_score": 0.5,
                     },
                 ))
         except Exception as exc:
@@ -1124,6 +1143,28 @@ def select_queries(
                 eval_count, query.priority,
             )
 
+    # Research query relevance weighting — the research question is the
+    # primary relevance signal.  Findings with high relevance_score get
+    # boosted; low-relevance findings get penalised.
+    #
+    # STRICT types (VALIDATE, VERIFY, ENRICH, GROUND, ADJUDICATE):
+    #   priority *= relevance_score * query_relevance_boost
+    #   A finding with relevance 0.9 gets 1.8x boost (at default 2.0).
+    #   A finding with relevance 0.2 gets 0.4x — effectively deprioritised.
+    #
+    # SERENDIPITY types (BRIDGE, SYNTHESIZE, CHALLENGE):
+    #   priority *= max(relevance_weight, serendipity_floor)
+    #   Cross-domain queries keep at least serendipity_floor (default 0.4)
+    #   even when relevance is near zero.  Dentistry × trenbolone survives.
+    if config.research_query:
+        serendipity_types = {QueryType.BRIDGE, QueryType.SYNTHESIZE, QueryType.CHALLENGE}
+        for query in queries:
+            rel = query.metadata.get("relevance_score", 0.5)
+            weight = rel * config.query_relevance_boost
+            if query.query_type in serendipity_types:
+                weight = max(weight, config.serendipity_floor)
+            query.priority *= weight
+
     # Sort by priority descending, cap at max
     queries.sort(key=lambda q: q.priority, reverse=True)
     return queries[:config.max_queries_per_round]
@@ -1133,13 +1174,37 @@ def select_queries(
 # Prompt builders — short, focused evaluation prompts
 # ---------------------------------------------------------------------------
 
-def _build_validate_prompt(fact: str, origin_angle: str, evaluator_angle: str) -> str:
+def _research_frame(research_query: str) -> str:
+    """Build the research-question framing block for evaluation prompts.
+
+    Every prompt gets this preamble so the model evaluates with respect
+    to the user's research objective.  When no query is set the block
+    is empty — backward compatible.
+    """
+    if not research_query:
+        return ""
     return (
+        f"RESEARCH OBJECTIVE (primary relevance signal):\n"
+        f'"{research_query}"\n'
+        f"All evaluation below must converge toward answering this question.\n"
+        f"Prioritise findings that advance, refine, or challenge the objective.\n"
+        f"Cross-domain connections are welcome when they illuminate the objective "
+        f"from an unexpected angle.\n\n"
+    )
+
+
+def _build_validate_prompt(
+    fact: str, origin_angle: str, evaluator_angle: str,
+    research_query: str = "",
+) -> str:
+    return (
+        f"{_research_frame(research_query)}"
         f"EVALUATE from your {evaluator_angle} expertise.\n"
         f"A researcher studying {origin_angle} claims:\n"
         f'"{fact}"\n\n'
-        f"Is this claim valid? Rate confidence 0.0-1.0 and explain briefly.\n"
+        f"Is this claim valid? How does it serve the research objective?\n"
         f"Format: CONFIDENCE: X.X\nVERDICT: [supported/refuted/insufficient_evidence]\n"
+        f"RELEVANCE: [how this finding advances or fails to advance the research objective]\n"
         f"REASONING: [1-2 sentences]"
     )
 
@@ -1148,13 +1213,17 @@ def _build_adjudicate_prompt(
     fact_a: str, angle_a: str,
     fact_b: str, angle_b: str,
     evaluator_angle: str,
+    *,
+    research_query: str = "",
 ) -> str:
     return (
+        f"{_research_frame(research_query)}"
         f"ADJUDICATE from your {evaluator_angle} expertise.\n"
         f"Two findings contradict each other:\n\n"
         f"SIDE A ({angle_a}):\n\"{fact_a}\"\n\n"
         f"SIDE B ({angle_b}):\n\"{fact_b}\"\n\n"
-        f"Which side does the evidence support? Or is this a false contradiction "
+        f"Which side does the evidence support? Which matters more for the "
+        f"research objective? Or is this a false contradiction "
         f"(both can be true under different conditions)?\n"
         f"Format: VERDICT: [side_a/side_b/both_valid/neither]\n"
         f"CONFIDENCE: X.X\nREASONING: [1-2 sentences]\n"
@@ -1164,9 +1233,11 @@ def _build_adjudicate_prompt(
 
 def _build_verify_prompt(
     fact: str, angle: str, source_url: str, evaluator_angle: str,
+    research_query: str = "",
 ) -> str:
     source_text = source_url if source_url else "(no source cited)"
     return (
+        f"{_research_frame(research_query)}"
         f"VERIFY from your {evaluator_angle} expertise.\n"
         f"This finding has been flagged as potentially fabricated:\n"
         f'"{fact}"\n'
@@ -1178,26 +1249,35 @@ def _build_verify_prompt(
     )
 
 
-def _build_enrich_prompt(fact: str, origin_angle: str, evaluator_angle: str) -> str:
+def _build_enrich_prompt(
+    fact: str, origin_angle: str, evaluator_angle: str,
+    research_query: str = "",
+) -> str:
     return (
+        f"{_research_frame(research_query)}"
         f"ENRICH from your {evaluator_angle} expertise.\n"
         f"This finding from {origin_angle} is relevant but lacks specifics:\n"
         f'"{fact}"\n\n'
-        f"Add concrete data: specific numbers, dosages, study names, "
-        f"mechanisms, or citations that make this claim precise and testable.\n"
+        f"Add concrete data that makes this claim precise, testable, and "
+        f"actionable for the research objective: specific numbers, dosages, "
+        f"study names, mechanisms, or citations.\n"
         f"Format: ENRICHED_CLAIM: [the claim with added specifics]\n"
         f"ADDED_DATA: [list each specific data point you added]\n"
         f"SOURCES: [any sources for the added data]"
     )
 
 
-def _build_ground_prompt(fact: str, origin_angle: str, evaluator_angle: str) -> str:
+def _build_ground_prompt(
+    fact: str, origin_angle: str, evaluator_angle: str,
+    research_query: str = "",
+) -> str:
     return (
+        f"{_research_frame(research_query)}"
         f"GROUND from your {evaluator_angle} expertise.\n"
         f"This actionable finding needs evidence grounding:\n"
         f'"{fact}"\n\n'
         f"What specific evidence supports or refutes this? Cite mechanisms, "
-        f"studies, or established principles.\n"
+        f"studies, or established principles relevant to the research objective.\n"
         f"Format: EVIDENCE_FOR: [supporting evidence]\n"
         f"EVIDENCE_AGAINST: [contradicting evidence]\n"
         f"NET_ASSESSMENT: [supported/contested/unsupported]\n"
@@ -1205,33 +1285,41 @@ def _build_ground_prompt(fact: str, origin_angle: str, evaluator_angle: str) -> 
     )
 
 
-def _build_bridge_prompt(fact: str, origin_angle: str, evaluator_angle: str) -> str:
+def _build_bridge_prompt(
+    fact: str, origin_angle: str, evaluator_angle: str,
+    research_query: str = "",
+) -> str:
     return (
+        f"{_research_frame(research_query)}"
         f"BRIDGE from your {evaluator_angle} expertise.\n"
         f"This finding comes from {origin_angle}:\n"
         f'"{fact}"\n\n'
         f"How does this interact with your {evaluator_angle} domain? "
         f"Look for: mechanistic links, compounding effects, contradictions, "
-        f"or shared upstream causes.\n"
+        f"or shared upstream causes — especially those that illuminate the "
+        f"research objective from an unexpected direction.\n"
         f"Format: INTERACTION: [describe the cross-domain connection]\n"
         f"TYPE: [amplifies/contradicts/shares_mechanism/independent]\n"
-        f"IMPLICATION: [what this means for the research]\n"
+        f"IMPLICATION: [what this means for the research objective]\n"
         f"CONFIDENCE: X.X"
     )
 
 
 def _build_synthesize_prompt(
     facts: list[str], angles: list[str], evaluator_angle: str,
+    research_query: str = "",
 ) -> str:
     findings_block = "\n".join(
         f"  [{a}] {f}" for f, a in zip(facts, angles)
     )
     return (
+        f"{_research_frame(research_query)}"
         f"SYNTHESIZE from your {evaluator_angle} expertise.\n"
         f"These related findings span multiple angles:\n"
         f"{findings_block}\n\n"
-        f"What higher-order insight emerges from combining them? "
-        f"What do they collectively imply that none implies alone?\n"
+        f"What higher-order insight emerges from combining them that "
+        f"advances the research objective? What do they collectively "
+        f"imply that none implies alone?\n"
         f"Format: SYNTHESIS: [the emergent insight]\n"
         f"MECHANISM: [the underlying mechanism connecting them]\n"
         f"PREDICTION: [what this predicts that could be tested]\n"
@@ -1241,13 +1329,17 @@ def _build_synthesize_prompt(
 
 def _build_challenge_prompt(
     fact: str, origin_angle: str, evaluator_angle: str,
+    research_query: str = "",
 ) -> str:
     return (
+        f"{_research_frame(research_query)}"
         f"CHALLENGE from your {evaluator_angle} expertise.\n"
         f"This high-confidence finding from {origin_angle} needs stress-testing:\n"
         f'"{fact}"\n\n'
         f"What are the strongest objections? Under what conditions does this "
-        f"break down? What edge cases or confounders are being ignored?\n"
+        f"break down? What edge cases or confounders are being ignored? "
+        f"Consider especially how this finding might mislead if applied "
+        f"to the research objective.\n"
         f"Format: OBJECTIONS: [strongest counter-arguments]\n"
         f"FAILURE_CONDITIONS: [when this claim breaks down]\n"
         f"CONFOUNDERS: [ignored variables]\n"
@@ -1834,6 +1926,15 @@ class FlockQueryManager:
                         )
                         round_evaluations += 1
                         round_new_findings += len(evaluation.new_findings)
+
+                        # Weight magnitude by relevance — score changes
+                        # on findings that serve the research objective
+                        # count more toward convergence than tangential ones.
+                        # A high-relevance finding's magnitude gets full
+                        # credit; a low-relevance one contributes less.
+                        if self.config.research_query:
+                            rel = query.metadata.get("relevance_score", 0.5)
+                            magnitude *= 0.3 + 0.7 * rel
                         round_score_magnitude += magnitude
                         round_queries += 1
                         clone_queries += 1
@@ -1981,16 +2082,25 @@ class FlockQueryManager:
         """
         _complete = complete_fn or self.complete
 
-        async def _single(query: FlockQuery) -> tuple[str, float]:
-            # Prepend clone context to the query prompt
-            full_prompt = (
-                f"You are an expert researcher with deep knowledge in "
-                f"{clone.angle}. Your accumulated analysis:\n\n"
-                f"{clone.context_summary[:50000]}\n\n"
-                f"{'═' * 40}\n"
-                f"EVALUATION TASK:\n"
-                f"{query.prompt}"
+        # Build stable prefix — identical across all queries for this
+        # clone, which maximises vLLM prefix cache hit rate.
+        research_line = ""
+        if self.config.research_query:
+            research_line = (
+                f"RESEARCH OBJECTIVE: \"{self.config.research_query}\"\n"
+                f"All evaluations must converge toward this objective.\n\n"
             )
+        prefix = (
+            f"{research_line}"
+            f"You are an expert researcher with deep knowledge in "
+            f"{clone.angle}. Your accumulated analysis:\n\n"
+            f"{clone.context_summary[:50000]}\n\n"
+            f"{'═' * 40}\n"
+        )
+
+        async def _single(query: FlockQuery) -> tuple[str, float]:
+            # Append the per-query evaluation task to the stable prefix
+            full_prompt = f"{prefix}EVALUATION TASK:\n{query.prompt}"
             t0 = time.monotonic()
             try:
                 response = await _complete(full_prompt)

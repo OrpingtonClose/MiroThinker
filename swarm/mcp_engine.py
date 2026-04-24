@@ -604,6 +604,7 @@ class MCPSwarmEngine:
 
                 if clones:
                     flock_config = FlockQueryManagerConfig(
+                        research_query=query,
                         max_rounds=config.flock_max_rounds,
                         max_queries_per_round=config.flock_max_queries_per_round,
                         batch_size=config.flock_batch_size,
