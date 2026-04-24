@@ -278,6 +278,74 @@ def select_research_targets(
     except Exception as exc:
         logger.warning("error=<%s> | trust/action target selection failed", exc)
 
+    # --- Type 5: Stuck conditions — evaluated 3+ times with low information_gain ---
+    # These conditions have been through Flock evaluation repeatedly but
+    # scores barely moved.  External data can break the deadlock by
+    # providing concrete evidence the model couldn't generate internally.
+    try:
+        with lock:
+            stuck_rows = store.conn.execute(
+                "SELECT id, fact, angle, evaluation_count, information_gain "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND row_type = 'finding' "
+                "AND evaluation_count >= 3 "
+                "AND information_gain < 0.1 "
+                "AND (mcp_research_status = '' OR mcp_research_status IS NULL) "
+                "AND score_version > 0 "
+                "ORDER BY evaluation_count DESC "
+                "LIMIT ?",
+                [max_per_type],
+            ).fetchall()
+        for cid, fact, angle, eval_count, info_gain in stuck_rows:
+            targets.append(ResearchTarget(
+                condition_id=cid,
+                fact=fact,
+                angle=angle,
+                reason="stuck_condition",
+                search_queries=_generate_deadlock_breaking_queries(fact, angle),
+                priority=0.8 + 0.02 * eval_count,
+            ))
+    except Exception as exc:
+        logger.warning("error=<%s> | stuck condition target selection failed", exc)
+
+    # --- Type 6: Cross-angle bridge research ---
+    # When two findings from different angles both have high relevance but
+    # no explicit connection, search for the mechanistic link externally.
+    # This gives the Flock BRIDGE evaluator concrete data to work with.
+    try:
+        with lock:
+            bridge_candidates = store.conn.execute(
+                "SELECT a.id, a.fact, a.angle, b.id, b.fact, b.angle "
+                "FROM conditions a, conditions b "
+                "WHERE a.id < b.id "
+                "AND a.consider_for_use = TRUE "
+                "AND b.consider_for_use = TRUE "
+                "AND a.row_type = 'finding' "
+                "AND b.row_type = 'finding' "
+                "AND a.angle != b.angle "
+                "AND a.relevance_score > 0.6 "
+                "AND b.relevance_score > 0.6 "
+                "AND a.score_version > 0 "
+                "AND b.score_version > 0 "
+                "ORDER BY (a.relevance_score + b.relevance_score) DESC "
+                "LIMIT ?",
+                [max_per_type],
+            ).fetchall()
+        for aid, afact, aangle, bid, bfact, bangle in bridge_candidates:
+            targets.append(ResearchTarget(
+                condition_id=aid,
+                fact=f"[{aangle}] {afact} ↔ [{bangle}] {bfact}",
+                angle=f"{aangle}+{bangle}",
+                reason="cross_angle_bridge",
+                search_queries=_generate_bridge_research_queries(
+                    afact, aangle, bfact, bangle,
+                ),
+                priority=0.7,
+            ))
+    except Exception as exc:
+        logger.warning("error=<%s> | cross-angle bridge target selection failed", exc)
+
     # Sort by priority and cap
     targets.sort(key=lambda t: t.priority, reverse=True)
     return targets[:config.max_targets]
@@ -327,6 +395,44 @@ def _generate_source_upgrade_queries(fact: str, angle: str) -> list[str]:
         f"{key_phrase} peer-reviewed journal",
         f"{key_phrase} site:ncbi.nlm.nih.gov",
         f"{key_phrase} clinical guidelines recommendation",
+    ]
+
+
+def _generate_deadlock_breaking_queries(fact: str, angle: str) -> list[str]:
+    """Generate queries for conditions stuck after multiple Flock evaluations.
+
+    When a finding has been evaluated 3+ times with negligible score change,
+    the Flock clones can't resolve it internally.  Search for concrete
+    external evidence: contradicting studies, specific data points, or
+    authoritative position statements that can break the deadlock.
+    """
+    words = fact.split()
+    key_phrase = " ".join(words[:12])
+    return [
+        f'"{key_phrase}" contradicting evidence OR counter-evidence',
+        f"{key_phrase} quantitative data measurement",
+        f"{angle} {key_phrase} systematic review OR position statement",
+    ]
+
+
+def _generate_bridge_research_queries(
+    fact_a: str, angle_a: str,
+    fact_b: str, angle_b: str,
+) -> list[str]:
+    """Generate queries to find mechanistic links between two cross-angle findings.
+
+    When two findings from different angles both score high on relevance but
+    have no explicit connection, search for the upstream mechanism, shared
+    pathway, or established interaction that connects them.
+    """
+    words_a = fact_a.split()[:8]
+    words_b = fact_b.split()[:8]
+    key_a = " ".join(words_a)
+    key_b = " ".join(words_b)
+    return [
+        f"{key_a} AND {key_b} mechanism interaction",
+        f"{angle_a} {angle_b} cross-talk pathway",
+        f'"{key_a}" "{key_b}" relationship',
     ]
 
 
@@ -564,7 +670,11 @@ def store_research_results(
     """Write research results into the ConditionStore.
 
     Each result becomes an 'mcp_finding' row linked to the condition
-    it was researched for.  Flock will score these in the next round.
+    it was researched for, with score_version=1 so it's immediately
+    visible to Flock query selection in the next round.
+
+    Also marks the parent condition's mcp_research_status so it isn't
+    re-targeted for the same type of research.
 
     Args:
         store: The ConditionStore.
@@ -575,6 +685,8 @@ def store_research_results(
         Number of findings stored.
     """
     stored = 0
+    researched_condition_ids: set[int] = set()
+
     for result in results:
         fact = result.fact.strip()
         if not fact or len(fact) < 30:
@@ -587,9 +699,9 @@ def store_research_results(
                 """INSERT INTO conditions
                    (id, fact, source_url, source_type, source_ref, row_type,
                     consider_for_use, confidence,
-                    created_at, parent_id, phase)
+                    created_at, parent_id, phase, score_version)
                    VALUES (?, ?, ?, 'mcp_research', ?, 'mcp_finding', TRUE,
-                           ?, ?, ?, 'mcp_research')""",
+                           ?, ?, ?, 'mcp_research', 1)""",
                 [
                     cid,
                     fact,
@@ -601,10 +713,28 @@ def store_research_results(
                 ],
             )
             stored += 1
+            researched_condition_ids.add(result.target_condition_id)
+
+    # Mark researched conditions so they aren't re-targeted
+    if researched_condition_ids:
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with _get_store_lock(store):
+                for target_id in researched_condition_ids:
+                    store.conn.execute(
+                        "UPDATE conditions SET mcp_research_status = ? "
+                        "WHERE id = ?",
+                        [f"researched_{now}", target_id],
+                    )
+        except Exception as exc:
+            logger.warning(
+                "error=<%s> | mcp_research_status update failed", exc,
+            )
 
     logger.info(
-        "results_received=<%d>, stored=<%d> | MCP research results stored",
-        len(results), stored,
+        "results_received=<%d>, stored=<%d>, conditions_marked=<%d> | "
+        "MCP research results stored",
+        len(results), stored, len(researched_condition_ids),
     )
     return stored
 

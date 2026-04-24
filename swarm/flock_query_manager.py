@@ -51,7 +51,9 @@ flag-based selection, not from more clones or more VRAM.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -72,6 +74,200 @@ def _get_store_lock(store: "ConditionStore") -> Any:
     whichever is available.
     """
     return getattr(store, "_write_lock", getattr(store, "_lock", None))
+
+
+# ---------------------------------------------------------------------------
+# Query budget allocation — information-theoretic scheduling
+# ---------------------------------------------------------------------------
+
+
+def compute_query_budget(
+    store: "ConditionStore",
+    total_budget: int,
+    prior_type_magnitudes: dict[str, float] | None = None,
+) -> dict[str, int]:
+    """Allocate query budget across query types based on store state.
+
+    Instead of a fixed 1/6 per type, counts how many conditions match
+    each type's selection criteria and allocates proportionally.  Types
+    with more eligible conditions get more budget.
+
+    When ``prior_type_magnitudes`` is provided (from previous round),
+    types that produced larger score changes get a bonus allocation —
+    this is the adaptive scheduling feedback loop.
+
+    Args:
+        store: The ConditionStore to inspect.
+        total_budget: Total query budget for this round.
+        prior_type_magnitudes: Per-query-type score magnitude from the
+            previous round.  Used to boost types that produced the
+            most information gain.
+
+    Returns:
+        Map of query type name → allocated budget.
+    """
+    lock = _get_store_lock(store)
+    counts: dict[str, int] = {}
+
+    type_queries = {
+        "validate": (
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE consider_for_use = TRUE AND row_type = 'finding' "
+            "AND novelty_score > 0.6 AND confidence < 0.4 "
+            "AND score_version > 0"
+        ),
+        "adjudicate": (
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE consider_for_use = TRUE AND contradiction_flag = TRUE "
+            "AND row_type = 'finding' AND score_version > 0"
+        ),
+        "verify": (
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE consider_for_use = TRUE AND row_type = 'finding' "
+            "AND fabrication_risk > 0.4 AND score_version > 0"
+        ),
+        "enrich": (
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE consider_for_use = TRUE AND row_type = 'finding' "
+            "AND specificity_score < 0.4 AND relevance_score > 0.5 "
+            "AND score_version > 0"
+        ),
+        "ground": (
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE consider_for_use = TRUE AND row_type = 'finding' "
+            "AND actionability_score > 0.6 "
+            "AND (verification_status = '' OR verification_status IS NULL) "
+            "AND score_version > 0"
+        ),
+        "bridge": (
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE consider_for_use = TRUE AND row_type = 'finding' "
+            "AND relevance_score > 0.3 AND score_version > 0"
+        ),
+        "challenge": (
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE consider_for_use = TRUE AND row_type = 'finding' "
+            "AND confidence > 0.8 AND score_version > 0"
+        ),
+        "synthesize": (
+            "SELECT COUNT(*) FROM conditions "
+            "WHERE consider_for_use = TRUE AND row_type = 'finding' "
+            "AND cluster_id >= 0 AND score_version > 0"
+        ),
+    }
+
+    try:
+        with lock:
+            for qtype, sql in type_queries.items():
+                row = store.conn.execute(sql).fetchone()
+                counts[qtype] = row[0] if row else 0
+    except Exception as exc:
+        logger.warning("error=<%s> | query budget count failed, using equal split", exc)
+        per_type = total_budget // 8
+        return {qt: per_type for qt in type_queries}
+
+    # Proportional allocation based on eligible condition count
+    total_eligible = max(sum(counts.values()), 1)
+    budget: dict[str, int] = {}
+    for qtype, count in counts.items():
+        raw_share = (count / total_eligible) * total_budget
+        # Ensure every type with eligible conditions gets at least 5 queries
+        budget[qtype] = max(5, int(raw_share)) if count > 0 else 0
+
+    # Adaptive boost: types that produced large score changes last round
+    # get up to 1.5x their proportional budget
+    if prior_type_magnitudes:
+        max_mag = max(prior_type_magnitudes.values()) if prior_type_magnitudes else 1.0
+        max_mag = max(max_mag, 0.001)
+        for qtype, mag in prior_type_magnitudes.items():
+            if qtype in budget and budget[qtype] > 0:
+                boost = 1.0 + 0.5 * (mag / max_mag)
+                budget[qtype] = int(budget[qtype] * boost)
+
+    # Normalize to not exceed total budget
+    allocated = sum(budget.values())
+    if allocated > total_budget and allocated > 0:
+        scale = total_budget / allocated
+        budget = {qt: max(1, int(b * scale)) for qt, b in budget.items() if b > 0}
+
+    logger.info(
+        "budget=%s, total_eligible=<%d> | query budget allocated",
+        budget, total_eligible,
+    )
+    return budget
+
+
+def update_evaluation_tracking(
+    store: "ConditionStore",
+    condition_ids: list[int],
+    evaluator_angle: str,
+) -> None:
+    """Update Flock evaluation tracking columns after an evaluation.
+
+    Increments evaluation_count, updates last_evaluated_at, and appends
+    the evaluator angle to evaluator_angles (JSON list).  These columns
+    drive query deduplication and priority decay.
+
+    Args:
+        store: The ConditionStore.
+        condition_ids: Conditions that were evaluated.
+        evaluator_angle: The perspective that evaluated them.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    lock = _get_store_lock(store)
+
+    for cid in condition_ids:
+        try:
+            with lock:
+                # Read current evaluator_angles
+                row = store.conn.execute(
+                    "SELECT evaluator_angles FROM conditions WHERE id = ?",
+                    [cid],
+                ).fetchone()
+                if not row:
+                    continue
+
+                existing_angles = row[0] or ""
+                try:
+                    angles_list = json.loads(existing_angles) if existing_angles else []
+                except (json.JSONDecodeError, TypeError):
+                    angles_list = []
+
+                if evaluator_angle not in angles_list:
+                    angles_list.append(evaluator_angle)
+
+                store.conn.execute(
+                    "UPDATE conditions SET "
+                    "evaluation_count = evaluation_count + 1, "
+                    "last_evaluated_at = ?, "
+                    "evaluator_angles = ? "
+                    "WHERE id = ?",
+                    [now, json.dumps(angles_list), cid],
+                )
+        except Exception as exc:
+            logger.warning(
+                "condition_id=<%d>, error=<%s> | evaluation tracking update failed",
+                cid, exc,
+            )
+
+
+def compute_priority_decay(evaluation_count: int, base_priority: float) -> float:
+    """Apply diminishing returns to conditions evaluated many times.
+
+    Uses logarithmic decay: priority drops ~30% after 3 evaluations,
+    ~50% after 10.  Conditions evaluated 0 or 1 times get full priority.
+
+    Args:
+        evaluation_count: How many times this condition has been evaluated.
+        base_priority: The raw priority before decay.
+
+    Returns:
+        Decayed priority value.
+    """
+    if evaluation_count <= 1:
+        return base_priority
+    decay = 1.0 / (1.0 + 0.3 * math.log(evaluation_count))
+    return base_priority * decay
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +678,107 @@ def select_queries(
     except Exception as exc:
         logger.warning("error=<%s> | BRIDGE query selection failed", exc)
 
+    # --- CHALLENGE: high confidence from different angle → stress-test ---
+    if config.enable_challenge:
+        try:
+            with lock:
+                challenge_rows = store.conn.execute(
+                    "SELECT id, fact, confidence, angle, evaluation_count "
+                    "FROM conditions "
+                    "WHERE consider_for_use = TRUE "
+                    "AND row_type = 'finding' "
+                    "AND confidence > 0.8 "
+                    "AND angle != ? "
+                    "AND score_version > 0 "
+                    "ORDER BY confidence DESC "
+                    "LIMIT ?",
+                    [clone_angle, config.max_queries_per_round // 8],
+                ).fetchall()
+            for cid, fact, conf, angle, eval_count in challenge_rows:
+                base_priority = conf * 0.7
+                priority = compute_priority_decay(eval_count, base_priority)
+                queries.append(FlockQuery(
+                    query_type=QueryType.CHALLENGE,
+                    prompt=_build_challenge_prompt(fact, angle, clone_angle),
+                    target_condition_ids=[cid],
+                    source_angle=clone_angle,
+                    priority=priority,
+                    metadata={
+                        "confidence": conf,
+                        "original_angle": angle,
+                        "evaluation_count": eval_count,
+                    },
+                ))
+        except Exception as exc:
+            logger.warning("error=<%s> | CHALLENGE query selection failed", exc)
+
+    # --- SYNTHESIZE: related findings in same cluster → higher-order insight ---
+    if config.enable_synthesis:
+        try:
+            with lock:
+                # Find clusters with 3+ findings for synthesis
+                cluster_rows = store.conn.execute(
+                    "SELECT cluster_id, COUNT(*) as cnt "
+                    "FROM conditions "
+                    "WHERE consider_for_use = TRUE "
+                    "AND row_type = 'finding' "
+                    "AND cluster_id >= 0 "
+                    "AND score_version > 0 "
+                    "GROUP BY cluster_id "
+                    "HAVING COUNT(*) >= 3 "
+                    "ORDER BY COUNT(*) DESC "
+                    "LIMIT ?",
+                    [config.max_queries_per_round // 8],
+                ).fetchall()
+
+            for cluster_id, cluster_size in cluster_rows:
+                with lock:
+                    members = store.conn.execute(
+                        "SELECT id, fact, angle, confidence "
+                        "FROM conditions "
+                        "WHERE cluster_id = ? "
+                        "AND consider_for_use = TRUE "
+                        "AND row_type = 'finding' "
+                        "AND score_version > 0 "
+                        "ORDER BY confidence DESC "
+                        "LIMIT 5",
+                        [cluster_id],
+                    ).fetchall()
+
+                if len(members) < 3:
+                    continue
+
+                member_ids = [m[0] for m in members]
+                facts = [m[1] for m in members]
+                angles = [m[2] for m in members]
+                avg_conf = sum(m[3] for m in members) / len(members)
+
+                # Higher priority for clusters with diverse angles
+                unique_angles = len(set(angles))
+                priority = avg_conf * 0.6 * (1.0 + 0.2 * unique_angles)
+
+                queries.append(FlockQuery(
+                    query_type=QueryType.SYNTHESIZE,
+                    prompt=_build_synthesize_prompt(facts, angles, clone_angle),
+                    target_condition_ids=member_ids,
+                    source_angle=clone_angle,
+                    priority=priority,
+                    metadata={
+                        "cluster_id": cluster_id,
+                        "cluster_size": cluster_size,
+                        "unique_angles": unique_angles,
+                    },
+                ))
+        except Exception as exc:
+            logger.warning("error=<%s> | SYNTHESIZE query selection failed", exc)
+
+    # Apply priority decay based on evaluation_count
+    for query in queries:
+        if query.metadata.get("evaluation_count", 0) > 1:
+            query.priority = compute_priority_decay(
+                query.metadata["evaluation_count"], query.priority,
+            )
+
     # Sort by priority descending, cap at max
     queries.sort(key=lambda q: q.priority, reverse=True)
     return queries[:config.max_queries_per_round]
@@ -636,7 +933,7 @@ def _parse_evaluation_result(
     Returns:
         Structured FlockEvaluation.
     """
-    import re
+    import re  # noqa: PLC0415 — local import for functions only needed here
 
     verdict = raw_response.strip()
     score_delta: dict[str, float] = {}
@@ -779,8 +1076,6 @@ def store_evaluation(
         and score_magnitude is the total absolute change across all
         updated flags (used for convergence detection).
     """
-    import json
-
     rows_created = 0
     score_magnitude = 0.0
 
@@ -881,6 +1176,29 @@ def store_evaluation(
                 ],
             )
             rows_created += 1
+
+    # 4. Update evaluation tracking on evaluated conditions
+    update_evaluation_tracking(
+        store,
+        evaluation.condition_ids_evaluated,
+        evaluation.evaluator_angle,
+    )
+
+    # 5. Update information_gain on evaluated conditions
+    if score_magnitude > 0:
+        try:
+            lock = _get_store_lock(store)
+            with lock:
+                for target_id in evaluation.condition_ids_evaluated:
+                    store.conn.execute(
+                        "UPDATE conditions SET information_gain = information_gain + ? "
+                        "WHERE id = ?",
+                        [score_magnitude, target_id],
+                    )
+        except Exception as exc:
+            logger.warning(
+                "error=<%s> | information_gain update failed", exc,
+            )
 
     return rows_created, score_magnitude
 
@@ -1001,11 +1319,13 @@ class FlockQueryManager:
         complete: Callable[[str], Awaitable[str]],
         config: FlockQueryManagerConfig | None = None,
         complete_for_clone: Callable[[CloneContext], Awaitable[Callable[[str], Awaitable[str]]]] | None = None,
+        mcp_research_fn: Callable[[str], Awaitable[int]] | None = None,
     ) -> None:
         self.store = store
         self.complete = complete
         self.config = config or FlockQueryManagerConfig()
         self._complete_for_clone = complete_for_clone
+        self._mcp_research_fn = mcp_research_fn
 
     async def run(
         self,
@@ -1064,17 +1384,29 @@ class FlockQueryManager:
         except Exception as exc:
             logger.warning("error=<%s> | bootstrap scoring failed", exc)
 
+        # Adaptive scheduling state: per-type score magnitudes from prior round
+        prior_type_magnitudes: dict[str, float] | None = None
+
         for round_num in range(1, self.config.max_rounds + 1):
             round_start = time.monotonic()
             round_queries = 0
             round_evaluations = 0
             round_new_findings = 0
             round_score_magnitude = 0.0
+            # Track per-type magnitudes for adaptive scheduling
+            round_type_magnitudes: dict[str, float] = {}
+
+            # Dynamic budget allocation based on store state + prior round
+            budget = compute_query_budget(
+                store, self.config.max_queries_per_round,
+                prior_type_magnitudes,
+            )
 
             await _emit({
                 "type": "flock_round_start",
                 "round": round_num,
                 "clones": [c.angle for c in clones],
+                "budget": budget,
             })
 
             # Each clone takes a turn — clones are never simultaneous,
@@ -1141,6 +1473,12 @@ class FlockQueryManager:
                         round_score_magnitude += magnitude
                         round_queries += 1
                         clone_queries += 1
+
+                        # Track per-type magnitude for adaptive scheduling
+                        qtype_name = query.query_type.value
+                        round_type_magnitudes[qtype_name] = (
+                            round_type_magnitudes.get(qtype_name, 0.0) + magnitude
+                        )
 
                 clone_time = time.monotonic() - clone_start
                 logger.info(
@@ -1212,6 +1550,34 @@ class FlockQueryManager:
                     f"threshold={self.config.convergence_threshold})"
                 )
                 break
+
+            # Feed adaptive scheduling: pass this round's per-type
+            # magnitudes to inform next round's budget allocation
+            prior_type_magnitudes = round_type_magnitudes
+
+            # Interleaved MCP research: after each round, trigger
+            # external data acquisition for stuck/ungrounded findings.
+            # This injects fresh external evidence into the store so
+            # the next Flock round has concrete data to evaluate against.
+            if self._mcp_research_fn:
+                try:
+                    research_added = await self._mcp_research_fn(run_id)
+                    if research_added > 0:
+                        logger.info(
+                            "round=<%d>, research_added=<%d> | "
+                            "interleaved MCP research injected new data",
+                            round_num, research_added,
+                        )
+                        await _emit({
+                            "type": "flock_mcp_research",
+                            "round": round_num,
+                            "findings_added": research_added,
+                        })
+                except Exception as exc:
+                    logger.warning(
+                        "round=<%d>, error=<%s> | interleaved MCP research failed",
+                        round_num, exc,
+                    )
 
         if not result.convergence_reason:
             result.convergence_reason = f"max_rounds_reached ({self.config.max_rounds})"

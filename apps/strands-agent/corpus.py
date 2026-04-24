@@ -189,7 +189,14 @@ class ConditionStore:
 
                 -- Source provenance (24h continuous operation)
                 source_model TEXT DEFAULT '',
-                source_run TEXT DEFAULT ''
+                source_run TEXT DEFAULT '',
+
+                -- Flock evaluation tracking
+                evaluation_count INTEGER DEFAULT 0,
+                last_evaluated_at TEXT DEFAULT '',
+                evaluator_angles TEXT DEFAULT '',
+                mcp_research_status TEXT DEFAULT '',
+                information_gain FLOAT DEFAULT 0.0
             )
         """)
 
@@ -219,6 +226,7 @@ class ConditionStore:
         # Ensure lineage columns exist on older databases (idempotent).
         self._ensure_lineage_columns()
         self._ensure_provenance_columns()
+        self._ensure_flock_tracking_columns()
         # Seed next_id from existing rows
         result = self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM conditions").fetchone()
         if result:
@@ -244,6 +252,23 @@ class ConditionStore:
             except Exception:
                 # Older DuckDB versions without IF NOT EXISTS support will
                 # error on a duplicate column; swallow and continue.
+                pass
+
+    def _ensure_flock_tracking_columns(self) -> None:
+        """Backfill Flock evaluation tracking columns on pre-existing databases."""
+        for col, typedef in (
+            ("evaluation_count", "INTEGER DEFAULT 0"),
+            ("last_evaluated_at", "TEXT DEFAULT ''"),
+            ("evaluator_angles", "TEXT DEFAULT ''"),
+            ("mcp_research_status", "TEXT DEFAULT ''"),
+            ("information_gain", "FLOAT DEFAULT 0.0"),
+        ):
+            try:
+                self.conn.execute(
+                    f"ALTER TABLE conditions ADD COLUMN IF NOT EXISTS "
+                    f"{col} {typedef}"
+                )
+            except Exception:
                 pass
 
     def _ensure_provenance_columns(self) -> None:

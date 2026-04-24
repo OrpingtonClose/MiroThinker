@@ -615,10 +615,28 @@ class MCPSwarmEngine:
                         max_queries_per_round=config.flock_max_queries_per_round,
                         batch_size=config.flock_batch_size,
                     )
+
+                    # Wire interleaved MCP research into the Flock loop
+                    # so external data is acquired between evaluation rounds
+                    mcp_research_fn = None
+                    if config.enable_mcp_research:
+                        from swarm.mcp_researcher import run_mcp_research_round
+
+                        async def _interleaved_research(rid: str) -> int:
+                            result = await run_mcp_research_round(
+                                store=self.store,
+                                run_id=rid,
+                                complete=self.complete,
+                            )
+                            return result.findings_stored
+
+                        mcp_research_fn = _interleaved_research
+
                     flock_manager = FlockQueryManager(
                         store=self.store,
                         complete=self.complete,
                         config=flock_config,
+                        mcp_research_fn=mcp_research_fn,
                     )
                     flock_result = await flock_manager.run(
                         clones=clones,
