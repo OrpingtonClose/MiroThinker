@@ -364,6 +364,7 @@ def compute_query_budget(
     store: "ConditionStore",
     total_budget: int,
     prior_type_magnitudes: dict[str, float] | None = None,
+    config: "FlockQueryManagerConfig | None" = None,
 ) -> dict[str, int]:
     """Allocate query budget across query types based on store state.
 
@@ -381,12 +382,21 @@ def compute_query_budget(
         prior_type_magnitudes: Per-query-type score magnitude from the
             previous round.  Used to boost types that produced the
             most information gain.
+        config: Query manager config for threshold alignment.  When
+            provided, uses the same thresholds as ``select_queries``
+            so the budget accurately reflects eligible candidates.
 
     Returns:
         Map of query type name → allocated budget.
     """
     lock = _get_store_lock(store)
     counts: dict[str, int] = {}
+
+    # Use config thresholds when available so the budget estimation
+    # matches the actual selection criteria in select_queries
+    fab_risk = config.fabrication_risk_floor if config else 0.4
+    spec_ceil = config.specificity_ceiling if config else 0.4
+    bridge_rel = config.cross_angle_min_relevance if config else 0.3
 
     type_queries = {
         "validate": (
@@ -403,12 +413,12 @@ def compute_query_budget(
         "verify": (
             "SELECT COUNT(*) FROM conditions "
             "WHERE consider_for_use = TRUE AND row_type = 'finding' "
-            "AND fabrication_risk > 0.4 AND score_version > 0"
+            f"AND fabrication_risk > {fab_risk} AND score_version > 0"
         ),
         "enrich": (
             "SELECT COUNT(*) FROM conditions "
             "WHERE consider_for_use = TRUE AND row_type = 'finding' "
-            "AND specificity_score < 0.4 AND relevance_score > 0.5 "
+            f"AND specificity_score < {spec_ceil} AND relevance_score > 0.5 "
             "AND score_version > 0"
         ),
         "ground": (
@@ -421,7 +431,7 @@ def compute_query_budget(
         "bridge": (
             "SELECT COUNT(*) FROM conditions "
             "WHERE consider_for_use = TRUE AND row_type = 'finding' "
-            "AND relevance_score > 0.3 AND score_version > 0"
+            "AND cluster_id >= 0 AND score_version > 0"
         ),
         "challenge": (
             "SELECT COUNT(*) FROM conditions "
@@ -1743,6 +1753,7 @@ class FlockQueryManager:
             budget = compute_query_budget(
                 store, self.config.max_queries_per_round,
                 prior_type_magnitudes,
+                config=self.config,
             )
 
             await _emit({

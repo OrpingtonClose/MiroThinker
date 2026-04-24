@@ -775,23 +775,9 @@ async def run_mcp_research_round(
     # in select_research_targets can match.  Same chicken-and-egg issue
     # as FlockQueryManager — score_version starts at 0 and is only
     # incremented by _apply_score_delta which requires queries first.
-    try:
-        lock = _get_store_lock(store)
-        with lock:
-            bootstrapped = store.conn.execute(
-                "UPDATE conditions "
-                "SET score_version = 1 "
-                "WHERE score_version = 0 "
-                "AND row_type = 'finding' "
-                "AND consider_for_use = TRUE"
-            ).rowcount
-        if bootstrapped:
-            logger.info(
-                "bootstrapped=<%d> | promoted unscored findings to score_version=1",
-                bootstrapped,
-            )
-    except Exception as exc:
-        logger.warning("error=<%s> | bootstrap scoring failed", exc)
+    from swarm.flock_query_manager import bootstrap_score_version
+
+    bootstrap_score_version(store)
 
     # 1. Select targets
     targets = select_research_targets(store, config, complete)
