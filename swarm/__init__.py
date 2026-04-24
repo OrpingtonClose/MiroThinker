@@ -34,17 +34,37 @@ Usage:
 
 from swarm.config import CompleteFn, SwarmConfig
 from swarm.engine import GossipSwarm, SwarmMetrics, SwarmResult
+from swarm.flock_query_manager import (
+    CloneContext,
+    FlockQueryManager,
+    FlockQueryManagerConfig,
+    FlockSwarmResult,
+    QueryType,
+)
 from swarm.lineage import InMemoryLineageStore, LineageEntry, LineageStore
+from swarm.mcp_researcher import (
+    MCPResearcherConfig,
+    MCPResearchRoundMetrics,
+    run_mcp_research_round,
+)
 from swarm.quality_manifest import SwarmQualityManifest
 
 __all__ = [
+    "CloneContext",
     "CompleteFn",
+    "FlockQueryManager",
+    "FlockQueryManagerConfig",
+    "FlockSwarmResult",
     "GossipSwarm",
     "InMemoryLineageStore",
     "LineageEntry",
     "LineageStore",
+    "MCPResearcherConfig",
+    "MCPResearchRoundMetrics",
+    "QueryType",
     "SwarmConfig",
     "SwarmMetrics",
     "SwarmQualityManifest",
     "SwarmResult",
+    "run_mcp_research_round",
 ]

@@ -115,6 +115,15 @@ class MCPSwarmConfig:
         report_max_chars: Max prompt chars for report generation.
         worker_timeout_s: Per-worker timeout in seconds (default 600).
             Workers that exceed this are cancelled so the wave can proceed.
+        enable_flock_evaluation: Run mass Flock evaluation rounds after
+            worker waves.  Fires thousands of flag-driven queries against
+            cached clone perspectives to simulate a large swarm.
+        flock_max_rounds: Maximum Flock evaluation rounds.
+        flock_max_queries_per_round: Maximum queries per clone per round.
+        flock_batch_size: Parallel query batch size for Flock evaluation.
+        enable_mcp_research: Run MCP-powered external data acquisition
+            between waves.  Uses gradient flags to identify gaps and
+            fans out across available search APIs.
     """
 
     max_workers: int = 7
@@ -135,6 +144,11 @@ class MCPSwarmConfig:
     enable_rolling_summaries: bool = True
     report_max_chars: int = 24000
     worker_timeout_s: float = 600.0
+    enable_flock_evaluation: bool = True
+    flock_max_rounds: int = 10
+    flock_max_queries_per_round: int = 500
+    flock_batch_size: int = 20
+    enable_mcp_research: bool = True
 
 
 class MCPSwarmEngine:
@@ -294,6 +308,10 @@ class MCPSwarmEngine:
         )
 
         # ── Phase 1-N: Worker waves ──────────────────────────────────
+        # Accumulate worker outputs per angle across waves.
+        # Used by Flock evaluation phase to build clone contexts.
+        prior_outputs: dict[str, str] = {}
+
         wave = 0
         for wave in range(1, config.max_waves + 1):
             phase_start = time.monotonic()
@@ -372,6 +390,15 @@ class MCPSwarmEngine:
                 if isinstance(r, dict):
                     metrics.worker_results.append(r)
                     wave_tool_calls += r.get("tool_calls", 0)
+                    # Accumulate worker output for Flock clone contexts.
+                    # Each wave's response is appended so the clone holds
+                    # the full reasoning chain across all waves.
+                    angle_key = r.get("angle", "")
+                    response_text = r.get("response", "")
+                    if angle_key and response_text:
+                        prior_outputs[angle_key] = (
+                            prior_outputs.get(angle_key, "") + "\n" + response_text
+                        ).strip()
 
             metrics.total_tool_calls += wave_tool_calls
 
@@ -551,6 +578,128 @@ class MCPSwarmEngine:
                 "elapsed_s": round(metrics.phase_times["serendipity"], 1),
             })
 
+        # ── Flock evaluation phase ────────────────────────────────────
+        # Mass flag-driven queries against cached clone perspectives.
+        # Each worker's accumulated reasoning becomes a clone context.
+        # Thousands of queries simulate an incredibly large swarm.
+        if config.enable_flock_evaluation and prior_outputs:
+            phase_start = time.monotonic()
+            await _emit({
+                "type": "swarm_phase",
+                "phase": "flock_evaluation_start",
+            })
+
+            try:
+                from swarm.flock_query_manager import (
+                    CloneContext,
+                    FlockQueryManager,
+                    FlockQueryManagerConfig,
+                )
+
+                # Build clone contexts from worker transcripts
+                clones = [
+                    CloneContext(
+                        angle=angle,
+                        context_summary=output,
+                        context_tokens=len(output) // 3,
+                        wave=wave,
+                        worker_id=f"clone_{angle}",
+                    )
+                    for angle, output in prior_outputs.items()
+                    if output
+                ]
+
+                if clones:
+                    flock_config = FlockQueryManagerConfig(
+                        max_rounds=config.flock_max_rounds,
+                        max_queries_per_round=config.flock_max_queries_per_round,
+                        batch_size=config.flock_batch_size,
+                    )
+                    flock_manager = FlockQueryManager(
+                        store=self.store,
+                        complete=self.complete,
+                        config=flock_config,
+                    )
+                    flock_result = await flock_manager.run(
+                        clones=clones,
+                        run_id=config.source_run or run_id,
+                        on_event=on_event,
+                    )
+
+                    metrics.phase_times["flock_evaluation"] = time.monotonic() - phase_start
+                    logger.info(
+                        "flock_queries=<%d>, flock_evals=<%d>, flock_new=<%d>, "
+                        "elapsed_s=<%.1f>, reason=<%s> | flock evaluation complete",
+                        flock_result.total_queries,
+                        flock_result.total_evaluations,
+                        flock_result.total_new_findings,
+                        flock_result.elapsed_s,
+                        flock_result.convergence_reason,
+                    )
+
+                    await _emit({
+                        "type": "swarm_phase",
+                        "phase": "flock_evaluation_complete",
+                        "total_queries": flock_result.total_queries,
+                        "total_evaluations": flock_result.total_evaluations,
+                        "total_new_findings": flock_result.total_new_findings,
+                        "convergence_reason": flock_result.convergence_reason,
+                        "elapsed_s": round(flock_result.elapsed_s, 1),
+                    })
+                else:
+                    logger.info("no clone contexts available for flock evaluation")
+            except Exception as exc:
+                logger.warning(
+                    "error=<%s> | flock evaluation failed, continuing to report",
+                    exc,
+                )
+                metrics.phase_times["flock_evaluation"] = time.monotonic() - phase_start
+
+        # ── MCP research phase ────────────────────────────────────────
+        # Flag-driven external data acquisition.  Reads ConditionStore
+        # gradient flags to identify what's missing, fans out across
+        # available search APIs, writes results back as mcp_finding rows.
+        if config.enable_mcp_research:
+            phase_start = time.monotonic()
+            await _emit({
+                "type": "swarm_phase",
+                "phase": "mcp_research_start",
+            })
+
+            try:
+                from swarm.mcp_researcher import run_mcp_research_round
+
+                research_metrics = await run_mcp_research_round(
+                    store=self.store,
+                    run_id=config.source_run or run_id,
+                    complete=self.complete,
+                )
+
+                metrics.phase_times["mcp_research"] = time.monotonic() - phase_start
+                logger.info(
+                    "research_targets=<%d>, api_calls=<%d>, findings_stored=<%d>, "
+                    "elapsed_s=<%.1f> | MCP research complete",
+                    research_metrics.targets_researched,
+                    research_metrics.api_calls_made,
+                    research_metrics.findings_stored,
+                    research_metrics.elapsed_s,
+                )
+
+                await _emit({
+                    "type": "swarm_phase",
+                    "phase": "mcp_research_complete",
+                    "targets_researched": research_metrics.targets_researched,
+                    "findings_stored": research_metrics.findings_stored,
+                    "apis_used": research_metrics.apis_used,
+                    "elapsed_s": round(research_metrics.elapsed_s, 1),
+                })
+            except Exception as exc:
+                logger.warning(
+                    "error=<%s> | MCP research failed, continuing to report",
+                    exc,
+                )
+                metrics.phase_times["mcp_research"] = time.monotonic() - phase_start
+
         # ── Rolling summaries (optional) ─────────────────────────────
         # Summaries are nice-to-have.  A failure must not block report.
         if config.enable_rolling_summaries:
@@ -729,9 +878,13 @@ class MCPSwarmEngine:
                        FROM conditions
                        WHERE consider_for_use = TRUE
                          AND angle = ?
-                         AND row_type IN ('finding', 'thought', 'insight')
+                         AND row_type IN ('finding', 'thought', 'insight',
+                                          'evaluation', 'mcp_finding', 'synthesis')
                        ORDER BY
-                         CASE WHEN source_type = 'worker_analysis' THEN 0 ELSE 1 END,
+                         CASE WHEN source_type = 'worker_analysis' THEN 0
+                              WHEN source_type = 'flock_evaluation' THEN 1
+                              WHEN source_type = 'mcp_research' THEN 2
+                              ELSE 3 END,
                          confidence DESC
                        LIMIT 30""",
                     [a.angle],
