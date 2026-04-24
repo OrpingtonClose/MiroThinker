@@ -835,13 +835,14 @@ def _apply_score_delta(
             continue
         try:
             # Weighted average: keep 70% of existing score, blend 30% from evaluation
-            store.conn.execute(
-                f"UPDATE conditions "
-                f"SET {flag_name} = ({flag_name} * 0.7) + (? * 0.3), "
-                f"    score_version = score_version + 1 "
-                f"WHERE id = ?",
-                [eval_score, condition_id],
-            )
+            with store._write_lock:
+                store.conn.execute(
+                    f"UPDATE conditions "
+                    f"SET {flag_name} = ({flag_name} * 0.7) + (? * 0.3), "
+                    f"    score_version = score_version + 1 "
+                    f"WHERE id = ?",
+                    [eval_score, condition_id],
+                )
         except Exception as exc:
             logger.warning(
                 "condition_id=<%d>, flag=<%s>, error=<%s> | score delta application failed",

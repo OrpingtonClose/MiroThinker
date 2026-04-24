@@ -308,6 +308,10 @@ class MCPSwarmEngine:
         )
 
         # ── Phase 1-N: Worker waves ──────────────────────────────────
+        # Accumulate worker outputs per angle across waves.
+        # Used by Flock evaluation phase to build clone contexts.
+        prior_outputs: dict[str, str] = {}
+
         wave = 0
         for wave in range(1, config.max_waves + 1):
             phase_start = time.monotonic()
@@ -386,6 +390,15 @@ class MCPSwarmEngine:
                 if isinstance(r, dict):
                     metrics.worker_results.append(r)
                     wave_tool_calls += r.get("tool_calls", 0)
+                    # Accumulate worker output for Flock clone contexts.
+                    # Each wave's response is appended so the clone holds
+                    # the full reasoning chain across all waves.
+                    angle_key = r.get("angle", "")
+                    response_text = r.get("response", "")
+                    if angle_key and response_text:
+                        prior_outputs[angle_key] = (
+                            prior_outputs.get(angle_key, "") + "\n" + response_text
+                        ).strip()
 
             metrics.total_tool_calls += wave_tool_calls
 
