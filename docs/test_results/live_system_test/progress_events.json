@@ -1,0 +1,82 @@
+[
+  {
+    "t": 1776993470.7764935,
+    "phase": "corpus_analysis",
+    "round": null,
+    "angle": null,
+    "detail": {}
+  },
+  {
+    "t": 1776993954.4423153,
+    "phase": "map_complete",
+    "round": null,
+    "angle": null,
+    "detail": {}
+  },
+  {
+    "t": 1776994802.75471,
+    "phase": null,
+    "round": 1,
+    "angle": null,
+    "detail": {
+      "info_gain": 0.9405
+    }
+  },
+  {
+    "t": 1776994802.7558537,
+    "phase": null,
+    "round": 1,
+    "angle": null,
+    "detail": {
+      "delta_chars": 2779
+    }
+  },
+  {
+    "t": 1776995544.8915408,
+    "phase": null,
+    "round": 2,
+    "angle": null,
+    "detail": {
+      "info_gain": 0.567
+    }
+  },
+  {
+    "t": 1776995544.8927977,
+    "phase": null,
+    "round": 2,
+    "angle": null,
+    "detail": {
+      "delta_chars": 2909
+    }
+  },
+  {
+    "t": 1776996285.7147117,
+    "phase": null,
+    "round": 3,
+    "angle": null,
+    "detail": {
+      "info_gain": 0.8352
+    }
+  },
+  {
+    "t": 1776996615.7366695,
+    "phase": "serendipity",
+    "round": null,
+    "angle": null,
+    "detail": {}
+  },
+  {
+    "t": 1776996615.7366745,
+    "phase": "queen_merge_start",
+    "round": null,
+    "angle": null,
+    "detail": {}
+  },
+  {
+    "t": 1776996963.1966646,
+    "phase": "queen_merge_complete",
+    "round": null,
+    "angle": null,
+    "detail": {}
+  }
+]
