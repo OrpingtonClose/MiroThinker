@@ -77,6 +77,232 @@ def _get_store_lock(store: "ConditionStore") -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Clone selection — build clones from store state, not pre-assigned angles
+# ---------------------------------------------------------------------------
+
+
+def select_flock_clones(
+    store: "ConditionStore",
+    max_clones: int = 6,
+    min_findings_per_angle: int = 3,
+) -> list["CloneContext"]:
+    """Select clone perspectives from the store's emergent angle distribution.
+
+    Instead of using pre-assigned worker angles, queries the store for the
+    top-N angles by finding count.  This means the Flock evaluates from
+    perspectives that actually emerged from the swarm's reasoning, not
+    from angles we prescribed.
+
+    Each clone's context is built via ``build_clone_context_from_store``
+    which uses flag-driven retrieval (high information_gain first, then
+    high confidence, then gaps).
+
+    Args:
+        store: The ConditionStore to inspect.
+        max_clones: Maximum number of clone perspectives to select.
+        min_findings_per_angle: Minimum findings an angle must have to
+            qualify as a clone perspective.
+
+    Returns:
+        List of CloneContext objects, one per selected angle.
+    """
+    lock = _get_store_lock(store)
+
+    try:
+        with lock:
+            # Find angles with the most findings — these are the perspectives
+            # that emerged as important through worker reasoning
+            angle_rows = store.conn.execute(
+                "SELECT angle, COUNT(*) as cnt "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND row_type IN ('finding', 'insight', 'synthesis') "
+                "AND angle != '' "
+                "AND score_version > 0 "
+                "GROUP BY angle "
+                "HAVING COUNT(*) >= ? "
+                "ORDER BY COUNT(*) DESC "
+                "LIMIT ?",
+                [min_findings_per_angle, max_clones * 3],
+            ).fetchall()
+    except Exception as exc:
+        logger.warning("error=<%s> | clone angle selection failed", exc)
+        return []
+
+    if not angle_rows:
+        logger.info("no angles with >= %d findings, no clones available", min_findings_per_angle)
+        return []
+
+    # Select up to max_clones, prioritising coverage diversity:
+    # take the top angles by count, but ensure no single mega-angle
+    # crowds out smaller but distinct perspectives
+    selected_angles: list[tuple[str, int]] = []
+    for angle, count in angle_rows:
+        if len(selected_angles) >= max_clones:
+            break
+        selected_angles.append((angle, count))
+
+    clones: list["CloneContext"] = []
+    for angle, finding_count in selected_angles:
+        context = build_clone_context_from_store(store, angle)
+        if context:
+            clones.append(CloneContext(
+                angle=angle,
+                context_summary=context,
+                context_tokens=len(context) // 3,
+                wave=0,
+                worker_id=f"clone_{angle}",
+            ))
+            logger.info(
+                "angle=<%s>, findings=<%d>, context_chars=<%d> | clone selected from store",
+                angle, finding_count, len(context),
+            )
+
+    logger.info(
+        "clones_selected=<%d>, angles=%s | flock clone selection complete",
+        len(clones), [c.angle for c in clones],
+    )
+    return clones
+
+
+def build_clone_context_from_store(
+    store: "ConditionStore",
+    angle: str,
+    max_items: int = 40,
+) -> str:
+    """Build a clone's context from the store using flag-driven retrieval.
+
+    Instead of using raw worker output, retrieves the most valuable
+    findings for a given angle ordered by information quality signals:
+    1. High information_gain findings (most evaluated, most changed)
+    2. High confidence findings (well-established)
+    3. Gaps and contradictions (where uncertainty lives)
+    4. Recent insights and syntheses
+
+    This assumes one agent's context is never enough — the clone
+    gets a curated slice of the store's collective knowledge.
+
+    Args:
+        store: The ConditionStore.
+        angle: The angle to build context for.
+        max_items: Maximum items to include in context.
+
+    Returns:
+        Formatted context string for the clone, or empty string if
+        nothing is available.
+    """
+    lock = _get_store_lock(store)
+    sections: list[str] = []
+
+    try:
+        # Tier 1: High information_gain findings (most productively evaluated)
+        with lock:
+            high_gain = store.conn.execute(
+                "SELECT fact, confidence, information_gain "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND angle = ? "
+                "AND row_type IN ('finding', 'insight', 'synthesis') "
+                "AND information_gain > 0.1 "
+                "ORDER BY information_gain DESC "
+                "LIMIT ?",
+                [angle, max_items // 4],
+            ).fetchall()
+
+        if high_gain:
+            items = [f"- [conf={r[1]:.1f}, gain={r[2]:.2f}] {r[0]}" for r in high_gain]
+            sections.append("HIGH INFORMATION GAIN:\n" + "\n".join(items))
+
+        # Tier 2: High confidence findings (well-established)
+        with lock:
+            high_conf = store.conn.execute(
+                "SELECT fact, confidence, evaluation_count "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND angle = ? "
+                "AND row_type = 'finding' "
+                "AND confidence > 0.6 "
+                "AND score_version > 0 "
+                "ORDER BY confidence DESC "
+                "LIMIT ?",
+                [angle, max_items // 4],
+            ).fetchall()
+
+        if high_conf:
+            items = [f"- [conf={r[1]:.1f}, evals={r[2]}] {r[0]}" for r in high_conf]
+            sections.append("ESTABLISHED FINDINGS:\n" + "\n".join(items))
+
+        # Tier 3: Contradictions and gaps (where uncertainty lives)
+        with lock:
+            gaps = store.conn.execute(
+                "SELECT fact, confidence "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND angle = ? "
+                "AND (contradiction_flag = TRUE "
+                "     OR row_type = 'gap' "
+                "     OR (fabrication_risk > 0.3 AND row_type = 'finding')) "
+                "ORDER BY fabrication_risk DESC "
+                "LIMIT ?",
+                [angle, max_items // 4],
+            ).fetchall()
+
+        if gaps:
+            items = [f"- [conf={r[1]:.1f}] {r[0]}" for r in gaps]
+            sections.append("OPEN QUESTIONS AND CONTRADICTIONS:\n" + "\n".join(items))
+
+        # Tier 4: Recent insights and syntheses
+        with lock:
+            recent = store.conn.execute(
+                "SELECT fact, confidence "
+                "FROM conditions "
+                "WHERE consider_for_use = TRUE "
+                "AND angle = ? "
+                "AND row_type IN ('insight', 'synthesis') "
+                "AND score_version > 0 "
+                "ORDER BY created_at DESC "
+                "LIMIT ?",
+                [angle, max_items // 4],
+            ).fetchall()
+
+        if recent:
+            items = [f"- [conf={r[1]:.1f}] {r[0]}" for r in recent]
+            sections.append("RECENT INSIGHTS:\n" + "\n".join(items))
+
+        # Tier 5 (fallback): any findings for this angle, ordered by score_version
+        # Ensures we never return empty when the angle HAS findings —
+        # the curated tiers control ordering, not exclusion
+        if not sections:
+            with lock:
+                fallback = store.conn.execute(
+                    "SELECT fact, confidence "
+                    "FROM conditions "
+                    "WHERE consider_for_use = TRUE "
+                    "AND angle = ? "
+                    "AND row_type IN ('finding', 'insight', 'synthesis') "
+                    "AND score_version > 0 "
+                    "ORDER BY score_version DESC, confidence DESC "
+                    "LIMIT ?",
+                    [angle, max_items],
+                ).fetchall()
+
+            if fallback:
+                items = [f"- [conf={r[1]:.1f}] {r[0]}" for r in fallback]
+                sections.append("ALL FINDINGS:\n" + "\n".join(items))
+
+    except Exception as exc:
+        logger.warning(
+            "angle=<%s>, error=<%s> | clone context retrieval failed", angle, exc,
+        )
+        return ""
+
+    if not sections:
+        return ""
+
+    return f"ACCUMULATED KNOWLEDGE FOR {angle.upper()}:\n\n" + "\n\n".join(sections)
+
+
+# ---------------------------------------------------------------------------
 # Query budget allocation — information-theoretic scheduling
 # ---------------------------------------------------------------------------
 
@@ -420,6 +646,9 @@ class FlockSwarmResult:
         total_queries: Total queries fired across all rounds.
         total_evaluations: Total evaluation rows created.
         total_new_findings: New findings discovered.
+        wasted_bridge_queries: Bridge queries that found no connection
+            (TYPE: independent or "no connection" boilerplate).  Tracked
+            separately so callers can see cross-domain noise.
         rounds: Per-round metrics.
         convergence_reason: Why the swarm stopped.
         elapsed_s: Total wall-clock time.
@@ -428,6 +657,7 @@ class FlockSwarmResult:
     total_queries: int = 0
     total_evaluations: int = 0
     total_new_findings: int = 0
+    wasted_bridge_queries: int = 0
     rounds: list[QueryRoundMetrics] = field(default_factory=list)
     convergence_reason: str = ""
     elapsed_s: float = 0.0
@@ -660,22 +890,60 @@ def select_queries(
     except Exception as exc:
         logger.warning("error=<%s> | GROUND query selection failed", exc)
 
-    # --- BRIDGE: cross-angle findings ---
+    # --- BRIDGE: cross-angle findings with topical proximity ---
+    # Only bridge findings that share a cluster_id with at least one
+    # finding in the clone's angle.  This prevents dental clones from
+    # evaluating steroid findings (or similar cross-domain waste).
+    # Falls back to high-relevance bridging if no cluster overlap exists.
     try:
         with lock:
-            bridge_rows = store.conn.execute(
-                "SELECT id, fact, angle, relevance_score, novelty_score, evaluation_count "
-                "FROM conditions "
+            # Find cluster IDs that the clone's angle participates in
+            clone_clusters = store.conn.execute(
+                "SELECT DISTINCT cluster_id FROM conditions "
                 "WHERE consider_for_use = TRUE "
-                "AND row_type = 'finding' "
-                "AND angle != ? "
-                "AND relevance_score > ? "
-                "AND score_version > 0 "
-                "ORDER BY (novelty_score * relevance_score) DESC "
-                "LIMIT ?",
-                [clone_angle, config.cross_angle_min_relevance,
-                 _limit_for("bridge")],
+                "AND angle = ? "
+                "AND cluster_id >= 0 "
+                "AND score_version > 0",
+                [clone_angle],
             ).fetchall()
+            clone_cluster_ids = {r[0] for r in clone_clusters}
+
+        bridge_rows = []
+        if clone_cluster_ids:
+            # Primary: bridge findings in shared clusters (topically proximate)
+            placeholders = ", ".join("?" for _ in clone_cluster_ids)
+            with lock:
+                bridge_rows = store.conn.execute(
+                    f"SELECT id, fact, angle, relevance_score, novelty_score, evaluation_count "
+                    f"FROM conditions "
+                    f"WHERE consider_for_use = TRUE "
+                    f"AND row_type = 'finding' "
+                    f"AND angle != ? "
+                    f"AND cluster_id IN ({placeholders}) "
+                    f"AND score_version > 0 "
+                    f"ORDER BY (novelty_score * relevance_score) DESC "
+                    f"LIMIT ?",
+                    [clone_angle, *clone_cluster_ids, _limit_for("bridge")],
+                ).fetchall()
+
+        if not bridge_rows:
+            # Fallback: high-relevance bridging when no cluster overlap
+            # (uses stricter relevance threshold to reduce noise)
+            with lock:
+                bridge_rows = store.conn.execute(
+                    "SELECT id, fact, angle, relevance_score, novelty_score, evaluation_count "
+                    "FROM conditions "
+                    "WHERE consider_for_use = TRUE "
+                    "AND row_type = 'finding' "
+                    "AND angle != ? "
+                    "AND relevance_score > ? "
+                    "AND score_version > 0 "
+                    "ORDER BY (novelty_score * relevance_score) DESC "
+                    "LIMIT ?",
+                    [clone_angle, max(0.6, config.cross_angle_min_relevance),
+                     _limit_for("bridge")],
+                ).fetchall()
+
         for cid, fact, angle, rel, nov, eval_count in bridge_rows:
             priority = nov * rel * 1.3
             queries.append(FlockQuery(
@@ -986,15 +1254,32 @@ def _parse_evaluation_result(
                     "confidence": score_delta.get("confidence", 0.6),
                 })
 
-    # For BRIDGE queries, extract interaction as a new finding
+    # For BRIDGE queries, extract interaction as a new finding — but only
+    # if the evaluation found an actual connection.  "TYPE: independent"
+    # means no cross-domain link exists and storing it is wasted noise.
     if query.query_type == QueryType.BRIDGE:
+        type_match = re.search(
+            r"TYPE:\s*(\S+)", raw_response, re.IGNORECASE,
+        )
+        bridge_type = type_match.group(1).lower() if type_match else ""
+        is_independent = bridge_type == "independent"
+
         interaction_match = re.search(
             r"INTERACTION:\s*(.+?)(?:\n[A-Z]|\Z)",
             raw_response, re.IGNORECASE | re.DOTALL,
         )
-        if interaction_match:
+        if interaction_match and not is_independent:
             interaction_text = interaction_match.group(1).strip()
-            if len(interaction_text) > 30:
+            # Also filter out "no connection" boilerplate responses
+            no_connection_phrases = (
+                "no direct", "no mechanistic", "unrelated",
+                "no connection", "no interaction", "independent",
+            )
+            has_no_connection = any(
+                phrase in interaction_text.lower()
+                for phrase in no_connection_phrases
+            )
+            if len(interaction_text) > 30 and not has_no_connection:
                 new_findings.append({
                     "fact": interaction_text,
                     "row_type": "insight",
@@ -1487,6 +1772,15 @@ class FlockQueryManager:
                         evaluation = _parse_evaluation_result(
                             response, query, elapsed,
                         )
+
+                        # Track wasted bridge queries (no connection found)
+                        if (
+                            query.query_type == QueryType.BRIDGE
+                            and not evaluation.new_findings
+                            and evaluation.score_delta.get("confidence", 0.5) <= 0.3
+                        ):
+                            result.wasted_bridge_queries += 1
+
                         rows, magnitude = store_evaluation(
                             self.store, evaluation, query,
                             run_id, round_num,
@@ -1609,10 +1903,10 @@ class FlockQueryManager:
 
         logger.info(
             "total_queries=<%d>, total_evals=<%d>, total_new=<%d>, "
-            "elapsed_s=<%.1f>, reason=<%s> | flock swarm complete",
+            "wasted_bridge=<%d>, elapsed_s=<%.1f>, reason=<%s> | flock swarm complete",
             result.total_queries, result.total_evaluations,
-            result.total_new_findings, result.elapsed_s,
-            result.convergence_reason,
+            result.total_new_findings, result.wasted_bridge_queries,
+            result.elapsed_s, result.convergence_reason,
         )
 
         return result
