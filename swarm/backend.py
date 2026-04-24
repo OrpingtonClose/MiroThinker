@@ -491,9 +491,12 @@ class RiskAwareBackend:
                 self.config.name, waited,
             )
 
-        # 4 + 5. Execute with concurrency control and retries
+        # 4 + 5. Execute with concurrency control and retries.
+        # The backoff sleep is OUTSIDE the semaphore so that slots
+        # are freed for other callers during the wait.
         last_error: Exception | None = None
         for attempt in range(1, self.config.max_retries + 1):
+            need_retry = False
             async with self._semaphore:
                 try:
                     response = await self._complete(prompt)
@@ -533,14 +536,19 @@ class RiskAwareBackend:
                         )
 
                     if attempt < self.config.max_retries:
-                        delay = self.config.retry_base_delay_s * (2 ** (attempt - 1))
-                        logger.warning(
-                            "backend=<%s>, attempt=<%d/%d>, error=<%s>, "
-                            "retry_delay_s=<%.1f> | retrying",
-                            self.config.name, attempt,
-                            self.config.max_retries, exc, delay,
-                        )
-                        await asyncio.sleep(delay)
+                        need_retry = True
+
+            # Backoff sleep after releasing the semaphore so other
+            # callers can use the slot while we wait.
+            if need_retry:
+                delay = self.config.retry_base_delay_s * (2 ** (attempt - 1))
+                logger.warning(
+                    "backend=<%s>, attempt=<%d/%d>, error=<%s>, "
+                    "retry_delay_s=<%.1f> | retrying",
+                    self.config.name, attempt,
+                    self.config.max_retries, last_error, delay,
+                )
+                await asyncio.sleep(delay)
 
         # All retries exhausted
         self.metrics.failures += 1
