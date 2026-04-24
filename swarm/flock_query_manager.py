@@ -1229,9 +1229,15 @@ def _build_verify_prompt(
         f"This finding has been flagged as potentially fabricated:\n"
         f'"{fact}"\n'
         f"Source: {source_text}\n\n"
-        f"Does this match your knowledge? Are the specific claims "
-        f"(names, numbers, studies cited) real?\n"
+        f"CRITICAL: Is this claim supported by published evidence, "
+        f"reproducible clinical observation, or established pharmacology "
+        f"— or is it gym folklore repeated enough to sound authoritative?\n"
+        f"Are the specific claims (names, numbers, studies cited) real?\n"
+        f"If a specific dosage is claimed, is it from multiple independent "
+        f"sources or a single source?\n\n"
         f"Format: VERDICT: [verified/likely_fabricated/partially_true/unverifiable]\n"
+        f"FABRICATION_RISK: X.X (0.0 = clearly real, 1.0 = clearly fabricated)\n"
+        f"SOURCE_BASIS: [multiple_independent/single_source/extrapolation/unknown]\n"
         f"CONFIDENCE: X.X\nREASONING: [1-2 sentences]"
     )
 
@@ -1263,9 +1269,13 @@ def _build_ground_prompt(
         f'"{fact}"\n\n'
         f"What specific evidence supports or refutes this? Cite mechanisms, "
         f"studies, or established principles relevant to the research objective.\n"
+        f"If this contains a dosing recommendation, how many independent "
+        f"sources support that specific dose? A single-source dose must be "
+        f"flagged as SINGLE-SOURCE ESTIMATE.\n\n"
         f"Format: EVIDENCE_FOR: [supporting evidence]\n"
         f"EVIDENCE_AGAINST: [contradicting evidence]\n"
         f"NET_ASSESSMENT: [supported/contested/unsupported]\n"
+        f"SOURCE_COUNT: [number of independent sources for key claims]\n"
         f"CONFIDENCE: X.X"
     )
 

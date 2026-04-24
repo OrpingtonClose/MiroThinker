@@ -904,8 +904,9 @@ class MCPSwarmEngine:
         Prioritizes worker-generated insights over raw corpus paragraphs.
         """
         max_chars = self.config.report_max_chars
-        # Reserve space for the prompt framing
-        framing_budget = 800
+        # Reserve space for the prompt framing (anti-hallucination + confidence
+        # tiers + expanded instructions ≈ 1700 chars; pad to 2000 for safety)
+        framing_budget = 2000
         findings_budget = max_chars - framing_budget
 
         # Gather top findings per angle, preferring worker analysis
@@ -995,13 +996,32 @@ class MCPSwarmEngine:
             f"Below are the highest-confidence findings from "
             f"{len(assignments)} specialist researchers.\n\n"
             f"{store_text}\n\n"
+            f"ANTI-HALLUCINATION CONSTRAINT — LIVES AT STAKE:\n"
+            f"If evidence is insufficient or contradictory for any specific "
+            f"recommendation, write 'EVIDENCE INSUFFICIENT — do not act on "
+            f"this without independent verification' rather than "
+            f"extrapolating.  An honest gap is infinitely more valuable "
+            f"than a plausible-sounding fabrication.\n\n"
+            f"CONFIDENCE TIER SYSTEM — mark EVERY claim:\n"
+            f"  ESTABLISHED  — Multiple independent sources, consistent "
+            f"mechanism, widely reproduced\n"
+            f"  PROBABLE     — Good mechanistic basis, limited clinical "
+            f"evidence, corroborated by practitioners\n"
+            f"  SPECULATIVE  — Single source, theoretical mechanism, or "
+            f"serendipity finding — do NOT act without verification\n"
+            f"  UNKNOWN      — Insufficient evidence.  Say you don't know.\n\n"
+            f"For dosing: 2+ independent sources → state dose.  Single "
+            f"source → mark SINGLE-SOURCE ESTIMATE.  No data → UNKNOWN.\n\n"
             f"Write a comprehensive, practitioner-grade report that:\n"
             f"1. Synthesizes these findings into a coherent narrative\n"
             f"2. Highlights cross-domain connections and compound interactions\n"
             f"3. Preserves exact numbers, dosages, and citations\n"
-            f"4. Organizes by practical phases (conservative → radical)\n"
-            f"5. Explains mechanisms, not just protocols\n"
-            f"6. No disclaimers or safety warnings\n\n"
+            f"4. Marks every claim with a confidence tier\n"
+            f"5. Organizes by practical phases (conservative → radical)\n"
+            f"6. Explains mechanisms at receptor/pathway/enzyme level\n"
+            f"7. Flags single-source dosing claims explicitly\n"
+            f"8. Lists UNKNOWN sections honestly — gaps are valuable\n"
+            f"9. No moral disclaimers.  Practitioner language.\n\n"
             f"Write the full report:"
         )
 
