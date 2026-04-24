@@ -475,6 +475,8 @@ def select_queries(
     clone: CloneContext,
     config: FlockQueryManagerConfig,
     round_number: int,
+    *,
+    budget: dict[str, int] | None = None,
 ) -> list[FlockQuery]:
     """Select the highest information-gain queries for a given clone.
 
@@ -497,6 +499,9 @@ def select_queries(
         clone: The current clone perspective.
         config: Query manager configuration.
         round_number: Current evaluation round (for dedup).
+        budget: Per-type query budget from ``compute_query_budget``.
+            When provided, each type's SQL LIMIT uses this instead of
+            the hardcoded ``max_queries_per_round // 6`` fallback.
 
     Returns:
         Sorted list of FlockQuery objects, highest priority first.
@@ -504,6 +509,12 @@ def select_queries(
     queries: list[FlockQuery] = []
     clone_angle = clone.angle
     lock = _get_store_lock(store)
+
+    def _limit_for(query_type: str) -> int:
+        """Return the SQL LIMIT for a query type, respecting adaptive budget."""
+        if budget and query_type in budget:
+            return max(1, budget[query_type])
+        return config.max_queries_per_round // 6
 
     # --- VALIDATE: high novelty, low confidence ---
     try:
@@ -518,7 +529,7 @@ def select_queries(
                 "AND score_version > 0 "
                 "ORDER BY (novelty_score - confidence) DESC "
                 "LIMIT ?",
-                [config.max_queries_per_round // 6],
+                [_limit_for("validate")],
             ).fetchall()
         for cid, fact, novelty, conf, angle in validate_rows:
             priority = (novelty - conf) * 1.5
@@ -547,7 +558,7 @@ def select_queries(
                 "AND c.score_version > 0 "
                 "ORDER BY c.confidence DESC "
                 "LIMIT ?",
-                [config.max_queries_per_round // 6],
+                [_limit_for("adjudicate")],
             ).fetchall()
         for cid, fact, angle, conf, partner_id, partner_fact, partner_angle in contra_rows:
             if partner_fact is None:
@@ -578,7 +589,7 @@ def select_queries(
                 "AND score_version > 0 "
                 "ORDER BY fabrication_risk DESC "
                 "LIMIT ?",
-                [config.fabrication_risk_floor, config.max_queries_per_round // 6],
+                [config.fabrication_risk_floor, _limit_for("verify")],
             ).fetchall()
         for cid, fact, fab_risk, angle, source_url in verify_rows:
             priority = fab_risk * 1.2
@@ -606,7 +617,7 @@ def select_queries(
                 "AND score_version > 0 "
                 "ORDER BY (relevance_score - specificity_score) DESC "
                 "LIMIT ?",
-                [config.specificity_ceiling, config.max_queries_per_round // 6],
+                [config.specificity_ceiling, _limit_for("enrich")],
             ).fetchall()
         for cid, fact, spec, rel, angle in enrich_rows:
             priority = (rel - spec) * 1.0
@@ -634,7 +645,7 @@ def select_queries(
                 "AND score_version > 0 "
                 "ORDER BY actionability_score DESC "
                 "LIMIT ?",
-                [config.max_queries_per_round // 6],
+                [_limit_for("ground")],
             ).fetchall()
         for cid, fact, action_score, angle in ground_rows:
             priority = action_score * 0.9
@@ -663,7 +674,7 @@ def select_queries(
                 "ORDER BY (novelty_score * relevance_score) DESC "
                 "LIMIT ?",
                 [clone_angle, config.cross_angle_min_relevance,
-                 config.max_queries_per_round // 6],
+                 _limit_for("bridge")],
             ).fetchall()
         for cid, fact, angle, rel, nov in bridge_rows:
             priority = nov * rel * 1.3
@@ -692,7 +703,7 @@ def select_queries(
                     "AND score_version > 0 "
                     "ORDER BY confidence DESC "
                     "LIMIT ?",
-                    [clone_angle, config.max_queries_per_round // 8],
+                    [clone_angle, _limit_for("challenge")],
                 ).fetchall()
             for cid, fact, conf, angle, eval_count in challenge_rows:
                 base_priority = conf * 0.7
@@ -728,7 +739,7 @@ def select_queries(
                     "HAVING COUNT(*) >= 3 "
                     "ORDER BY COUNT(*) DESC "
                     "LIMIT ?",
-                    [config.max_queries_per_round // 8],
+                    [_limit_for("synthesize")],
                 ).fetchall()
 
             for cluster_id, cluster_size in cluster_rows:
@@ -1116,6 +1127,8 @@ def store_evaluation(
         rows_created += 1
 
     # 2. Apply score deltas to evaluated conditions
+    # Track per-condition magnitude for accurate information_gain updates
+    per_condition_magnitude: dict[int, float] = {}
     if evaluation.score_delta:
         if (
             evaluation.query_type == QueryType.ADJUDICATE
@@ -1141,17 +1154,22 @@ def store_evaluation(
                 # "neither" or unrecognised — penalise both
                 winner_delta = {"confidence": max(0.1, 0.5 - eval_conf * 0.3)}
                 loser_delta = {"confidence": max(0.1, 0.5 - eval_conf * 0.3)}
-            score_magnitude += _apply_score_delta(
+            mag_a = _apply_score_delta(
                 store, evaluation.condition_ids_evaluated[0], winner_delta,
             )
-            score_magnitude += _apply_score_delta(
+            mag_b = _apply_score_delta(
                 store, evaluation.condition_ids_evaluated[1], loser_delta,
             )
+            per_condition_magnitude[evaluation.condition_ids_evaluated[0]] = mag_a
+            per_condition_magnitude[evaluation.condition_ids_evaluated[1]] = mag_b
+            score_magnitude += mag_a + mag_b
         else:
             for target_id in evaluation.condition_ids_evaluated:
-                score_magnitude += _apply_score_delta(
+                mag = _apply_score_delta(
                     store, target_id, evaluation.score_delta,
                 )
+                per_condition_magnitude[target_id] = mag
+                score_magnitude += mag
 
     # 3. Store any new findings generated during evaluation
     for finding in evaluation.new_findings:
@@ -1184,17 +1202,18 @@ def store_evaluation(
         evaluation.evaluator_angle,
     )
 
-    # 5. Update information_gain on evaluated conditions
-    if score_magnitude > 0:
+    # 5. Update information_gain on evaluated conditions (per-condition, not aggregate)
+    if per_condition_magnitude:
         try:
             lock = _get_store_lock(store)
             with lock:
-                for target_id in evaluation.condition_ids_evaluated:
-                    store.conn.execute(
-                        "UPDATE conditions SET information_gain = information_gain + ? "
-                        "WHERE id = ?",
-                        [score_magnitude, target_id],
-                    )
+                for target_id, individual_mag in per_condition_magnitude.items():
+                    if individual_mag > 0:
+                        store.conn.execute(
+                            "UPDATE conditions SET information_gain = information_gain + ? "
+                            "WHERE id = ?",
+                            [individual_mag, target_id],
+                        )
         except Exception as exc:
             logger.warning(
                 "error=<%s> | information_gain update failed", exc,
@@ -1438,9 +1457,10 @@ class FlockQueryManager:
                     "model_id": clone.model_id or "default",
                 })
 
-                # Select queries based on current flag state
+                # Select queries based on current flag state + adaptive budget
                 queries = select_queries(
                     self.store, clone, self.config, round_num,
+                    budget=budget,
                 )
 
                 if not queries:
