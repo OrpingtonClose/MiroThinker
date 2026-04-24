@@ -1457,6 +1457,12 @@ def _gather_aggregate_state(
     return result
 
 
+# Python 3.11 does not allow backslashes inside f-string expressions,
+# so we define these fallback strings as module-level constants.
+_NONE_YET = "  (none yet)\n"
+_NONE = "  (none)\n"
+
+
 def _build_aggregate_prompt(
     state: dict[str, Any],
     research_query: str,
@@ -1514,13 +1520,13 @@ def _build_aggregate_prompt(
         f"researchers who have been analyzing this objective. Below is "
         f"their collective intelligence.\n\n"
         f"TOP FINDINGS (by information gain):\n"
-        f"{findings_block or '  (none yet)\n'}\n"
+        f"{findings_block or _NONE_YET}\n"
         f"OPEN GAPS (explicit data needs):\n"
-        f"{gaps_block or '  (none)\n'}\n"
+        f"{gaps_block or _NONE}\n"
         f"UNRESOLVED CONTRADICTIONS:\n"
-        f"{contra_block or '  (none)\n'}\n"
+        f"{contra_block or _NONE}\n"
         f"CONVERGENT THEMES (multiple perspectives independently flagged):\n"
-        f"{convergence_block or '  (none)\n'}\n"
+        f"{convergence_block or _NONE}\n"
         f"Given EVERYTHING above, produce exactly 5 highest-value external "
         f"research directions. For each direction:\n\n"
         f"DIRECTION_1:\n"
