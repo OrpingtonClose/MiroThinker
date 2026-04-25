@@ -396,7 +396,7 @@ def search_fda_recalls(
         voluntary = recall.get("voluntary_mandated", "")
 
         class_flag = ""
-        if "I" in classification:
+        if classification.strip() == "Class I":
             class_flag = "⚠ "  # Class I = most serious
 
         formatted.append(
