@@ -155,7 +155,8 @@ vllm serve moonshotai/Kimi-Linear-48B-A3B-Instruct \
 | Prefill throughput | 684–1,526 tokens/s |
 | Decode throughput (eager) | 20.2–21.0 tokens/s |
 | GPU VRAM used | 141,793 MiB (~141.7 GiB) of 143,771 MiB |
-| Prefix cache hit rate | 0% (each instance serves different workers) |
+| Prefix cache hit rate (round 1) | 0% (each instance serves different workers) |
+| Prefix cache hit rate (cumulative, 3 rounds) | 39% on heaviest instance (611K hits / 1.57M queries) |
 
 ### 2.4 What Failed and Why
 
@@ -317,14 +318,16 @@ the single largest throughput penalty.
 than the biggest worker input at 50K tokens), which shrinks KV cache pre-
 allocation and leaves room for CUDA graph profiling buffers.
 
-### 4.2 Zero Prefix Cache Hits
+### 4.2 Low Prefix Cache Hit Rate
 
-**Observed**: 0% prefix cache hit rate across all 8 instances.
+**Round 1 observed**: 0% hit rate — each instance serves different workers with
+different prompts, so no prefix is reused within a single round.
 
-Each instance serves different workers with different prompts. The shared system
-prompt is identical across all workers, but since workers are round-robin
-distributed across instances, no single instance processes the same prefix
-twice within a round.
+**After 3 rounds observed**: 39% hit rate on the heaviest instance (611K token
+hits out of 1.57M token queries on port 8000). Gossip rounds partially reuse
+prior-round prefixes when the same worker is routed back to the same instance.
+This is accidental affinity, not deliberate — a proper affinity-routing scheme
+would push this to 80-90%.
 
 **Proposed fixes**:
 1. Route workers with the same system prompt prefix to the same instance
@@ -377,7 +380,14 @@ headroom over the largest worker input.
 | Worker assignment complete | 19:23:29 | 5:19 |
 | Round 1 map phase complete | 19:49:44 | 31:34 |
 | Round 1 map LLM time | — | 1575.5s (26.3 min) |
-| Gossip/reduce phase started | 19:49:48 | 31:38 |
+| Gossip round 1 complete | 20:04:49 | 46:39 |
+| Gossip round 1 info_gain | — | 0.836 |
+| Gossip round 1 LLM time | — | 904.8s (15.1 min) |
+| Gossip round 2 complete | 20:31:00 | 1:12:50 |
+| Gossip round 2 info_gain | — | 0.526 |
+| Gossip round 2 LLM time | — | 2475.9s (41.3 min) |
+| Gossip round 3 started | 20:31:02 | 1:12:52 |
+| Gossip round 3 hive hits | — | 11 workers |
 
 ### 5.2 vLLM Request Distribution (Round 1)
 
@@ -711,7 +721,187 @@ Expected fleet (8× H200):
 
 ---
 
-## 10. Lessons Learned
+## 10. Runtime Context Analysis — The Gossip Accumulation Gap
+
+### 10.1 Per-Instance Token Usage (After 3 Gossip Rounds)
+
+Measured cumulative prompt + generation tokens across all rounds:
+
+| Instance | Port | Prompt tokens | Gen tokens | Total | Running | Load share |
+|----------|------|-------------:|----------:|---------:|:-------:|----------:|
+| GPU 0 | 8000 | 1,565,270 | 81,260 | 1,646,530 | Yes | **28.5%** |
+| GPU 1 | 8001 | 1,017,545 | 63,578 | 1,081,123 | Yes | 18.7% |
+| GPU 2 | 8002 | 543,241 | 63,059 | 606,300 | Yes | 10.5% |
+| GPU 3 | 8003 | 497,431 | 51,480 | 548,911 | Idle | 9.5% |
+| GPU 4 | 8004 | 354,495 | 29,879 | 384,374 | Yes | 6.6% |
+| GPU 5 | 8005 | 285,820 | 62,047 | 347,867 | Yes | 6.0% |
+| GPU 6 | 8006 | 475,930 | 62,059 | 537,989 | Yes | 9.3% |
+| GPU 7 | 8007 | 260,793 | 33,473 | 294,266 | Idle | 5.1% |
+| **Total** | | **5,000,525** | **446,835** | **5,447,360** | | |
+
+### 10.2 Load Imbalance
+
+GPU 0 processed **6× more prompt tokens** than GPU 7 (1.57M vs 261K). This is
+a direct consequence of round-robin worker assignment without load awareness.
+Workers assigned to angles with larger corpus sections (e.g., insulin-protocols)
+generate larger prompts and are disproportionately routed to lower-numbered
+instances.
+
+**Impact**: GPU 0 was the bottleneck in every round. Other GPUs sat idle waiting
+for it to finish. The theoretical speedup from 8 GPUs is 8×, but the actual
+speedup was closer to 4-5× due to this imbalance.
+
+**Fix**: Load-aware routing that assigns workers to instances based on estimated
+prompt size, not round-robin order.
+
+### 10.3 Context Utilization — The Core Problem
+
+Each individual worker request uses **50-80K prompt tokens** (corpus slice +
+system prompt + gossip history from prior rounds). With 512K max context
+configured (and 1M available on Kimi Linear), this means:
+
+```
+Actual context used per request:  50,000-80,000 tokens
+Configured max context:          524,288 tokens (512K)
+Kimi Linear native context:    1,048,576 tokens (1M)
+Utilization vs configured:       10-15%
+Utilization vs native:           5-8%
+```
+
+**This is the fundamental waste.** We are paying the H200 tax ($2.32/hr per GPU)
+and the eager-mode speed penalty (21 tok/s vs 60-100 tok/s) for a 1M context
+window that we fill to 5-8%. At this utilization, Qwen3.6-35B-A3B on H100 PCIe
+($1.53/hr) with CUDA graphs (60-100 tok/s) would be strictly superior.
+
+Kimi Linear is only justified if we **actually fill** the context window to
+500K+ tokens per request.
+
+### 10.4 Why Context Stays Small — The Gossip Architecture Gap
+
+The current gossip protocol operates as follows:
+
+```
+Round 1: worker receives corpus_slice (~50K tokens) + system prompt (~2K)
+         → generates synthesis (~16K tokens)
+         → total context: ~68K tokens
+
+Round 2: worker receives corpus_slice (~50K) + system prompt (~2K)
+         + gossip_from_peers (~11 summaries × ~2K each = ~22K)
+         → total context: ~74K tokens
+
+Round 3: worker receives corpus_slice (~50K) + system prompt (~2K)
+         + gossip_from_peers (~22K) + hive_memory (~5K)
+         → total context: ~79K tokens
+```
+
+Context grows by only **~5-11K tokens per round** because the gossip payload is
+compressed summaries, not full synthesis outputs. After 3 rounds, context has
+grown from 68K to 79K — a **16% increase**. To reach 500K+ would require:
+
+- **~40 gossip rounds** at the current 11K/round accumulation rate, OR
+- **Full synthesis injection** instead of compressed summaries (each peer's full
+  16K output × 11 peers = 176K per round — reaching 500K+ by round 3)
+
+### 10.5 Deep Gossip Accumulation — Architecture for 1M Utilization
+
+To justify Kimi Linear's 1M context, the gossip protocol must accumulate
+substantially more context per round. Four design approaches:
+
+**Approach A: Full-output gossip (aggressive)**
+
+Instead of compressing peer outputs into ~2K summaries, inject full synthesis
+outputs. Each peer contributes ~16K tokens per round.
+
+```
+Round 1: 50K corpus + 2K system = 52K context (same as today)
+Round 2: 50K corpus + 2K system + 11×16K peer outputs = 228K context
+Round 3: 50K corpus + 2K system + 11×32K accumulated = 404K context
+Round 4: 50K corpus + 2K system + 11×48K accumulated = 580K context  ← 1M target zone
+Round 5: 50K corpus + 2K system + 11×64K accumulated = 756K context
+```
+
+This fills 1M by round 5-6. Trade-off: massively more prompt tokens to prefill,
+so each round takes much longer (11-24 min prefill at 1M). Prefix caching with
+affinity routing is critical — without it, every round re-prefills everything.
+
+**Approach B: Full-corpus workers (redistribute input)**
+
+Give every worker the entire corpus (672K tokens) instead of a slice (50K).
+Workers differentiate by their angle/perspective, not by which data they see.
+
+```
+Round 1: 672K corpus + 2K system = 674K context
+Round 2: 672K corpus + 2K system + gossip = 696K-850K context
+```
+
+Immediately fills 64-81% of 1M. Workers see cross-domain connections that
+slice-based workers physically cannot. Trade-off: prefill time for 672K tokens
+is 7-16 minutes per request. Only viable with prefix caching (all workers
+share the same corpus prefix, so instances 2-8 hit the cache after instance 1
+prefills).
+
+**Approach C: Progressive context growth (moderate)**
+
+Start with sliced corpus (50K) for fast Round 1 results, then expand context
+each round by injecting more raw corpus sections plus full peer outputs.
+
+```
+Round 1: 50K slice + 2K system = 52K (fast cold start)
+Round 2: 50K slice + 100K additional corpus + 50K peer outputs = 202K
+Round 3: 50K slice + 200K corpus + 100K peer outputs = 352K
+Round 4: Full 672K corpus + 150K accumulated gossip = 824K
+```
+
+Balances speed (fast initial round) with depth (progressive context growth).
+Prefix caching benefits compound as more of the corpus is shared.
+
+**Approach D: Fewer workers, larger shares**
+
+4 workers instead of 12, each getting 168K of corpus (672K / 4). After 3 rounds
+of full-output gossip, each worker has ~500K+ context.
+
+```
+Round 1: 168K corpus + 2K system = 170K
+Round 2: 168K corpus + 3×16K peer outputs = 216K
+Round 3: 168K corpus + 3×32K accumulated = 264K
+Round 4: 168K corpus + 3×48K accumulated = 312K
+```
+
+Slower to reach 1M (needs ~12 rounds), but each worker sees 3× more corpus from
+the start. Reducing from 12 to 4 workers also eliminates load imbalance (4
+workers on 8 GPUs = 2 idle GPUs, or 4 GPUs with affinity routing).
+
+### 10.6 Prefix Cache Effectiveness Over Time
+
+| Round | Prompt tokens queried | Cache hits | Hit rate | Notes |
+|-------|----------------------:|----------:|---------:|-------|
+| 1 (map) | ~600K (estimated) | 0 | 0% | Cold start, no prior prefix |
+| 1 (gossip) | ~400K (estimated) | ~100K | ~25% | System prompt reuse |
+| 2 | ~800K (estimated) | ~250K | ~31% | Partial prefix overlap from R1 |
+| 3 (so far) | ~500K+ | ~260K+ | ~39% | Accidental affinity building up |
+
+The hit rate is climbing because the round-robin router sometimes sends the same
+worker back to the same instance (accidental affinity). With deliberate affinity
+routing, round 2+ would see 80-90% hit rates — turning 11-24 min cold prefills
+into <1 min warm prefills.
+
+### 10.7 Information Gain Decay
+
+| Round | Info gain | Interpretation |
+|-------|----------:|----------------|
+| 1 (gossip) | 0.836 | Workers learned substantially from peers |
+| 2 (gossip) | 0.526 | Diminishing returns — workers converging |
+| 3 (gossip) | TBD | Expected ~0.3-0.4 (convergence) |
+
+Info gain dropped 37% from round 1 to round 2. By round 3, workers are seeing
+diminishing novel information from peers because the compressed gossip summaries
+don't carry enough detail. This is another symptom of the context gap — if
+workers received full peer outputs (approach A), info gain would stay higher
+because more raw detail is preserved across rounds.
+
+---
+
+## 11. Lessons Learned
 
 1. **H200 is not B200.** Official blog recipes targeting Blackwell (DP=8, FP4
    indexer) will silently fail or OOM on Hopper. Always check compute
@@ -747,3 +937,30 @@ Expected fleet (8× H200):
    memory is freed instantly when processes die. The bottleneck is reading
    weights from NVMe (~5 min for V4 Pro, ~22s for Kimi Linear). NVMe caching
    makes subsequent loads faster.
+
+9. **Round-robin routing causes severe load imbalance.** GPU 0 processed 6×
+   more tokens than GPU 7 (1.57M vs 261K). Workers with larger corpus
+   sections dominate lower-numbered instances. Load-aware routing based on
+   estimated prompt size would equalize GPU utilization.
+
+10. **Context utilization is the make-or-break metric for Kimi Linear.** At
+    50-80K tokens per request (5-8% of 1M), we are paying the H200/eager-mode
+    tax for nothing. If context stays below 262K, switch to Qwen3.6 on H100.
+    Only commit to Kimi Linear when the architecture guarantees 500K+ fill.
+
+11. **Gossip summaries are too compressed to drive context growth.** The current
+    protocol compresses each peer's synthesis into ~2K tokens. Over 3 rounds,
+    context grows from 68K to 79K — a 16% increase. Full-output gossip (16K
+    per peer per round) would reach 500K+ by round 4-5.
+
+12. **Accidental affinity still yields 39% prefix cache hits.** Even without
+    deliberate routing, the round-robin pattern occasionally sends the same
+    worker back to the same instance. The hit rate climbed from 0% (round 1)
+    to 39% (after round 3). Deliberate affinity routing would push this to
+    80-90%, cutting prefill time by 5-10× for warm rounds.
+
+13. **Info gain decays fast with compressed gossip.** Info gain dropped from
+    0.836 (round 1) to 0.526 (round 2) — a 37% decrease. Workers are
+    converging prematurely because compressed summaries lose the detail needed
+    to challenge and extend each other's reasoning. Full-output gossip would
+    sustain higher info gain by preserving raw argumentation.
