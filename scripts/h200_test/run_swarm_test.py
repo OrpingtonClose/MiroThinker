@@ -1741,19 +1741,19 @@ def main() -> None:
                     args.local_model, args.flock_model, args.num_gpus,
                 )
 
-                # Phase 1: Start local instances (auto-packed per GPU)
-                local_eps = await start_vllm_instances(
-                    model=args.local_model,
-                    num_gpus=args.num_gpus,
-                    max_model_len=131072,
-                )
-
-                if not local_eps:
-                    logger.error("no local vLLM instances started — aborting")
-                    stop_vllm_instances()
-                    return
-
                 try:
+                    # Phase 1: Start local instances (auto-packed per GPU)
+                    # Inside try so partially-started processes are cleaned
+                    # up if start_vllm_instances raises mid-loop.
+                    local_eps = await start_vllm_instances(
+                        model=args.local_model,
+                        num_gpus=args.num_gpus,
+                        max_model_len=131072,
+                    )
+
+                    if not local_eps:
+                        logger.error("no local vLLM instances started — aborting")
+                        return
                     # Probe first instance to discover model name
                     local_caps = await _probe_vllm(local_eps[0])
                     local_model_name = local_caps.model_id
