@@ -248,6 +248,11 @@ def make_openrouter_complete_fn(
 # Direct DeepSeek API for V4 Flash workers — cheap, fast, uncensored,
 # unlimited concurrency (API-based, no GPU cost for bees).
 
+# Model constants must be defined before functions that use them as defaults
+_DEEPSEEK_V4_FLASH_MODEL = "deepseek-v4-flash"  # via DeepSeek API
+_DEEPSEEK_V4_PRO_MODEL = "deepseek-ai/DeepSeek-V4-Pro"  # local vLLM
+_DEEPSEEK_V4_PRO_OPENROUTER = "deepseek/deepseek-v4-pro"  # via OpenRouter
+
 
 async def _deepseek_api_complete(
     prompt: str,
@@ -357,10 +362,7 @@ def make_deepseek_api_complete_fn(
 _KIMI_LINEAR_MODEL = "huihui-ai/Huihui-Kimi-Linear-48B-A3B-Instruct-abliterated"
 _QWEN3_235B_MODEL = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
 
-# DeepSeek V4 models
-_DEEPSEEK_V4_FLASH_MODEL = "deepseek-v4-flash"  # via DeepSeek API
-_DEEPSEEK_V4_PRO_MODEL = "deepseek-ai/DeepSeek-V4-Pro"  # local vLLM
-_DEEPSEEK_V4_PRO_OPENROUTER = "deepseek/deepseek-v4-pro"  # via OpenRouter
+# DeepSeek V4 models defined above (before make_deepseek_api_complete_fn)
 
 # Legacy remote worker models via OpenRouter
 _LING_MODEL = "inclusionai/ling-2.6-1t:free"
@@ -368,9 +370,10 @@ _LING_MODEL = "inclusionai/ling-2.6-1t:free"
 # vLLM base port — instances use 8000, 8001, 8002, ...
 _VLLM_BASE_PORT = 8000
 
-# Track running vLLM subprocesses and their log file handles for cleanup
+# Track running vLLM subprocesses, log handles, and Docker containers for cleanup
 _vllm_processes: list[subprocess.Popen[bytes]] = []
 _vllm_log_handles: list[object] = []
+_docker_containers: list[str] = []
 
 
 def _compute_instances_per_gpu(
@@ -535,7 +538,7 @@ async def start_vllm_instances(
 
 
 def stop_vllm_instances() -> None:
-    """Kill all tracked vLLM processes."""
+    """Kill all tracked vLLM processes and Docker containers."""
     for proc in _vllm_processes:
         try:
             proc.send_signal(signal.SIGTERM)
@@ -557,7 +560,18 @@ def stop_vllm_instances() -> None:
             pass
     _vllm_log_handles.clear()
 
-    # Also kill any orphaned vLLM processes
+    # Stop Docker containers started by _start_v4_pro_docker.
+    # docker run -d returns immediately so the tracked Popen is already
+    # exited — we must explicitly remove the named container to free GPUs.
+    for name in list(_docker_containers):
+        logger.info("container=<%s> | stopping docker container", name)
+        subprocess.run(
+            ["docker", "rm", "-f", name],
+            capture_output=True,
+        )
+    _docker_containers.clear()
+
+    # Also kill any orphaned vLLM processes on the host
     subprocess.run(
         ["pkill", "-9", "-f", "vllm.entrypoints"],
         capture_output=True,
@@ -848,6 +862,7 @@ async def _start_v4_pro_docker(
     )
     _vllm_processes.append(proc)
     _vllm_log_handles.append(log_fh)
+    _docker_containers.append("vllm-v4-pro")
 
     endpoint = "http://localhost:8000/v1"
 
