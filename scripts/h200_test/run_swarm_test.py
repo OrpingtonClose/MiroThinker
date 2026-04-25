@@ -565,7 +565,8 @@ def _make_fallback_fn(
                 "remote call returned empty, retrying",
                 angle, attempt, max_retries,
             )
-            await asyncio.sleep(2 ** attempt)  # exponential backoff
+            if attempt < max_retries:
+                await asyncio.sleep(2 ** attempt)  # exponential backoff
 
         # Primary exhausted — fall back to local
         if fallback is not None:
