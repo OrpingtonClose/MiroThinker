@@ -365,16 +365,19 @@ async def run_swarm_test(
         max_tokens=config.worker_max_tokens,
         temperature=config.worker_temperature,
     )
-    # Route queen to OpenRouter if model looks like an OpenRouter identifier
-    # (contains '/'), otherwise use local vLLM.
-    if "/" in queen_model and queen_model != worker_model:
+    # Route queen to OpenRouter when OPENROUTER_API_KEY is set AND the queen
+    # model differs from the worker model.  The '/' heuristic alone cannot
+    # distinguish HuggingFace names (huihui-ai/Qwen3.5-32B-abliterated) from
+    # OpenRouter identifiers (deepseek/deepseek-r1) — both use org/model format.
+    _has_openrouter_key = bool(os.environ.get("OPENROUTER_API_KEY", ""))
+    if _has_openrouter_key and queen_model != worker_model:
         queen_fn = make_openrouter_complete_fn(
             queen_model,
             max_tokens=config.queen_max_tokens,
             temperature=config.queen_temperature,
         )
         logger.info(
-            "queen_model=<%s> | queen routed to OpenRouter",
+            "queen_model=<%s> | queen routed to OpenRouter (OPENROUTER_API_KEY set)",
             queen_model,
         )
     else:
@@ -383,6 +386,11 @@ async def run_swarm_test(
             max_tokens=config.queen_max_tokens,
             temperature=config.queen_temperature,
         )
+        if queen_model != worker_model and not _has_openrouter_key:
+            logger.warning(
+                "queen_model=<%s> | queen differs from worker but no OPENROUTER_API_KEY — using local vLLM",
+                queen_model,
+            )
     serendipity_fn = make_complete_fn(
         serendipity_model, api_base,
         max_tokens=config.worker_max_tokens,

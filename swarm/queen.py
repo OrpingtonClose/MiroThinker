@@ -46,7 +46,7 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 # Pattern to strip raw model reasoning tokens that should never appear in output
-_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
 def _sanitize_output(text: str) -> str:
