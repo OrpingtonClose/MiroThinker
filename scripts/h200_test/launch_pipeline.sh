@@ -84,8 +84,9 @@ echo "  Local model ready"
 # is max(local, flock), not local + flock.
 if ! wait $PID_FLOCK; then
     echo "  ✗ Flock model download failed — Phase 2 will be skipped"
+else
+    echo "  Flock model ready"
 fi
-echo "  Flock model ready"
 
 # ── Step 2: Verify prerequisites ──────────────────────────────────────
 
