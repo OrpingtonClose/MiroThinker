@@ -791,21 +791,98 @@ async def swap_to_flock_model(
     return endpoints[0]
 
 
+def _detect_gpu_arch() -> int:
+    """Detect the CUDA compute capability of the first GPU.
+
+    Returns the major version (e.g. 9 for Hopper, 10 for Blackwell).
+    Falls back to 0 if detection fails.
+    """
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # e.g. "9.0" → 9
+            return int(result.stdout.strip().split("\n")[0].split(".")[0])
+    except Exception:
+        logger.warning("failed to detect GPU architecture via nvidia-smi")
+    return 0
+
+
 async def _start_v4_pro_docker(
     model: str = _DEEPSEEK_V4_PRO_MODEL,
     num_gpus: int = 8,
 ) -> str:
-    """Start DeepSeek V4 Pro via the official vLLM Docker image.
+    """Start DeepSeek V4 Pro with architecture-appropriate config.
 
-    Uses the exact command from the vLLM blog post "DeepSeek V4 in vLLM:
-    Efficient Long-context Attention" (April 24, 2026):
-    - vllm/vllm-openai:deepseekv4-cu130 image
-    - data-parallel-size 8 (NOT tensor-parallel-size)
-    - FP8 KV cache + FP4 indexer cache
-    - 256-token blocks for hybrid CSA+HCA attention
-    - Expert parallelism for MoE efficiency
-    - Full+piecewise CUDA graph compilation
-    - DeepSeek V4 tokenizer and reasoning parser
+    Detects GPU architecture and selects the correct configuration:
+
+    - **Blackwell (sm_100+)**: Uses the official vLLM Docker image with
+      DP=8, FP4 indexer cache, expert parallelism, and full CUDA graph
+      compilation.  This requires >=192 GB VRAM per GPU.
+    - **Hopper (sm_90)**: Uses the standard vLLM Python entrypoint with
+      TP=8 (tensor parallelism), FP8 KV cache (no FP4 indexer), and CUDA
+      graphs disabled.  H200 has 143 GB VRAM — DP=8 OOMs because it
+      replicates the full ~127 GiB model on every GPU.
+
+    See H200_INFERENCE_RUNBOOK.md for the full failure analysis.
+
+    Args:
+        model: HuggingFace model identifier.
+        num_gpus: GPU count.
+
+    Returns:
+        API base URL (http://localhost:8000/v1) or empty on failure.
+    """
+    import httpx
+
+    gpu_arch = _detect_gpu_arch()
+    logger.info(
+        "model=<%s>, gpus=<%d>, gpu_arch=<sm_%d0> | detecting V4 Pro config",
+        model, num_gpus, gpu_arch,
+    )
+
+    # Blackwell (sm_100+): use Docker with DP=8, FP4 indexer, expert parallel
+    if gpu_arch >= 10:
+        return await _start_v4_pro_blackwell(model, num_gpus)
+
+    # Hopper and older: use TP=8 with FP8 KV cache, no CUDA graphs
+    logger.info(
+        "gpu_arch=<sm_%d0> | using Hopper-compatible TP=%d config "
+        "(no DP, no FP4 indexer, no CUDA graphs)",
+        gpu_arch, num_gpus,
+    )
+    endpoints = await start_vllm_instances(
+        model=model,
+        num_gpus=num_gpus,
+        tp_per_instance=num_gpus,
+        max_model_len=1048576,
+        instances_per_gpu=1,
+        extra_vllm_args=[
+            "--kv-cache-dtype", "fp8",
+            "--block-size", "256",
+            "--enable-prefix-caching",
+            "--compilation-config", '{"cudagraph_mode":"NONE"}',
+            "--tokenizer-mode", "deepseek_v4",
+            "--reasoning-parser", "deepseek_v4",
+        ],
+    )
+    if not endpoints:
+        logger.error("V4 Pro TP=%d failed to start on Hopper", num_gpus)
+        return ""
+    return endpoints[0]
+
+
+async def _start_v4_pro_blackwell(
+    model: str = _DEEPSEEK_V4_PRO_MODEL,
+    num_gpus: int = 8,
+) -> str:
+    """Start DeepSeek V4 Pro via Docker on Blackwell GPUs (sm_100+).
+
+    Uses the exact command from the vLLM blog post with DP=8,
+    FP4 indexer cache, expert parallelism, and full CUDA graphs.
+    Requires >=192 GB VRAM per GPU (B200/B300).
 
     Args:
         model: HuggingFace model identifier.
@@ -845,8 +922,8 @@ async def _start_v4_pro_docker(
 
     logger.info(
         "model=<%s>, gpus=<%d> | starting V4 Pro via Docker "
-        "(vllm/vllm-openai:deepseekv4-cu130)",
-        model, num_gpus,
+        "(Blackwell DP=%d, FP4 indexer, CUDA graphs)",
+        model, num_gpus, num_gpus,
     )
 
     # Remove any existing container with the same name
