@@ -376,36 +376,6 @@ _vllm_log_handles: list[object] = []
 _docker_containers: list[str] = []
 
 
-def _compute_instances_per_gpu(
-    model_vram_gb: float,
-    gpu_vram_gb: float = 143.7,
-    kv_reserve_gb: float = 10.0,
-) -> int:
-    """Compute how many model instances fit on a single GPU.
-
-    Packs as many instances as possible while reserving space for
-    KV cache per instance.
-
-    Args:
-        model_vram_gb: Estimated model weight VRAM in GB.
-        gpu_vram_gb: Total GPU VRAM in GB (H200 = 143.7).
-        kv_reserve_gb: VRAM reserved per instance for KV cache.
-
-    Returns:
-        Number of instances that fit on one GPU (minimum 1).
-    """
-    usable = gpu_vram_gb * 0.95  # 5% overhead for CUDA context
-    per_instance = model_vram_gb + kv_reserve_gb
-    count = int(usable // per_instance)
-    return max(1, count)
-
-
-# Known model VRAM estimates (FP8 weights) in GB
-_MODEL_VRAM_ESTIMATES: dict[str, float] = {
-    _KIMI_LINEAR_MODEL: 48.0,   # 48B MoE at FP8
-    _QWEN3_235B_MODEL: 235.0,   # 235B MoE at FP8, needs TP
-}
-
 
 async def start_vllm_instances(
     model: str,
@@ -413,35 +383,30 @@ async def start_vllm_instances(
     tp_per_instance: int = 1,
     max_model_len: int = 131072,
     *,
-    instances_per_gpu: int | None = None,
-    model_vram_gb: float | None = None,
+    instances_per_gpu: int = 1,
     extra_vllm_args: list[str] | None = None,
 ) -> list[str]:
     """Start vLLM instances packed across GPUs.
 
-    Automatically computes how many instances fit per GPU based on
-    model weight size.  For small MoE models (e.g. Kimi-Linear 48B
-    with 3B active at FP8 = ~48 GB), this packs 2 instances per
-    143 GB H200 GPU = 16 instances across 8 GPUs.
+    The caller must specify ``instances_per_gpu`` based on their actual
+    hardware, model size, quantisation, and context length.  Actual VRAM
+    usage depends on too many factors (MoE vs dense, linear attention,
+    KV cache dtype, CUDA graph profiling overhead, vLLM allocator
+    internals) to estimate reliably in code.
 
     Args:
         model: HuggingFace model id or local path.
         num_gpus: Total available GPUs.
         tp_per_instance: Tensor-parallel degree per instance.
         max_model_len: Context window per instance.
-        instances_per_gpu: Override auto-computed packing density.
-        model_vram_gb: Model weight size in GB (auto-looked up if None).
+        instances_per_gpu: How many instances to pack on each GPU.
+            Must be determined empirically by the operator.
         extra_vllm_args: Additional CLI args passed to vLLM.
 
     Returns:
         List of API base URLs (e.g. ["http://localhost:8000/v1", ...]).
     """
     import httpx
-
-    # Compute packing density
-    if instances_per_gpu is None:
-        vram = model_vram_gb or _MODEL_VRAM_ESTIMATES.get(model, 50.0)
-        instances_per_gpu = _compute_instances_per_gpu(vram)
 
     num_instances = instances_per_gpu * (num_gpus // tp_per_instance)
     # Each instance's share of GPU memory
