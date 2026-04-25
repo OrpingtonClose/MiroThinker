@@ -486,13 +486,13 @@ async def start_vllm_instances(
         )
 
         log_fh = open(f"/workspace/vllm_{port}.log", "w")  # noqa: SIM115
+        _vllm_log_handles.append(log_fh)
         proc = subprocess.Popen(
             cmd, env=env,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
         )
         _vllm_processes.append(proc)
-        _vllm_log_handles.append(log_fh)
         endpoints.append(f"http://localhost:{port}/v1")
 
     # Wait for all instances to become healthy
@@ -614,8 +614,13 @@ def build_worker_routing(
     for idx, angle in enumerate(angles):
         # Local endpoint for fallback (round-robin across instances)
         local_ep = local_endpoints[idx % len(local_endpoints)] if local_endpoints else ""
-        local_fn = make_complete_fn(
-            local_model, local_ep, max_tokens, temperature,
+        local_fn = traced_complete_fn(
+            make_complete_fn(
+                local_model, local_ep, max_tokens, temperature,
+            ),
+            f"worker.{angle}.fallback",
+            model_name=local_model,
+            backend="vllm-local-fallback",
         ) if local_ep else None
 
         if has_deepseek:
@@ -910,7 +915,7 @@ async def _start_v4_pro_blackwell(
         "-d",  # detach so we can poll for readiness
         "--name", "vllm-v4-pro",
         "vllm/vllm-openai:deepseekv4-cu130",
-        model,
+        "--model", model,
         "--trust-remote-code",
         "--kv-cache-dtype", "fp8",
         "--block-size", "256",
@@ -939,14 +944,25 @@ async def _start_v4_pro_blackwell(
     )
 
     log_fh = open("/workspace/vllm_v4_pro_docker.log", "w")  # noqa: SIM115
+    _vllm_log_handles.append(log_fh)
     proc = subprocess.Popen(
         cmd,
         stdout=log_fh,
         stderr=subprocess.STDOUT,
     )
     _vllm_processes.append(proc)
-    _vllm_log_handles.append(log_fh)
     _docker_containers.append("vllm-v4-pro")
+
+    # docker run -d only prints container ID to stdout — attach a
+    # docker logs --follow subprocess to capture actual vLLM output.
+    docker_log_fh = open("/workspace/vllm_v4_pro_container.log", "w")  # noqa: SIM115
+    _vllm_log_handles.append(docker_log_fh)
+    docker_log_proc = subprocess.Popen(
+        ["docker", "logs", "--follow", "vllm-v4-pro"],
+        stdout=docker_log_fh,
+        stderr=subprocess.STDOUT,
+    )
+    _vllm_processes.append(docker_log_proc)
 
     # Early exit: docker run -d exits the CLI immediately — if the process
     # already terminated with non-zero, the container never started (e.g.
@@ -955,8 +971,8 @@ async def _start_v4_pro_blackwell(
     await asyncio.sleep(3)
     if proc.poll() is not None and proc.returncode != 0:
         logger.error(
-            "returncode=<%d>, log=</workspace/vllm_v4_pro_docker.log> | "
-            "docker run failed immediately — check log for details",
+            "returncode=<%d>, log=</workspace/vllm_v4_pro_container.log> | "
+            "docker run failed — check log or run: docker logs vllm-v4-pro",
             proc.returncode,
         )
         return ""
