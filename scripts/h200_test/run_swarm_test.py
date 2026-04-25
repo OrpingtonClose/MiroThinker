@@ -1751,58 +1751,70 @@ def main() -> None:
                     logger.error("no local vLLM instances started — aborting")
                     return
 
-                # Probe first instance to discover model name
-                local_caps = await _probe_vllm(local_eps[0])
-                local_model_name = local_caps.model_id
+                try:
+                    # Probe first instance to discover model name
+                    local_caps = await _probe_vllm(local_eps[0])
+                    local_model_name = local_caps.model_id
 
-                logger.info(
-                    "local_instances=<%d>, local_model=<%s>, "
-                    "context_window=<%d> | Phase 1 ready",
-                    len(local_eps), local_model_name,
-                    local_caps.context_window,
-                )
+                    # Re-compute token budgets from actual context window.
+                    # main() probed vLLM before instances existed and got
+                    # fallback 32K budgets.  Now we have the real context
+                    # window (e.g. 131K for Kimi-Linear) so budgets must
+                    # be resized to avoid severe undersizing.
+                    actual_budgets = _decide_token_budgets(local_caps)
+                    config.worker_max_tokens = actual_budgets["worker_max_tokens"]
+                    config.queen_max_tokens = actual_budgets["queen_max_tokens"]
+                    config.max_section_chars = actual_budgets["max_section_chars"]
+                    config.context_budget = actual_budgets["context_budget"]
 
-                # Run bees + gossip + serendipity + queen
-                result = await run_swarm_test(
-                    corpus=corpus,
-                    query=query,
-                    config=config,
-                    output_dir=args.output_dir,
-                    queen_routing=queen_routing,
-                    resolved_model=local_model_name,
-                    local_endpoints=local_eps,
-                )
-
-                logger.info(
-                    "phase1_elapsed=<%.1f>s, worker_summaries=<%d> | "
-                    "Phase 1 complete (bees + gossip + queen)",
-                    result.metrics.total_elapsed_s,
-                    len(result.worker_summaries),
-                )
-
-                # Phase 2: Swap to Flock model
-                flock_ep = await swap_to_flock_model(
-                    model=args.flock_model,
-                    num_gpus=args.num_gpus,
-                )
-
-                if flock_ep:
-                    flock_caps = await _probe_vllm(flock_ep)
                     logger.info(
-                        "flock_model=<%s>, context_window=<%d> | "
-                        "Phase 2 ready — Flock model loaded",
-                        flock_caps.model_id,
-                        flock_caps.context_window,
-                    )
-                    # Flock evaluation would run here using flock_ep
-                    # (FlockQueryManager integration is a separate step)
-                else:
-                    logger.warning(
-                        "flock model swap failed — skipping Flock evaluation"
+                        "local_instances=<%d>, local_model=<%s>, "
+                        "context_window=<%d> | Phase 1 ready "
+                        "(budgets resized from actual context)",
+                        len(local_eps), local_model_name,
+                        local_caps.context_window,
                     )
 
-                # Cleanup
-                stop_vllm_instances()
+                    # Run bees + gossip + serendipity + queen
+                    result = await run_swarm_test(
+                        corpus=corpus,
+                        query=query,
+                        config=config,
+                        output_dir=args.output_dir,
+                        queen_routing=queen_routing,
+                        resolved_model=local_model_name,
+                        local_endpoints=local_eps,
+                    )
+
+                    logger.info(
+                        "phase1_elapsed=<%.1f>s, worker_summaries=<%d> | "
+                        "Phase 1 complete (bees + gossip + queen)",
+                        result.metrics.total_elapsed_s,
+                        len(result.worker_summaries),
+                    )
+
+                    # Phase 2: Swap to Flock model
+                    flock_ep = await swap_to_flock_model(
+                        model=args.flock_model,
+                        num_gpus=args.num_gpus,
+                    )
+
+                    if flock_ep:
+                        flock_caps = await _probe_vllm(flock_ep)
+                        logger.info(
+                            "flock_model=<%s>, context_window=<%d> | "
+                            "Phase 2 ready — Flock model loaded",
+                            flock_caps.model_id,
+                            flock_caps.context_window,
+                        )
+                        # Flock evaluation would run here using flock_ep
+                        # (FlockQueryManager integration is a separate step)
+                    else:
+                        logger.warning(
+                            "flock model swap failed — skipping Flock evaluation"
+                        )
+                finally:
+                    stop_vllm_instances()
 
             asyncio.run(_run_multi_model())
         else:
