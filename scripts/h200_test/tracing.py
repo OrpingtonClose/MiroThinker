@@ -416,13 +416,13 @@ def upload_traces_to_b2(
         )
         logger.info("created new B2 bucket: %s", bucket_name)
 
-    # Collect files to upload
+    # Collect files to upload — only files belonging to THIS run.
+    # Previous runs may have left files in trace_dir; uploading them
+    # under the current run_id prefix would waste bandwidth and create
+    # confusing trace data in B2.
     files_to_upload = []
     for f in sorted(trace_path.iterdir()):
-        if f.is_file() and (
-            f.suffix in (".jsonl", ".json", ".log", ".md")
-            or run_id in f.name
-        ):
+        if f.is_file() and run_id in f.name:
             files_to_upload.append(f)
 
     if not files_to_upload:

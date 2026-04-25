@@ -865,6 +865,19 @@ async def _start_v4_pro_docker(
     _vllm_log_handles.append(log_fh)
     _docker_containers.append("vllm-v4-pro")
 
+    # Early exit: docker run -d exits the CLI immediately — if the process
+    # already terminated with non-zero, the container never started (e.g.
+    # image not found, GPU unavailable, daemon down).  Detect this in
+    # seconds instead of polling for 30 minutes.
+    await asyncio.sleep(3)
+    if proc.poll() is not None and proc.returncode != 0:
+        logger.error(
+            "returncode=<%d>, log=</workspace/vllm_v4_pro_docker.log> | "
+            "docker run failed immediately — check log for details",
+            proc.returncode,
+        )
+        return ""
+
     endpoint = "http://localhost:8000/v1"
 
     # Wait for the container to become healthy (model loading can take
