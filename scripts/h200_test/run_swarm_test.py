@@ -735,14 +735,20 @@ def main() -> None:
         len(corpus) // config.max_section_chars + 1,
     )
 
-    # Wire corpus_delta_fn for external research during gossip rounds
+    # Wire corpus_delta_fn for external research during gossip rounds.
+    # Uses a watermark so only NEW findings since last check are returned —
+    # returning all findings every call would permanently disable adaptive
+    # convergence (engine checks `new_data_arrived = bool(delta_text)`).
     if store is not None:
+        from datetime import datetime, timezone
+        _watermark = datetime.now(timezone.utc).isoformat()
+
         async def _corpus_delta() -> str:
             """Fetch new findings added to the store since last check."""
-            new_findings = store.get_findings(limit=500)
-            if not new_findings:
-                return ""
-            return load_corpus_from_store(store)
+            nonlocal _watermark
+            delta = store.export_delta(since=_watermark)
+            _watermark = datetime.now(timezone.utc).isoformat()
+            return delta
 
         config.corpus_delta_fn = _corpus_delta
 
