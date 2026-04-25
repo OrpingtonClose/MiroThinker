@@ -720,16 +720,24 @@ async def manifest_sections(
             result = _sanitize_output(result)
         return angle, result or ""
 
+    # Build ordered task list so we can map exceptions back to angles
+    angle_order = list(worker_summaries.keys())
     tasks = [
-        _manifest_one(angle, analysis)
-        for angle, analysis in worker_summaries.items()
+        _manifest_one(angle, worker_summaries[angle])
+        for angle in angle_order
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     sections: dict[str, str] = {}
-    for r in results:
+    for i, r in enumerate(results):
         if isinstance(r, Exception):
-            logger.error("section manifestation failed: %s", r)
+            fallback_angle = angle_order[i]
+            logger.error(
+                "angle=<%s> | section manifestation failed: %s — using raw analysis as fallback",
+                fallback_angle, r,
+            )
+            # Preserve the section using the worker's raw analysis
+            sections[fallback_angle] = worker_summaries[fallback_angle]
             continue
         angle, text = r
         sections[angle] = text
@@ -895,13 +903,21 @@ async def correct_sections(
             result = _sanitize_output(result)
         return angle, result or sections[angle]
 
-    tasks = [_correct_one(angle) for angle in sections]
+    # Build ordered task list so we can map exceptions back to angles
+    angle_order = list(sections.keys())
+    tasks = [_correct_one(angle) for angle in angle_order]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     corrected: dict[str, str] = {}
-    for r in results:
+    for i, r in enumerate(results):
         if isinstance(r, Exception):
-            logger.error("correction failed: %s", r)
+            fallback_angle = angle_order[i]
+            logger.error(
+                "angle=<%s> | correction failed: %s — preserving previous draft",
+                fallback_angle, r,
+            )
+            # Preserve the previous draft so the section isn't lost
+            corrected[fallback_angle] = sections[fallback_angle]
             continue
         angle, text = r
         corrected[angle] = text
@@ -979,7 +995,7 @@ async def diffusion_queen_merge(
     max_passes: int = 3,
     convergence_threshold: float = 0.85,
     reviewers_per_section: int = 3,
-) -> str:
+) -> tuple[str, int]:
     """Full diffusion queen pipeline — iterative report manifestation.
 
     Replaces the single-shot queen_merge() with an iterative process:
@@ -997,25 +1013,28 @@ async def diffusion_queen_merge(
         reviewers_per_section: Number of cross-angle reviewers per section.
 
     Returns:
-        Final synthesized report string.
+        Tuple of (final report string, actual LLM calls made).
     """
     from swarm.convergence import check_convergence
 
     t0 = time.monotonic()
+    llm_calls = 0
 
     # Step 0: Scaffold
     logger.info("diffusion_pass=<scaffold> | generating report structure")
     scaffold = await generate_scaffold(
         worker_summaries, query, complete_fn, serendipity_insights,
     )
+    llm_calls += 1  # scaffold generation
 
     if not scaffold:
         logger.warning(
             "scaffold generation failed — falling back to single-shot queen_merge"
         )
-        return await queen_merge(
+        fallback = await queen_merge(
             worker_summaries, query, complete_fn, serendipity_insights,
         )
+        return fallback, llm_calls + 1
 
     sections: dict[str, str] | None = None
     converged = False
@@ -1033,6 +1052,7 @@ async def diffusion_queen_merge(
             current_sections=prev_sections,
             pass_number=pass_num,
         )
+        llm_calls += len(worker_summaries)  # one call per section
 
         if not sections:
             logger.error(
@@ -1050,16 +1070,23 @@ async def diffusion_queen_merge(
             sections, worker_summaries, scaffold, query, complete_fn,
             reviewers_per_section=reviewers_per_section,
         )
+        # Count actual confrontation calls (reviewers assigned, not worst-case)
+        llm_calls += sum(len(c) for c in critiques.values())
 
         # Step 3: Correct
         logger.info(
             "diffusion_pass=<%d>/%d, phase=<correct> | applying confrontation feedback",
             pass_num, max_passes,
         )
+        # Count sections that actually need correction (have critiques)
+        sections_needing_correction = sum(
+            1 for c in critiques.values() if c
+        )
         sections = await correct_sections(
             sections, critiques, worker_summaries, scaffold, query,
             complete_fn, pass_number=pass_num,
         )
+        llm_calls += sections_needing_correction
 
         # Step 4: Convergence check
         if prev_sections is not None and sections:
@@ -1087,9 +1114,10 @@ async def diffusion_queen_merge(
         logger.error(
             "diffusion queen produced no sections — falling back to single-shot"
         )
-        return await queen_merge(
+        fallback = await queen_merge(
             worker_summaries, query, complete_fn, serendipity_insights,
         )
+        return fallback, llm_calls + 1
 
     # Step 5: Final stitch
     logger.info(
@@ -1100,15 +1128,16 @@ async def diffusion_queen_merge(
     report = await light_stitch(
         sections, scaffold, query, complete_fn, serendipity_insights,
     )
+    llm_calls += 1  # stitch
 
     total_elapsed = time.monotonic() - t0
     logger.info(
         "total_elapsed_s=<%.1f>, report_chars=<%d>, passes_used=<%d>, "
-        "converged=<%s> | diffusion queen merge complete",
-        total_elapsed, len(report), max_passes, converged,
+        "converged=<%s>, llm_calls=<%d> | diffusion queen merge complete",
+        total_elapsed, len(report), max_passes, converged, llm_calls,
     )
 
-    return report
+    return report, llm_calls
 
 
 def _build_knowledge_exec_summary_prompt(

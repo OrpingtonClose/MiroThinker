@@ -803,19 +803,18 @@ class GossipSwarm:
                 max_summary_chars=config.max_summary_chars,
             )
 
-        knowledge_report, user_report = await asyncio.gather(
+        knowledge_report, user_result = await asyncio.gather(
             knowledge_task, user_task,
         )
-        # LLM calls: 1 for knowledge exec summary + N for diffusion (or 1 for single-shot)
-        diffusion_calls = (
-            1  # scaffold
-            + len(worker_summaries) * config.diffusion_max_passes  # manifest
-            + len(worker_summaries) * config.diffusion_reviewers_per_section
-            * config.diffusion_max_passes  # confront
-            + len(worker_summaries) * config.diffusion_max_passes  # correct
-            + 1  # stitch
-        ) if config.enable_diffusion_queen else 1
-        metrics.total_llm_calls += 1 + diffusion_calls
+
+        # diffusion_queen_merge returns (report, actual_llm_calls);
+        # queen_merge returns just the report string
+        if config.enable_diffusion_queen:
+            user_report, diffusion_calls = user_result
+            metrics.total_llm_calls += 1 + diffusion_calls  # +1 for knowledge summary
+        else:
+            user_report = user_result
+            metrics.total_llm_calls += 2  # knowledge summary + single-shot queen
         metrics.phase_times["queen_merge"] = time.monotonic() - phase_start
         metrics.total_elapsed_s = time.monotonic() - t0
 
