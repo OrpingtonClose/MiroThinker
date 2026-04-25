@@ -513,11 +513,21 @@ def upload_output_dir_to_b2(
             lifecycle_rules=[],
         )
 
+    # Extract timestamp portion from run_id (e.g. "run_20260425_162306" →
+    # "20260425_162306") so we can match output files that embed the
+    # timestamp but not the full run_id prefix.
+    ts_part = run_id.replace("run_", "").replace("api_run_", "")
+
     urls: list[str] = []
     for f in sorted(output_path.iterdir()):
         if not f.is_file():
             continue
         if f.suffix not in (".md", ".json", ".log", ".txt", ".jsonl", ".duckdb"):
+            continue
+        # Only upload files from THIS run — same rationale as
+        # upload_traces_to_b2: avoid re-uploading stale files under
+        # the wrong run_id prefix.
+        if ts_part not in f.name and run_id not in f.name:
             continue
 
         key = f"outputs/{run_id}/{f.name}"
