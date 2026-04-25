@@ -81,7 +81,7 @@ from swarm.config import CompleteFn, SwarmConfig
 from swarm.convergence import check_convergence, information_gain, select_diverse_peers
 from swarm.lineage import LineageEntry
 from swarm.quality_manifest import SwarmQualityManifest
-from swarm.queen import build_knowledge_report, queen_merge
+from swarm.queen import build_knowledge_report, diffusion_queen_merge, queen_merge
 from swarm.rag import extract_concepts, query_hive
 from swarm.serendipity import find_serendipitous_connections
 from swarm.worker import worker_gossip_refine, worker_synthesize
@@ -784,18 +784,38 @@ class GossipSwarm:
             gossip_rounds=rounds_executed,
             converged_early=metrics.gossip_converged_early,
         )
-        user_task = queen_merge(
-            worker_summaries=worker_summaries,
-            query=query,
-            complete_fn=self.queen_complete,
-            serendipity_insights=serendipity_insights,
-            max_summary_chars=config.max_summary_chars,
-        )
+        if config.enable_diffusion_queen:
+            user_task = diffusion_queen_merge(
+                worker_summaries=worker_summaries,
+                query=query,
+                complete_fn=self.queen_complete,
+                serendipity_insights=serendipity_insights,
+                max_passes=config.diffusion_max_passes,
+                convergence_threshold=config.convergence_threshold,
+                reviewers_per_section=config.diffusion_reviewers_per_section,
+            )
+        else:
+            user_task = queen_merge(
+                worker_summaries=worker_summaries,
+                query=query,
+                complete_fn=self.queen_complete,
+                serendipity_insights=serendipity_insights,
+                max_summary_chars=config.max_summary_chars,
+            )
 
         knowledge_report, user_report = await asyncio.gather(
             knowledge_task, user_task,
         )
-        metrics.total_llm_calls += 2  # one for knowledge exec summary, one for queen
+        # LLM calls: 1 for knowledge exec summary + N for diffusion (or 1 for single-shot)
+        diffusion_calls = (
+            1  # scaffold
+            + len(worker_summaries) * config.diffusion_max_passes  # manifest
+            + len(worker_summaries) * config.diffusion_reviewers_per_section
+            * config.diffusion_max_passes  # confront
+            + len(worker_summaries) * config.diffusion_max_passes  # correct
+            + 1  # stitch
+        ) if config.enable_diffusion_queen else 1
+        metrics.total_llm_calls += 1 + diffusion_calls
         metrics.phase_times["queen_merge"] = time.monotonic() - phase_start
         metrics.total_elapsed_s = time.monotonic() - t0
 

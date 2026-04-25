@@ -514,14 +514,25 @@ def enrich_all(
     max_per_query: int = 10,
     extract_full_text: bool = False,
     dry_run: bool = False,
+    angles: list[AngleDefinition] | None = None,
 ) -> dict[str, int]:
     """Run enrichment for all angles.
+
+    Args:
+        store: ConditionStore to admit findings into.
+        max_per_query: Maximum results per search query.
+        extract_full_text: Whether to extract full text from sources.
+        dry_run: If True, log queries but skip actual searches.
+        angles: Optional ordered list of angles to enrich.  When provided,
+            enrichment runs in the given order (e.g. thin-coverage angles
+            first so limited budget goes where it matters most).
+            Defaults to ALL_ANGLES.
 
     Returns a dict mapping angle labels to number of conditions admitted.
     """
     results: dict[str, int] = {}
 
-    for angle in ALL_ANGLES:
+    for angle in (angles or ALL_ANGLES):
         t0 = time.monotonic()
         count = enrich_angle(
             angle, store,

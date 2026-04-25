@@ -1063,9 +1063,9 @@ def main() -> None:
             store = ConditionStore(db_path="enriched_corpus.duckdb")
 
         # Reorder angles so thin-coverage ones get enriched first
+        prioritized_angles: list[AngleDefinition] | None = None
         if coverage:
-            prioritized = _prioritize_enrichment(coverage, list(ALL_ANGLES))
-            # enrich_all iterates ALL_ANGLES internally, but we log the priority
+            prioritized_angles = _prioritize_enrichment(coverage, list(ALL_ANGLES))
             thin_labels = [
                 c.angle_label for c in coverage if c.thin
             ]
@@ -1076,7 +1076,10 @@ def main() -> None:
                 )
 
         pre_enrich_ts = datetime.now(timezone.utc).isoformat()
-        enrich_results = enrich_all(store, max_per_query=10, extract_full_text=True)
+        enrich_results = enrich_all(
+            store, max_per_query=10, extract_full_text=True,
+            angles=prioritized_angles,
+        )
 
         # Evaluate enrichment quality per angle
         for angle_label, count in (enrich_results or {}).items():
