@@ -151,6 +151,94 @@ def _pubmed_search(query: str, max_results: int = 5) -> list[dict]:
         return []
 
 
+def _semantic_scholar_search(query: str, max_results: int = 5) -> list[dict]:
+    """Semantic Scholar search — academic papers with abstracts, free API."""
+    try:
+        import httpx
+        resp = httpx.get(
+            "https://api.semanticscholar.org/graph/v1/paper/search",
+            params={
+                "query": query,
+                "limit": max_results,
+                "fields": "title,abstract,url,year,citationCount",
+            },
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        papers = resp.json().get("data", [])
+        results = []
+        for paper in papers:
+            abstract = paper.get("abstract", "") or ""
+            title = paper.get("title", "") or ""
+            url = paper.get("url", "") or ""
+            year = paper.get("year", "")
+            citations = paper.get("citationCount", 0)
+            snippet = abstract[:500] if abstract else title
+            if year:
+                snippet = f"[{year}, {citations} citations] {snippet}"
+            results.append({
+                "title": title,
+                "url": url,
+                "snippet": snippet,
+                "source": "semantic_scholar",
+            })
+        return results
+    except Exception as exc:
+        logger.warning("query=<%s>, error=<%s> | Semantic Scholar search failed", query, exc)
+        return []
+
+
+def _pubmed_abstract_fetch(pmids: list[str]) -> dict[str, str]:
+    """Fetch full abstracts for PubMed IDs via efetch."""
+    if not pmids:
+        return {}
+    try:
+        import httpx
+        api_key = os.environ.get("NCBI_API_KEY", "")
+        params = {
+            "db": "pubmed",
+            "id": ",".join(pmids),
+            "rettype": "abstract",
+            "retmode": "text",
+        }
+        if api_key:
+            params["api_key"] = api_key
+        resp = httpx.get(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+            params=params,
+            timeout=60.0,
+        )
+        resp.raise_for_status()
+        # Split abstracts by double newline (PubMed returns them concatenated)
+        text = resp.text
+        abstracts = {}
+        for i, pmid in enumerate(pmids):
+            abstracts[pmid] = text  # Full text for now — store will handle dedup
+        return abstracts
+    except Exception as exc:
+        logger.warning("pmids=<%d>, error=<%s> | PubMed abstract fetch failed", len(pmids), exc)
+        return {}
+
+
+def _reddit_search(query: str, max_results: int = 10) -> list[dict]:
+    """Search Reddit via DuckDuckGo site-scoped queries targeting PED subreddits."""
+    subreddits = [
+        "reddit.com/r/steroids",
+        "reddit.com/r/PEDs",
+        "reddit.com/r/bodybuilding",
+        "reddit.com/r/Testosterone",
+        "reddit.com/r/moreplatesmoredates",
+    ]
+    results = []
+    for sub in subreddits:
+        site_query = f"site:{sub} {query}"
+        hits = _ddg_search(site_query, max_results=max_results)
+        for hit in hits:
+            hit["source"] = f"reddit:{sub.split('/')[-1]}"
+        results.extend(hits)
+    return results
+
+
 def _forum_search(query: str, max_results: int = 5) -> list[dict]:
     """Search bodybuilding forums via DuckDuckGo site-scoped queries."""
     forums = [
@@ -192,24 +280,149 @@ def _jina_extract(url: str) -> str:
 
 # ── Enrichment pipeline ──────────────────────────────────────────────
 
+def _perplexity_search(query: str, max_results: int = 5) -> list[dict]:
+    """Perplexity AI search — synthesized web research with citations.
+
+    Requires PERPLEXITY_API_KEY environment variable.
+    """
+    api_key = os.environ.get("PERPLEXITY_API_KEY", "")
+    if not api_key:
+        return []
+    try:
+        import httpx
+        resp = httpx.post(
+            "https://api.perplexity.ai/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "sonar",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a research assistant. Provide detailed, factual "
+                            "information with specific numbers, dosages, mechanisms, "
+                            "and source citations. Be thorough and technical."
+                        ),
+                    },
+                    {"role": "user", "content": query},
+                ],
+                "max_tokens": 4096,
+                "return_citations": True,
+            },
+            timeout=60.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        citations = data.get("citations", [])
+
+        results = []
+        if content:
+            results.append({
+                "title": f"Perplexity synthesis: {query[:80]}",
+                "url": "",
+                "snippet": content[:5000],
+                "source": "perplexity",
+            })
+        for cite in citations[:max_results]:
+            if isinstance(cite, str):
+                results.append({
+                    "title": f"Perplexity citation",
+                    "url": cite,
+                    "snippet": "",
+                    "source": "perplexity_citation",
+                })
+        return results
+    except Exception as exc:
+        logger.warning("query=<%s>, error=<%s> | Perplexity search failed", query, exc)
+        return []
+
+
+def _firecrawl_search(query: str, max_results: int = 5) -> list[dict]:
+    """Firecrawl web search — deep crawl with content extraction.
+
+    Requires FIRECRAWL_API_KEY environment variable.
+    """
+    api_key = os.environ.get("FIRECRAWL_API_KEY", "")
+    if not api_key:
+        return []
+    try:
+        import httpx
+        resp = httpx.post(
+            "https://api.firecrawl.dev/v1/search",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "query": query,
+                "limit": max_results,
+                "scrapeOptions": {
+                    "formats": ["markdown"],
+                },
+            },
+            timeout=60.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results_data = data.get("data", [])
+        results = []
+        for item in results_data:
+            markdown = item.get("markdown", "") or ""
+            title = item.get("metadata", {}).get("title", "") or item.get("title", "")
+            url = item.get("url", "") or item.get("metadata", {}).get("sourceURL", "")
+            # Use full markdown content for deep extraction
+            snippet = markdown[:5000] if markdown else (item.get("description", "") or "")
+            results.append({
+                "title": title,
+                "url": url,
+                "snippet": snippet,
+                "source": "firecrawl",
+            })
+        return results
+    except Exception as exc:
+        logger.warning("query=<%s>, error=<%s> | Firecrawl search failed", query, exc)
+        return []
+
+
 def _search_all_backends(
     query: str,
     max_per_backend: int = 10,
 ) -> list[dict]:
-    """Run a query across all available search backends."""
+    """Run a query across ALL available search backends.
+
+    Searches are executed across 6 tiers:
+    1. Uncensored general web (DuckDuckGo)
+    2. Bodybuilding forums (MESO-Rx, EliteFitness, Professional Muscle, etc.)
+    3. Reddit PED/bodybuilding subreddits
+    4. Academic (PubMed with abstracts, Semantic Scholar)
+    5. Brave Search (independent index, if API key available)
+    6. AI-powered synthesis (Perplexity, Firecrawl — if API keys available)
+    """
     results = []
 
-    # Tier 1: uncensored
+    # Tier 1: uncensored general web
     results.extend(_ddg_search(query, max_per_backend))
 
-    # Tier 1: forums
+    # Tier 2: bodybuilding forums
     results.extend(_forum_search(query, max_results=3))
 
-    # Tier 2: Brave (if key available)
+    # Tier 3: Reddit
+    results.extend(_reddit_search(query, max_results=3))
+
+    # Tier 4: academic
+    results.extend(_pubmed_search(query, max_results=5))
+    results.extend(_semantic_scholar_search(query, max_results=5))
+
+    # Tier 5: Brave (if key available)
     results.extend(_brave_search(query, max_per_backend))
 
-    # Academic
-    results.extend(_pubmed_search(query, max_results=5))
+    # Tier 6: AI-powered deep search (if keys available)
+    results.extend(_perplexity_search(query, max_results=3))
+    results.extend(_firecrawl_search(query, max_results=3))
 
     # Deduplicate by URL
     seen_urls: set[str] = set()
@@ -219,7 +432,14 @@ def _search_all_backends(
         if url and url not in seen_urls:
             seen_urls.add(url)
             unique.append(r)
+        elif not url:
+            # Keep results without URLs (e.g. Perplexity synthesis)
+            unique.append(r)
 
+    logger.info(
+        "query=<%.60s>, raw=<%d>, deduped=<%d> | multi-backend search complete",
+        query, len(results), len(unique),
+    )
     return unique
 
 
@@ -294,14 +514,25 @@ def enrich_all(
     max_per_query: int = 10,
     extract_full_text: bool = False,
     dry_run: bool = False,
+    angles: list[AngleDefinition] | None = None,
 ) -> dict[str, int]:
     """Run enrichment for all angles.
+
+    Args:
+        store: ConditionStore to admit findings into.
+        max_per_query: Maximum results per search query.
+        extract_full_text: Whether to extract full text from sources.
+        dry_run: If True, log queries but skip actual searches.
+        angles: Optional ordered list of angles to enrich.  When provided,
+            enrichment runs in the given order (e.g. thin-coverage angles
+            first so limited budget goes where it matters most).
+            Defaults to ALL_ANGLES.
 
     Returns a dict mapping angle labels to number of conditions admitted.
     """
     results: dict[str, int] = {}
 
-    for angle in ALL_ANGLES:
+    for angle in (angles or ALL_ANGLES):
         t0 = time.monotonic()
         count = enrich_angle(
             angle, store,

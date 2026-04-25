@@ -185,6 +185,16 @@ class SwarmConfig:
     enable_serendipity_panel: bool = os.getenv("SWARM_PANEL", "1") == "1"
     enable_queen_lucidity_pass: bool = os.getenv("SWARM_LUCIDITY", "1") == "1"
 
+    # ── Diffusion queen settings ─────────────────────────────────────
+    # Iterative report manifestion: workers draft sections, confront
+    # each other's drafts, correct, and converge — like gossip rounds
+    # but for the report itself.
+    enable_diffusion_queen: bool = os.getenv("SWARM_DIFFUSION_QUEEN", "1") == "1"
+    diffusion_max_passes: int = int(os.getenv("SWARM_DIFFUSION_PASSES", "3"))
+    diffusion_reviewers_per_section: int = int(
+        os.getenv("SWARM_DIFFUSION_REVIEWERS", "3")
+    )
+
     def __post_init__(self) -> None:
         """Resolve defaults that depend on other fields."""
         if self.max_concurrency <= 0:
