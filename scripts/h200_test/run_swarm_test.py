@@ -831,6 +831,7 @@ async def _start_v4_pro_docker(
         "--trust-remote-code",
         "--kv-cache-dtype", "fp8",
         "--block-size", "256",
+        "--enable-prefix-caching",
         "--enable-expert-parallel",
         "--data-parallel-size", str(num_gpus),
         "--compilation-config",
