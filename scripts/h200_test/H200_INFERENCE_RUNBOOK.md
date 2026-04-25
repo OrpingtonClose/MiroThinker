@@ -467,95 +467,95 @@ Vast.ai rate: $28.91/hr for 8×H200.
 
 ---
 
-## 8. Optimal VM Fleet for Kimi Linear Workers
+## 8. Why Kimi Linear — and When to Use Something Else
 
-The key insight for Kimi Linear is that it runs TP=1 — each instance needs
-exactly one GPU, no NVLink required. This means you can rent individual GPUs
-from any provider and scale horizontally without multi-GPU node constraints.
+### 8.1 Kimi Linear's Only Differentiator Is 1M Context
 
-### 8.1 VRAM Budget Per Instance
+Kimi Linear 48B-A3B exists for one reason: native 1,048,576-token context
+via hybrid linear attention (36 KDA + 12 MLA layers). The linear layers have
+constant-size state regardless of sequence length, so the KV cache at 1M
+tokens is **75% smaller** than a full-attention model of the same size, and
+decoding at 1M context is **6.3× faster** than equivalent full-attention.
+
+**If you are not using the 1M context, you are paying a tax for no benefit.**
+
+At ≤256K context, Kimi Linear's hybrid attention provides no meaningful
+advantage over standard attention — the KV cache is small enough to fit in
+VRAM either way, and decode speed at short context is similar. Meanwhile,
+newer models with identical 3B active params offer better quality, smaller
+weights, multimodal capability, and broader ecosystem support.
+
+### 8.2 The Replacement: Qwen3.6-35B-A3B (April 2026)
+
+Qwen3.6-35B-A3B was released on April 14, 2026 — 6 months after Kimi Linear
+(October 2025). It uses a nearly identical hybrid architecture (GatedDeltaNet
++ Gated Attention in 3:1 ratio, same as Kimi Linear's KDA + MLA in 3:1
+ratio), but improves on every other dimension:
+
+| Property | Kimi Linear 48B-A3B | Qwen3.6-35B-A3B |
+|----------|--------------------:|------------------:|
+| Total params | 48B | **35B** (lighter) |
+| Active params | 3B | 3B (same) |
+| Hybrid attention ratio | 3:1 (KDA:MLA) | 3:1 (GatedDeltaNet:GQA) |
+| Native context | **1,048,576** (1M) | 262,144 (262K) |
+| Extended context (YaRN) | — | 1,010,000 (~1M) |
+| FP8 weights | ~47 GB | **~35 GB** |
+| Multimodal (vision) | No | **Yes** |
+| Uncensored variant | Yes (huihui-ai) | **Yes** (HauhauCS, 0/465 refusals) |
+| SWE-bench Verified | N/A | **73.4** |
+| AIME 2026 | N/A | **92.7** |
+| vLLM support | Yes | **Yes** (GatedDeltaNet merged Mar 2026) |
+| License | MIT | Apache 2.0 |
+
+### 8.3 Decision Matrix
+
+| Context needed | Best model | Best GPU | Cost/hr | Rationale |
+|---------------|------------|---------|--------:|-----------|
+| ≤131K tokens | **Qwen3.6-35B-A3B** | H100 PCIe (80 GB) | **$1.53** | Smaller weights (35 GB), fits with CUDA graphs, newer/smarter, multimodal |
+| 131K-262K tokens | **Qwen3.6-35B-A3B** | H100 PCIe (80 GB) | **$1.53** | Native 262K context, no YaRN needed |
+| 262K-512K tokens | Kimi Linear 48B or Qwen3.6 (YaRN) | H200 (143 GB) | $2.32 | Kimi Linear native; Qwen3.6 needs YaRN extrapolation |
+| **512K-1M tokens** | **Kimi Linear 48B** | **H200 (143 GB)** | **$2.32** | **Only model with native 1M + proven hybrid attention at this length** |
+
+**Rule**: If your input is under 262K tokens, use Qwen3.6-35B-A3B. It's
+smaller, faster, smarter, and $0.79/hr cheaper per GPU. Kimi Linear only
+justifies its 47 GB weight tax when you are genuinely operating in the
+512K-1M token range where its native linear attention dominance kicks in.
+
+### 8.4 Qwen3.6-35B-A3B on H100 PCIe
 
 ```
-Kimi Linear FP8 weights:     ~47 GB
-KV cache at 131K (FP8):       ~6 GB
-CUDA graph profiling buffer: ~10-15 GB
-Runtime / CUDA context:       ~3 GB
-──────────────────────────────────────
-Minimum VRAM per instance:   ~70 GB  (with CUDA graphs)
-Minimum VRAM (eager mode):   ~55 GB  (without CUDA graphs)
+FP8 weights:             ~35 GB
+KV cache at 131K (FP8):   ~5 GB
+CUDA graph profiling:    ~10 GB
+Runtime:                  ~3 GB
+────────────────────────────────
+Total:                   ~53 GB of 80 GB (27 GB spare)
 ```
 
-### 8.2 GPU-by-GPU Analysis
-
-| GPU | VRAM | Vast.ai $/hr | FP8 native? | Fits FP8 + graphs? | Est. tok/s | tok/s per $ |
-|-----|------|-------------|-------------|--------------------|-----------:|------------:|
-| **H100 PCIe** | 80 GB | **$1.53** | Yes (Hopper) | **Yes** (10 GB spare) | **50-80** | **33-52** |
-| H100 SXM | 80 GB | ~$2.50 | Yes (Hopper) | Yes (10 GB spare) | 55-90 | 22-36 |
-| **H200** | 143 GB | $2.32 | Yes (Hopper) | **Yes** (73 GB spare) | 60-100 | 26-43 |
-| A100 80GB | 80 GB | ~$1.30 | No (Ampere, emulated FP8) | Tight | 25-40 | 19-31 |
-| L40S | 48 GB | $0.53 | Yes (Ada, sm_89) | No (47 GB weights fill VRAM) | INT4 only: ~30 | 57 (quality risk) |
-| RTX 4090 | 24 GB | $0.29 | Yes (Ada, sm_89) | No (can't fit 47 GB weights) | — | — |
-| A6000 | 48 GB | $0.39 | No (Ampere) | No | INT4 only: ~25 | 64 (quality risk) |
-
-### 8.3 Recommendation: H100 PCIe 80 GB
-
-H100 PCIe is the sweet spot for Kimi Linear worker fleets:
-
-1. **$1.53/hr** — cheapest GPU that fits FP8 weights + CUDA graph profiling
-2. **Native Hopper FP8 tensor cores** — same CutlassFP8ScaledMMLinearKernel
-   auto-selected on H100 as on H200. No emulation, no quality loss
-3. **TP=1, no NVLink** — rent individual GPUs, not expensive multi-GPU nodes.
-   Each GPU is a fully independent inference server
-4. **CUDA graphs work at 131K context** — 80 GB − 47 GB weights − 6 GB KV −
-   3 GB runtime = ~24 GB spare for graph profiling (needs ~10-15 GB)
-5. **Horizontally scalable** — add more H100s for more concurrency, no
-   architectural changes needed
-
-### 8.4 Fleet Configurations for 12 Concurrent Workers
-
-| Config | GPUs | Cost/hr | Est. aggregate tok/s | Est. round time |
-|--------|-----:|--------:|---------------------:|----------------:|
-| **12× H100 PCIe** (1 instance each) | 12 | **$18.36** | **600-960** | **~3-5 min** |
-| 8× H200 (current, eager) | 8 | $18.56 | 168 | ~26 min |
-| 8× H200 (optimized, CUDA graphs) | 8 | $18.56 | 480-800 | ~5-8 min |
-| 16× H100 PCIe (headroom) | 16 | $24.48 | 800-1280 | ~2-3 min |
-| 24× L40S (INT4, quality risk) | 24 | $12.72 | ~720 | ~4 min |
-
-**Key finding**: 12× H100 PCIe matches the cost of our current 8× H200 setup
-($18.36 vs $18.56/hr) but delivers 3.6-5.7× throughput because:
-- Every worker gets its own GPU (no queueing — 12 workers, 12 GPUs)
-- CUDA graphs enabled (3-5× per-instance speedup over eager mode)
-- No wasted VRAM (H200's 143 GB is overkill when you only need 70 GB)
-
-**When H200 is still the right choice**: Phase 2 (Flock with V4 Pro) requires
-TP=8 across all 8 GPUs. If the pipeline needs both phases on the same node,
-8× H200 is the only option that runs both models. For Kimi-Linear-only
-workloads, H100 PCIe is strictly better per dollar.
+27 GB spare means CUDA graphs work comfortably — projected 60-100+ tok/s
+per instance. At $1.53/hr per H100 PCIe, a 12-GPU fleet costs $18.36/hr
+and delivers an estimated 720-1200 aggregate tok/s.
 
 ### 8.5 Why Not Cheaper GPUs?
 
-- **L40S / A6000 (48 GB)**: Kimi Linear FP8 weights alone are ~47 GB. After
-  loading, there is <1 GB left for KV cache and runtime — the model either
-  refuses to start or crashes immediately. INT4 quantization (AWQ/GPTQ) would
-  reduce weights to ~24 GB, leaving 24 GB for KV cache, but (a) no official
-  INT4 quant exists for Kimi Linear, (b) MoE expert routing quality degrades
-  more than dense models under INT4, and (c) you lose the native FP8 tensor
-  core path.
-- **RTX 4090 (24 GB)**: Cannot fit FP8 or INT4 + KV cache on a single card.
-  TP=2 across two 4090s would work mathematically but PCIe interconnect (no
-  NVLink on consumer GPUs) adds 5-10× latency to every cross-GPU operation,
-  negating the cost advantage.
+- **L40S / A6000 (48 GB)**: FP8 weights for Kimi Linear (~47 GB) or even
+  Qwen3.6 (~35 GB) leave too little room for KV cache + runtime at 131K
+  context. INT4 quantization would fit but degrades MoE expert routing
+  quality and no official INT4 quants exist for either model
+- **RTX 4090 (24 GB)**: Cannot fit either model at FP8 on a single card.
+  TP=2 across two 4090s uses PCIe interconnect (no NVLink), adding 5-10×
+  latency to every cross-GPU op
 - **A100 (80 GB, ~$1.30/hr)**: Fits FP8 weights but Ampere lacks native FP8
-  tensor cores. vLLM uses emulated FP8 which is slower than native Hopper FP8.
-  The $0.23/hr savings vs H100 doesn't justify the ~30-40% throughput penalty.
+  tensor cores. Emulated FP8 is 30-40% slower than native Hopper FP8.
+  The $0.23/hr savings vs H100 doesn't justify the throughput penalty
 
 ---
 
-## 9. Using the Full 1M Context on Kimi Linear
+## 9. Exploiting the Full 1M Context — The Whole Point of Kimi Linear
 
-Kimi Linear's headline feature is native 1,048,576-token context via hybrid
-linear attention. Actually exploiting the full 1M requires overcoming several
-VRAM, throughput, and architecture constraints.
+If we're running Kimi Linear, we must be using the 1M context. Otherwise
+Qwen3.6-35B-A3B is strictly better (see section 8). This section describes
+the architecture required to actually operate at 1M tokens.
 
 ### 9.1 VRAM Requirements for 1M Context
 
@@ -567,6 +567,10 @@ The KV cache scales differently for Kimi Linear's two layer types:
 | Standard (MLA) | 12 | **Linear** — grows with sequence | ~49 GB (BF16) / ~25 GB (FP8) |
 | **Total KV cache** | 48 | | **~25 GB (FP8)** |
 
+This is the hybrid attention payoff: a full-attention 48B model would need
+~100 GB of KV cache at 1M tokens. Kimi Linear needs only ~25 GB because 36
+of 48 layers have constant-size state.
+
 Total VRAM per instance at 1M context:
 ```
 Model weights (FP8):     47 GB
@@ -577,121 +581,133 @@ Subtotal:               ~82 GB  ← minimum for eager mode at 1M
 CUDA graph profiling:  +15-60 GB ← depends on graph capture strategy
 ```
 
-### 9.2 GPU Requirements (1M Context, Single Instance)
+### 9.2 GPU Selection: H200 Is Required
 
 | GPU | VRAM | Fits 1M eager? | Fits 1M + CUDA graphs? |
 |-----|------|:--------------:|:----------------------:|
-| H200 (143 GB) | 143 GB | **Yes** (61 GB spare) | **Depends** — graphs OOM'd at 512K on our run |
-| H100 80GB | 80 GB | Tight (~0 GB spare) | **No** |
-| A100 80GB | 80 GB | Tight (~0 GB spare) | **No** |
+| **H200 (143 GB)** | 143 GB | **Yes** (61 GB spare) | Depends — OOM'd at 512K, untested at 1M with PIECEWISE |
+| H100 80GB | 80 GB | **No** (~82 GB needed) | No |
+| A100 80GB | 80 GB | **No** | No |
 | B200 (192 GB) | 192 GB | **Yes** (110 GB spare) | **Likely yes** |
 
-**Critical finding**: H100 PCIe (80 GB) cannot serve Kimi Linear at 1M
-context — the KV cache alone (25 GB FP8) plus weights (47 GB) plus runtime
-(10 GB) totals ~82 GB, exceeding the 80 GB limit. Full 1M context requires
-H200 or Blackwell-class GPUs.
+H100 PCIe (80 GB) cannot serve Kimi Linear at 1M context — weights (47 GB)
++ KV cache (25 GB) + runtime (10 GB) = ~82 GB > 80 GB. Full 1M context
+**requires H200 or Blackwell**. This is why the H200 fleet exists — not for
+131K workloads (where H100 + Qwen3.6 would be cheaper and faster), but for
+the 1M context that only Kimi Linear can natively serve.
 
-### 9.3 What Must Change to Enable 1M Context
-
-#### 1. GPU selection: H200 minimum (143 GB VRAM)
-
-Only H200 (143 GB) and B200 (192 GB) have enough VRAM for FP8 weights + 1M
-KV cache + runtime in a single GPU. The "sweet spot" H100 PCIe (80 GB)
-recommended in section 8 is limited to ~131K-200K context.
-
-#### 2. Eager mode required (no CUDA graphs at 1M)
+### 9.3 Throughput at 1M Context (Eager Mode)
 
 Our H200 run proved CUDA graphs OOM at 512K context (59 GiB profiling
-allocation). At 1M the profiling buffer would be even larger. This means
-eager mode (`--enforce-eager`) is required, limiting decode to ~21 tok/s.
+allocation). At 1M the profiling buffer would be even larger. Eager mode
+(`--enforce-eager`) is required, limiting decode to ~21 tok/s per instance.
+
+| Metric | Value |
+|--------|------:|
+| Prefill throughput | 684-1526 tok/s |
+| Prefill time for 1M tokens | **11-24 min** |
+| Decode throughput (eager) | ~21 tok/s |
+| Decode time for 16K output | ~13 min |
+| **Total per request (1M in + 16K out)** | **~24-37 min** |
+
+For a 12-worker swarm on 8× H200:
+- Round time: ~75-111 min (vs 26 min at 512K, vs ~5 min at 131K with graphs)
+- Cost per round: $28.91/hr × ~1.5 hr = **~$43 per round**
 
 **Potential workaround**: vLLM's `cudagraph_mode: "PIECEWISE"` captures
-graphs for only the decode phase (smaller buffers than full capture). This
-might fit at 1M on H200 — untested.
+graphs for only the decode phase (smaller buffers). This might fit at 1M on
+H200 — untested. If it works, decode could jump from 21 to 60-100 tok/s,
+cutting total request time from ~37 min to ~24 min.
 
-#### 3. Accept the throughput trade-off
-
-At 1M context with eager mode:
-- **Prefill**: ~684-1526 tok/s (measured) — prefilling 1M tokens takes
-  ~11-24 minutes
-- **Decode**: ~21 tok/s — generating 16K output tokens takes ~13 minutes
-- **Total per request**: ~24-37 minutes for a full 1M-token input + 16K output
-
-For a 12-worker swarm where each worker gets a 1M-token input:
-- 8× H200, 1 instance/GPU, eager mode: ~75-111 min per round (4.5× current)
-- The throughput penalty is severe — 1M context should only be used when
-  the corpus genuinely requires it
-
-#### 4. Restructure the corpus for 1M inputs
+### 9.4 Corpus Design for 1M Inputs
 
 Our current corpus is 2.69M chars (~672K tokens). Split across 12 workers,
-each worker gets ~56K tokens — well within 131K context. To actually need
-1M context, each worker would need ~4M chars (~1M tokens) of input. This
-requires either:
-- **Dramatically larger corpus** (12× current size = ~32M chars)
-- **Fewer workers with larger shares** (e.g., 3 workers × 224K tokens each,
-  with the remaining context for gossip history accumulation)
-- **Multi-round context accumulation** — start with 56K input, then each
-  gossip round appends 50-100K tokens of peer summaries, growing toward
-  1M by round 5-6
+each gets only ~56K tokens — nowhere near 1M. To justify Kimi Linear's 1M
+context, the pipeline must restructure how workers receive data:
 
-#### 5. Enable prefix caching with affinity routing
+**Strategy 1: Every worker sees the full corpus**
+- Give each worker the entire 672K-token corpus (not a slice)
+- Workers differentiate via angle-specific system prompts, not corpus slicing
+- Pro: eliminates information silos, enables cross-domain insight
+- Con: 8 instances × 672K tokens = high prefill cost (~7-16 min each)
+- Prefix caching critical: corpus prefix is identical across workers,
+  so instances 2-8 get near-instant prefill from instance 1's cache
 
-At 1M context, prefill dominates (11-24 min). Prefix caching becomes
-critical — if even 500K tokens of the 1M input are cached from a previous
-round, prefill drops to ~5-12 min.
+**Strategy 2: Multi-round gossip accumulation**
+- Round 1: each worker starts with 56K tokens (corpus slice)
+- Each gossip round appends 50-100K tokens of peer summaries
+- By round 5-6: workers have accumulated 300-600K tokens of context
+- Pro: natural growth toward 1M; earlier rounds are fast
+- Con: later rounds hit the eager-mode throughput wall
+
+**Strategy 3: Fewer workers, larger shares**
+- 3-4 workers instead of 12, each with 168-224K tokens of corpus
+- Remaining context budget (~776-832K tokens) reserved for gossip
+  accumulation and reasoning chains
+- Pro: fewer requests, better GPU utilization
+- Con: fewer angles means less diversity of analysis
+
+**Strategy 4: Dramatically larger corpus**
+- Expand from 2.69M chars to 30M+ chars (full book collections, entire
+  channel archives, multi-source datasets)
+- Each of 12 workers gets ~2.5M chars (~625K tokens) per slice
+- Pro: genuinely needs 1M context per worker
+- Con: requires much more data collection upfront
+
+### 9.5 Prefix Caching Is Non-Negotiable at 1M
+
+At 1M context, prefill dominates the time budget (11-24 min). Without prefix
+caching, every request re-processes the entire 1M-token input from scratch.
+With caching, subsequent requests that share a prefix skip the cached portion.
 
 Requirements for effective prefix caching at 1M:
-- **Worker-instance affinity**: Same worker always routes to the same GPU.
-  This ensures the KV cache from round N is still resident for round N+1
-- **Deterministic prompt ordering**: The cached prefix must be byte-identical
-  to what was previously processed. Any change in prompt structure (even
-  whitespace) invalidates the cache
-- **Sufficient KV cache capacity**: At 1M context with FP8, the KV cache
-  is 25 GB. The H200 can hold ~2.4× this (61 GB spare), meaning it can
-  cache approximately 2 full 1M-context sequences simultaneously
+1. **Worker-instance affinity**: Same worker always routes to the same GPU.
+   The KV cache from round N stays resident for round N+1
+2. **Deterministic prompt ordering**: The cached prefix must be byte-identical
+   to what was previously processed. Any change (even whitespace) invalidates
+   the cache
+3. **Corpus-first prompt structure**: Put the shared corpus at the START of
+   the prompt (before angle-specific instructions) so the common prefix is
+   maximized across workers on the same instance
+4. **Sufficient KV cache capacity**: At 1M context with FP8, each sequence
+   uses 25 GB. The H200 has 61 GB spare → can cache ~2.4 full 1M sequences
+   simultaneously
 
-#### 6. Adjust vLLM block size for Mamba alignment
+If strategy 1 (every worker sees full corpus) is used with affinity routing:
+- Instance 1 processes worker A (672K tokens): 11-24 min prefill
+- Instance 1 then processes worker B (same corpus, different angle): **<1 min**
+  prefill (672K tokens cached, only the angle-specific suffix is new)
 
-At 1M context, the Mamba cache alignment inflates blocks to 3,776 tokens
-(see section 2.4). With 1M tokens / 3,776 tokens per block = ~265 blocks.
-Each block must be fully materialized in VRAM even if only partially used.
-This adds ~2-5% VRAM overhead from partially-filled terminal blocks.
-
-### 9.4 Recommended Architecture for 1M Context
+### 9.6 Recommended Architecture
 
 ```
-Hardware:  8× H200 (only GPU with enough VRAM, short of Blackwell)
+Hardware:  8× H200 (only GPU with enough VRAM for 1M, short of Blackwell)
 Instances: 8× TP=1 (one per GPU)
 Quantization: FP8 weights + FP8 KV cache
-Context:   1,048,576 tokens (full native)
+Context:   1,048,576 tokens (full native — this is why we chose Kimi Linear)
 Mode:      --enforce-eager (CUDA graphs OOM at 1M)
 Caching:   --enable-prefix-caching with affinity routing
+Corpus:    Strategy 1 (full corpus to every worker) or Strategy 2 (accumulation)
 
 Expected per-instance:
-  Prefill:  ~684-1526 tok/s → 11-24 min for 1M tokens
-  Decode:   ~21 tok/s → 13 min for 16K output
-  Total:    ~24-37 min per request
-
+  First request:  24-37 min (full 1M prefill + 16K decode)
+  Cached request: ~13-15 min (prefix hit, decode only)
+  
 Expected fleet (8× H200):
-  Round time (12 workers): ~75-111 min per round
-  Cost: $28.91/hr × ~1.5 hr = ~$43 per round
+  Round 1 (cold): ~75-111 min (no prefix cache)
+  Round 2+ (warm): ~40-50 min (prefix cache hits from round 1)
+  Cost: $28.91/hr × ~1.5 hr/round = ~$43 per round
 ```
 
-### 9.5 When 1M Context Is Worth It
+### 9.7 When NOT to Use Kimi Linear
 
-| Scenario | Verdict | Rationale |
-|----------|---------|-----------|
-| Current swarm (56K tokens/worker) | **Not worth it** | 131K context handles the workload at 3-5× throughput |
-| Full-book synthesis (500K+ tokens/worker) | **Worth it** | Entire book in context eliminates chunking artifacts |
-| Multi-round gossip accumulation (grows to 500K+) | **Worth it** | Rounds 4-6 accumulate enough gossip history to need it |
-| Cross-worker corpus dedup (all workers see full corpus) | **Worth it** | Each worker gets the entire 672K-token corpus instead of a slice |
-| Real-time long-document QA | **Worth it** | 1M context enables single-shot answers without RAG |
-
-**Bottom line**: Use 131K context on H100 PCIe ($1.53/hr) for workloads under
-200K tokens. Switch to 1M context on H200 ($2.32/hr) only when the input
-genuinely exceeds 200K tokens or when gossip accumulation pushes context
-beyond 131K.
+| Scenario | Use instead | Why |
+|----------|-------------|-----|
+| Worker inputs <200K tokens | **Qwen3.6-35B-A3B** on H100 PCIe | 3× cheaper, 3-5× faster, smarter benchmarks |
+| Need multimodal (images) | **Qwen3.6-35B-A3B** | Kimi Linear is text-only |
+| Need maximum tok/s | **Qwen3.6-35B-A3B** with CUDA graphs | 60-100 tok/s vs 21 tok/s (eager) |
+| Budget-constrained | **Qwen3.6-35B-A3B** on H100 PCIe | $1.53/hr vs $2.32/hr per GPU |
+| Input genuinely exceeds 262K tokens | **Kimi Linear** on H200 | The one scenario where it wins |
 
 ---
 
