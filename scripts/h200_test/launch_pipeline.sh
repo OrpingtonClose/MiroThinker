@@ -79,8 +79,13 @@ if ! wait $PID_LOCAL; then
 fi
 echo "  Local model ready"
 
-# Flock model downloads in background during gossip phase
-echo "  Flock model downloading in background (PID $PID_FLOCK)"
+# Wait for Flock model too — Phase 2 (swap_to_flock_model) needs it
+# before starting vLLM.  Both downloads run in parallel so total time
+# is max(local, flock), not local + flock.
+if ! wait $PID_FLOCK; then
+    echo "  ✗ Flock model download failed — Phase 2 will be skipped"
+fi
+echo "  Flock model ready"
 
 # ── Step 2: Verify prerequisites ──────────────────────────────────────
 
@@ -129,13 +134,7 @@ fi
 cd "$REPO_ROOT"
 python3 scripts/h200_test/run_swarm_test.py "${PIPELINE_ARGS[@]}" 2>&1 | tee "$OUTPUT_DIR/pipeline.log"
 
-# ── Step 4: Wait for Flock model download if still running ────────────
-
-if kill -0 $PID_FLOCK 2>/dev/null; then
-    echo ""
-    echo "▶ Waiting for Flock model download to complete..."
-    wait $PID_FLOCK || echo "  ⚠ Flock model download may have failed"
-fi
+# ── Step 4: Post-pipeline ─────────────────────────────────────────────
 
 # ── Step 5: Results ───────────────────────────────────────────────────
 
