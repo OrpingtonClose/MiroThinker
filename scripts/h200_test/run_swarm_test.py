@@ -624,15 +624,9 @@ def build_worker_routing(
                 angle,
             )
         else:
-            # Last resort: local vLLM only
+            # Last resort: local vLLM only — local_fn is already traced
             if local_fn:
-                traced_fn = traced_complete_fn(
-                    local_fn,
-                    f"worker.{angle}",
-                    model_name=local_model,
-                    backend="vllm-local",
-                )
-                routing[angle] = traced_fn
+                routing[angle] = local_fn
                 logger.info(
                     "angle=<%s>, backend=<local> | "
                     "worker routing assigned (no API keys available)",
