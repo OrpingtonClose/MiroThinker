@@ -388,6 +388,10 @@ headroom over the largest worker input.
 | Gossip round 2 LLM time | — | 2475.9s (41.3 min) |
 | Gossip round 3 started | 20:31:02 | 1:12:52 |
 | Gossip round 3 hive hits | — | 11 workers |
+| Gossip round 3 complete | 20:57:42 | 1:39:32 |
+| Gossip round 3 info_gain | — | 0.664 (↑ from 0.526) |
+| Gossip round 3 LLM time | — | 4077.2s (67.9 min) |
+| Gossip round 4 started (bonus) | 20:57:43 | 1:39:33 |
 
 ### 5.2 vLLM Request Distribution (Round 1)
 
@@ -887,17 +891,24 @@ into <1 min warm prefills.
 
 ### 10.7 Information Gain Decay
 
-| Round | Info gain | Interpretation |
-|-------|----------:|----------------|
-| 1 (gossip) | 0.836 | Workers learned substantially from peers |
-| 2 (gossip) | 0.526 | Diminishing returns — workers converging |
-| 3 (gossip) | TBD | Expected ~0.3-0.4 (convergence) |
+| Round | Info gain | Δ from prior | Interpretation |
+|-------|----------:|:------------:|----------------|
+| 1 (gossip) | 0.836 | — | Workers learned substantially from peers |
+| 2 (gossip) | 0.526 | −37% | Diminishing returns — workers converging |
+| 3 (gossip) | 0.664 | **+26%** | Hive memory injection reversed the decay |
 
-Info gain dropped 37% from round 1 to round 2. By round 3, workers are seeing
-diminishing novel information from peers because the compressed gossip summaries
-don't carry enough detail. This is another symptom of the context gap — if
-workers received full peer outputs (approach A), info gain would stay higher
-because more raw detail is preserved across rounds.
+Info gain dropped 37% from round 1 to round 2, as expected from compressed
+gossip summaries. But round 3 **reversed the trend** — info gain rose 26% back
+to 0.664. The difference: round 3 injected hive memory (cross-pollination
+insights from the queen's merge pass) into 11 of 12 workers. This added novel
+cross-domain connections that compressed peer summaries alone could not provide.
+
+**Implication for deep gossip architecture**: Hive memory injection is the
+mechanism that sustains info gain across rounds. Pure peer-to-peer gossip
+converges by round 2-3, but injecting synthesized cross-domain insights from a
+coordinator (queen) re-opens divergent reasoning paths. A 1M context strategy
+should alternate between peer gossip rounds and hive memory injection rounds
+to maintain info gain above 0.5 across 5+ rounds.
 
 ---
 
