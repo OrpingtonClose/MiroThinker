@@ -2,31 +2,41 @@
 # Copyright (c) 2025 MiroMind
 # This source code is licensed under the Apache 2.0 License.
 
-"""Run a full swarm test on 1×H200 with enriched corpus.
+"""Run the gossip swarm pipeline.
 
-This is the main test runner. It:
-1. Loads or creates a ConditionStore (optionally pre-enriched)
-2. Configures swarm angles for the 8-compound ramping protocol
-3. Connects to the local vLLM endpoint
-4. Runs the full gossip swarm pipeline
-5. Outputs both user_report and knowledge_report
+The pipeline makes smart decisions at runtime — most configuration is
+resolved automatically from the environment, the angles, and the corpus.
+
+What the pipeline decides on its own:
+    - Worker count: one per angle (override via SWARM_MAX_WORKERS)
+    - Enrichment: runs when angles define enrichment_queries
+    - Corpus: auto-discovers mega_corpus.txt or youtube_corpus_combined.txt
+    - Flock backend: always local vLLM (scales with hardware, no rate limits)
+    - Queen routing: local vLLM by default, OpenRouter when OPENROUTER_API_KEY set
+    - Corpus validation: refuses <50K chars, warns <500K
+    - Serendipity, hive memory, diversity gossip: always enabled
 
 Usage:
     # Start vLLM first (in another terminal):
     ./launch_vllm.sh huihui-ai/Qwen3.5-32B-abliterated
 
-    # Then run the swarm:
-    python run_swarm_test.py --corpus existing_corpus.txt
+    # Simplest invocation — everything auto-resolved:
+    python run_swarm_test.py
+
+    # With explicit corpus:
+    python run_swarm_test.py --corpus /path/to/corpus.txt
+
+    # With existing enriched database:
     python run_swarm_test.py --db enriched.duckdb
-    python run_swarm_test.py --enrich  # enrich + run in one go
 
 Environment variables:
     SWARM_API_BASE          — vLLM endpoint (default: http://localhost:8000/v1)
     SWARM_WORKER_MODEL      — model name served by vLLM
-    SWARM_QUEEN_MODEL       — queen model (same as worker for single-GPU test)
+    SWARM_QUEEN_MODEL       — queen model (routes to OpenRouter if OPENROUTER_API_KEY set)
     SWARM_SERENDIPITY_MODEL — serendipity model (same as worker for single-GPU)
-    SWARM_MAX_WORKERS       — number of concurrent workers (default: 8)
+    SWARM_MAX_WORKERS       — cap on concurrent workers (default: one per angle)
     SWARM_GOSSIP_ROUNDS     — gossip rounds (default: 3)
+    OPENROUTER_API_KEY      — set to route queen to OpenRouter
 """
 
 from __future__ import annotations
@@ -503,122 +513,141 @@ async def run_swarm_test(
     return result
 
 
+# ── Smart runtime decisions ──────────────────────────────────────────
+#
+# The pipeline makes its own decisions about configuration based on what
+# it discovers at runtime.  The operator provides only meaningful choices
+# (what data, what query, where to write output).  Everything else is
+# determined by inspecting the environment, the angles, and the corpus.
+
+_CORPUS_MIN_HARD = 50_000      # below this → ERROR + exit (hallucination zone)
+_CORPUS_MIN_SOFT = 500_000     # below this → WARNING (quality risk)
+_DEFAULT_TEMPERATURE = 0.3
+_DEFAULT_MAX_TOKENS = 4096
+_DEFAULT_REPORT_MAX_TOKENS = 8192
+_DEFAULT_REPORT_MAX_CHARS = 24_000
+_DEFAULT_MAX_RETURN_CHARS = 6_000
+_DEFAULT_COMPACT_EVERY = 3
+_DEFAULT_CONVERGENCE_THRESHOLD = 5
+_DEFAULT_MAX_WAVES = 3
+
+
+def _auto_discover_corpus() -> str:
+    """Find the best corpus file available on this machine.
+
+    Searches standard locations in priority order, returns the path
+    to the first file found, or empty string if none.
+    """
+    candidates = [
+        Path(__file__).resolve().parent / "mega_corpus.txt",
+        Path.home() / "data" / "youtube_corpus_combined.txt",
+        Path.home() / "repos" / "MiroThinker" / "scripts" / "h200_test" / "mega_corpus.txt",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            logger.info(
+                "corpus_path=<%s>, size=<%d> | auto-discovered corpus file",
+                candidate, candidate.stat().st_size,
+            )
+            return str(candidate)
+    return ""
+
+
+def _should_enrich() -> int:
+    """Decide whether to run enrichment based on angles configuration.
+
+    Returns the total number of enrichment queries across all angles,
+    or 0 if enrichment should be skipped.
+    """
+    try:
+        total_eq = sum(len(a.enrichment_queries) for a in ALL_ANGLES)
+        if total_eq > 0:
+            logger.info(
+                "enrichment_queries=<%d> | angles define enrichment queries — "
+                "enrichment will run automatically",
+                total_eq,
+            )
+        return total_eq
+    except Exception:
+        return 0
+
+
+def _auto_workers() -> int:
+    """Decide worker count from angles and environment.
+
+    One worker per angle, capped by SWARM_MAX_WORKERS env var if set.
+    """
+    angle_count = len(REQUIRED_ANGLE_LABELS)
+    env_cap = int(os.environ.get("SWARM_MAX_WORKERS", "0"))
+    workers = env_cap if env_cap > 0 else angle_count
+    logger.info(
+        "angles=<%d>, env_cap=<%d>, workers=<%d> | worker count resolved",
+        angle_count, env_cap, workers,
+    )
+    return workers
+
+
+def _validate_corpus(corpus: str) -> None:
+    """Validate corpus size — exit on dangerously small, warn on suboptimal."""
+    n = len(corpus)
+    if n < _CORPUS_MIN_HARD:
+        logger.error(
+            "corpus_chars=<%d> | corpus dangerously small (<%d chars) — "
+            "model WILL hallucinate, refusing to run",
+            n, _CORPUS_MIN_HARD,
+        )
+        sys.exit(1)
+    elif n < _CORPUS_MIN_SOFT:
+        logger.warning(
+            "corpus_chars=<%d> | corpus below recommended minimum (%d) — "
+            "output quality may be poor",
+            n, _CORPUS_MIN_SOFT,
+        )
+    else:
+        logger.info("corpus_chars=<%d> | corpus size validated", n)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run gossip swarm test on 1×H200",
+        description=(
+            "Run the gossip swarm pipeline.  Most configuration is resolved "
+            "automatically — workers match angle count, enrichment fires when "
+            "angles define queries, Flock always uses local vLLM, queen routes "
+            "to OpenRouter when OPENROUTER_API_KEY is set."
+        ),
     )
+    # ── Meaningful operator choices only ──────────────────────────
     parser.add_argument(
         "--corpus", default="",
-        help="Path to corpus text file (auto-discovers mega_corpus.txt or youtube_corpus if empty)",
+        help="Path to corpus file (auto-discovers if omitted)",
     )
     parser.add_argument(
         "--db", default="",
-        help="Path to DuckDB database with enriched corpus",
-    )
-    parser.add_argument(
-        "--enrich", action="store_true",
-        help="Run enrichment pipeline before swarm (auto-enabled when angles have enrichment_queries)",
-    )
-    parser.add_argument(
-        "--skip-enrich", action="store_true",
-        help="Skip auto-enrichment even when angles have enrichment_queries",
-    )
-    parser.add_argument(
-        "--min-corpus-chars", type=int, default=500000,
-        help="Minimum corpus size in chars — warns if below this (default: 500000)",
-    )
-    parser.add_argument(
-        "--output-dir", default="swarm_results",
-        help="Directory for output files",
-    )
-    parser.add_argument(
-        "--workers", type=int, default=0,
-        help="Override max workers (0 = use env/default)",
-    )
-    parser.add_argument(
-        "--gossip-rounds", type=int, default=0,
-        help="Override gossip rounds (0 = use env/default)",
+        help="Path to existing DuckDB database with enriched corpus",
     )
     parser.add_argument(
         "--query", default="",
-        help="Override the default swarm query",
+        help="Override the research query (defaults to angles.get_swarm_query())",
     )
     parser.add_argument(
         "--engine", choices=["gossip", "mcp"], default="gossip",
-        help="Swarm engine: 'gossip' (original) or 'mcp' (agent-workers with tools)",
-    )
-    parser.add_argument(
-        "--waves", type=int, default=3,
-        help="Max worker waves for MCP engine (default: 3)",
+        help="Swarm engine architecture (default: gossip)",
     )
     parser.add_argument(
         "--model", default="",
-        help="Model name served by vLLM (overrides SWARM_WORKER_MODEL env var)",
+        help="Local model name (overrides SWARM_WORKER_MODEL env var)",
     )
     parser.add_argument(
         "--api-base", default="",
         help="vLLM API base URL (overrides SWARM_API_BASE env var)",
     )
     parser.add_argument(
-        "--api-key", default="not-needed",
-        help="API key for endpoint (default: not-needed for local vLLM)",
-    )
-    parser.add_argument(
-        "--max-tokens", type=int, default=4096,
-        help="Max tokens per worker LLM response (default: 4096)",
-    )
-    parser.add_argument(
-        "--temperature", type=float, default=0.3,
-        help="Sampling temperature for workers (default: 0.3)",
-    )
-    parser.add_argument(
-        "--convergence-threshold", type=int, default=5,
-        help="Stop when new findings per wave drops below this (default: 5)",
-    )
-    parser.add_argument(
-        "--report-max-tokens", type=int, default=8192,
-        help="Max tokens for final report generation (default: 8192)",
-    )
-    parser.add_argument(
-        "--no-serendipity", action="store_true",
-        help="Disable the serendipity cross-domain wave",
-    )
-    parser.add_argument(
-        "--source-model", default="",
-        help="Model name for provenance tracking in store",
+        "--output-dir", default="swarm_results",
+        help="Directory for output files",
     )
     parser.add_argument(
         "--source-run", default="",
-        help="Run identifier for provenance (e.g. run_042)",
-    )
-    parser.add_argument(
-        "--max-return-chars", type=int, default=6000,
-        help="Hard ceiling on chars any tool call returns (default: 6000)",
-    )
-    parser.add_argument(
-        "--compact-every", type=int, default=3,
-        help="Run store compaction every N waves (0 = disable, default: 3)",
-    )
-    parser.add_argument(
-        "--no-rolling-summaries", action="store_true",
-        help="Disable rolling knowledge summaries between waves",
-    )
-    parser.add_argument(
-        "--report-max-chars", type=int, default=24000,
-        help="Max prompt chars for report generation (default: 24000)",
-    )
-    parser.add_argument(
-        "--flock-backend", default="local",
-        choices=["local", "ling-free", "ling-flash-free", "deepseek-flash", "deepseek-pro"],
-        help=(
-            "Backend for the Flock evaluation phase. "
-            "'local' uses the same vLLM endpoint as workers. "
-            "'ling-free' uses Ling 2.6-1T via OpenRouter free tier (HIGH RISK). "
-            "'ling-flash-free' uses Ling 2.6-Flash via OpenRouter free tier. "
-            "'deepseek-flash' uses DeepSeek V4-Flash via OpenRouter (paid). "
-            "'deepseek-pro' uses DeepSeek V4-Pro via OpenRouter (paid). "
-            "Default: local"
-        ),
+        help="Run identifier for provenance (auto-generated if omitted)",
     )
 
     args = parser.parse_args()
@@ -628,9 +657,24 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
     )
 
-    # Build SwarmConfig
+    # ── Resolve all configuration from environment + angles ───────
+    api_base = args.api_base or _get_api_base()
+    default_model = args.model or _get_model(
+        "SWARM_WORKER_MODEL", "huihui-ai/Qwen3.5-32B-abliterated",
+    )
+    resolved_source_run = args.source_run or f"run_{time.strftime('%Y%m%d_%H%M%S')}"
+
+    # Workers match angle count
+    resolved_workers = _auto_workers()
+
+    # Gossip rounds from env or default
+    resolved_gossip_rounds = int(os.environ.get("SWARM_GOSSIP_ROUNDS", "3"))
+
+    # Build SwarmConfig — all features enabled, no flags to disable them
     config = SwarmConfig()
     config.required_angles = list(REQUIRED_ANGLE_LABELS)
+    config.max_workers = resolved_workers
+    config.gossip_rounds = resolved_gossip_rounds
     config.enable_serendipity = True
     config.enable_full_corpus_gossip = True
     config.enable_semantic_assignment = True
@@ -639,106 +683,63 @@ def main() -> None:
     config.enable_hive_memory = True
     config.enable_diversity_aware_gossip = True
 
-    if args.workers > 0:
-        config.max_workers = args.workers
-    if args.gossip_rounds > 0:
-        config.gossip_rounds = args.gossip_rounds
+    logger.info(
+        "workers=<%d>, gossip_rounds=<%d>, angles=<%d>, engine=<%s> | "
+        "swarm config resolved",
+        resolved_workers, resolved_gossip_rounds,
+        len(REQUIRED_ANGLE_LABELS), args.engine,
+    )
 
-    # ── Corpus loading with auto-discovery and validation ──────────
+    # ── Corpus: discover → load → enrich → validate ──────────────
     corpus = ""
     store = None
 
-    # Auto-discover corpus if --corpus not provided
-    corpus_path = args.corpus
-    if not corpus_path:
-        _candidates = [
-            Path(__file__).resolve().parent / "mega_corpus.txt",
-            Path.home() / "data" / "youtube_corpus_combined.txt",
-            Path.home() / "repos" / "MiroThinker" / "scripts" / "h200_test" / "mega_corpus.txt",
-        ]
-        for candidate in _candidates:
-            if candidate.exists():
-                corpus_path = str(candidate)
-                logger.info(
-                    "corpus_path=<%s> | auto-discovered corpus file",
-                    corpus_path,
-                )
-                break
-
-    if args.enrich or args.db:
-        db_path = args.db or "enriched_corpus.duckdb"
-        store = ConditionStore(db_path=db_path)
-
-        if args.enrich:
-            from enrich_corpus import enrich_all
-            logger.info("running enrichment pipeline...")
-            enrich_all(store, max_per_query=10, extract_full_text=True)
-
+    # Step 1: Load from existing DuckDB if provided
+    if args.db:
+        store = ConditionStore(db_path=args.db)
         corpus = load_corpus_from_store(store)
-        logger.info("corpus_chars=<%d> | loaded from store", len(corpus))
+        logger.info("corpus_chars=<%d> | loaded from existing database", len(corpus))
 
+    # Step 2: Load from corpus file (auto-discover if not specified)
+    corpus_path = args.corpus or _auto_discover_corpus()
     if corpus_path:
         file_corpus = load_corpus_from_file(corpus_path)
-        if corpus:
-            corpus = f"{corpus}\n\n{file_corpus}"
-        else:
-            corpus = file_corpus
-        logger.info("corpus_chars=<%d> | loaded from file %s", len(corpus), corpus_path)
+        corpus = f"{corpus}\n\n{file_corpus}" if corpus else file_corpus
+        logger.info(
+            "corpus_chars=<%d> | loaded from file %s",
+            len(corpus), corpus_path,
+        )
 
-    # Auto-enrichment: if angles have enrichment_queries and user didn't
-    # explicitly pass --enrich or --skip-enrich, auto-enrich
-    if not args.enrich and not args.skip_enrich and not args.db:
-        try:
-            from angles import ALL_ANGLES
-            total_eq = sum(len(a.enrichment_queries) for a in ALL_ANGLES)
-            if total_eq > 0:
-                logger.info(
-                    "enrichment_queries=<%d> | auto-enriching (use --skip-enrich to disable)",
-                    total_eq,
-                )
-                from enrich_corpus import enrich_all
-                if store is None:
-                    store = ConditionStore(db_path="enriched_corpus.duckdb")
-                enrich_all(store, max_per_query=10, extract_full_text=True)
-                enriched = load_corpus_from_store(store)
-                if enriched:
-                    corpus = f"{corpus}\n\n{enriched}" if corpus else enriched
-                    logger.info(
-                        "enriched_chars=<%d>, total_corpus=<%d> | auto-enrichment complete",
-                        len(enriched), len(corpus),
-                    )
-        except ImportError:
-            logger.debug("angles module not available for auto-enrichment check")
+    # Step 3: Auto-enrich when angles define enrichment queries
+    enrichment_count = _should_enrich()
+    if enrichment_count > 0:
+        from enrich_corpus import enrich_all
+        if store is None:
+            store = ConditionStore(db_path="enriched_corpus.duckdb")
+        enrich_all(store, max_per_query=10, extract_full_text=True)
+        enriched = load_corpus_from_store(store)
+        if enriched:
+            corpus = f"{corpus}\n\n{enriched}" if corpus else enriched
+            logger.info(
+                "enriched_chars=<%d>, total_corpus=<%d> | enrichment complete",
+                len(enriched), len(corpus),
+            )
 
     if not corpus:
-        logger.error("no corpus provided — use --corpus, --db, or --enrich")
+        logger.error("no corpus found — provide --corpus or --db, or place mega_corpus.txt alongside this script")
         sys.exit(1)
 
-    # Corpus size validation
-    if len(corpus) < 50000:
-        logger.error(
-            "corpus_chars=<%d> | corpus dangerously small (<50K chars) — "
-            "model WILL hallucinate. provide a larger corpus",
-            len(corpus),
-        )
-        sys.exit(1)
-    elif len(corpus) < args.min_corpus_chars:
-        logger.warning(
-            "corpus_chars=<%d>, min_corpus_chars=<%d> | corpus below recommended minimum — "
-            "output quality may be poor. use --min-corpus-chars to adjust threshold",
-            len(corpus), args.min_corpus_chars,
-        )
+    # Step 4: Validate corpus size
+    _validate_corpus(corpus)
 
     logger.info(
-        "corpus_chars=<%d>, sections_est=<%d> | corpus loaded and validated",
+        "corpus_chars=<%d>, sections_est=<%d> | corpus ready",
         len(corpus),
         len(corpus) // config.max_section_chars + 1,
     )
 
-    # Wire corpus_delta_fn for external research during gossip rounds.
-    # Uses a watermark so only NEW findings since last check are returned —
-    # returning all findings every call would permanently disable adaptive
-    # convergence (engine checks `new_data_arrived = bool(delta_text)`).
+    # ── Wire corpus_delta_fn for gossip rounds ───────────────────
+    # Uses a watermark so only NEW findings since last check are returned.
     if store is not None:
         from datetime import datetime, timezone
         _watermark = datetime.now(timezone.utc).isoformat()
@@ -754,59 +755,49 @@ def main() -> None:
 
     query = args.query or get_swarm_query()
 
+    # ── Run the selected engine ──────────────────────────────────
     if args.engine == "mcp":
-        # MCP engine: agent-workers with ConditionStore tools
         from swarm.mcp_engine import MCPSwarmConfig, MCPSwarmEngine
 
         if store is None:
             store = ConditionStore(db_path="mcp_swarm.duckdb")
 
-        api_base = args.api_base or _get_api_base()
-        default_model = args.model or _get_model(
-            "SWARM_WORKER_MODEL", "huihui-ai/Qwen3.5-32B-abliterated",
-        )
-
-        # Resolve source_model from flag or model name
-        resolved_source_model = args.source_model or default_model
-        resolved_source_run = args.source_run or f"run_{time.strftime('%Y%m%d_%H%M%S')}"
-
-        # Resolve Flock backend (local vLLM or remote API with risk tier)
+        # Flock always uses local vLLM — it fires thousands of queries,
+        # remote APIs can't scale and would cost a fortune
         _flock_fn, flock_backend_config = resolve_flock_backend(
-            choice=args.flock_backend,
+            choice="local",
             local_model=default_model,
             local_api_base=api_base,
-            max_tokens=args.max_tokens,
-            temperature=args.temperature,
+            max_tokens=_DEFAULT_MAX_TOKENS,
+            temperature=_DEFAULT_TEMPERATURE,
         )
 
         mcp_config = MCPSwarmConfig(
-            max_workers=config.max_workers,
-            max_waves=args.waves,
-            convergence_threshold=args.convergence_threshold,
+            max_workers=resolved_workers,
+            max_waves=_DEFAULT_MAX_WAVES,
+            convergence_threshold=_DEFAULT_CONVERGENCE_THRESHOLD,
             api_base=api_base,
             model=default_model,
-            api_key=args.api_key,
-            max_tokens=args.max_tokens,
-            temperature=args.temperature,
+            api_key="not-needed",
+            max_tokens=_DEFAULT_MAX_TOKENS,
+            temperature=_DEFAULT_TEMPERATURE,
             required_angles=list(REQUIRED_ANGLE_LABELS),
-            report_max_tokens=args.report_max_tokens,
-            enable_serendipity_wave=not args.no_serendipity,
-            source_model=resolved_source_model,
+            report_max_tokens=_DEFAULT_REPORT_MAX_TOKENS,
+            enable_serendipity_wave=True,
+            source_model=default_model,
             source_run=resolved_source_run,
-            max_return_chars=args.max_return_chars,
-            compact_every_n_waves=args.compact_every,
-            enable_rolling_summaries=not args.no_rolling_summaries,
-            report_max_chars=args.report_max_chars,
+            max_return_chars=_DEFAULT_MAX_RETURN_CHARS,
+            compact_every_n_waves=_DEFAULT_COMPACT_EVERY,
+            enable_rolling_summaries=True,
+            report_max_chars=_DEFAULT_REPORT_MAX_CHARS,
             flock_backend_config=flock_backend_config,
             flock_complete=_flock_fn,
         )
 
-        # The MCP engine needs a simple completion function for
-        # angle detection and report generation (non-agent calls)
         complete_fn = make_complete_fn(
             default_model, api_base,
-            max_tokens=args.max_tokens,
-            temperature=args.temperature,
+            max_tokens=_DEFAULT_MAX_TOKENS,
+            temperature=_DEFAULT_TEMPERATURE,
         )
 
         engine = MCPSwarmEngine(
@@ -820,7 +811,6 @@ def main() -> None:
                 corpus=corpus,
                 query=query,
             )
-            # Save results
             output_path = Path(args.output_dir)
             output_path.mkdir(parents=True, exist_ok=True)
             timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -835,26 +825,18 @@ def main() -> None:
                     "engine": "mcp",
                     "model": default_model,
                     "api_base": api_base,
-                    "max_tokens": args.max_tokens,
-                    "temperature": args.temperature,
-                    "convergence_threshold": args.convergence_threshold,
-                    "max_workers": config.max_workers,
-                    "max_waves": args.waves,
-                    "report_max_tokens": args.report_max_tokens,
-                    "serendipity_enabled": not args.no_serendipity,
-                    "source_model": resolved_source_model,
+                    "max_tokens": _DEFAULT_MAX_TOKENS,
+                    "temperature": _DEFAULT_TEMPERATURE,
+                    "convergence_threshold": _DEFAULT_CONVERGENCE_THRESHOLD,
+                    "max_workers": resolved_workers,
+                    "max_waves": _DEFAULT_MAX_WAVES,
+                    "report_max_tokens": _DEFAULT_REPORT_MAX_TOKENS,
+                    "serendipity_enabled": True,
+                    "source_model": default_model,
                     "source_run": resolved_source_run,
-                    "max_return_chars": args.max_return_chars,
-                    "compact_every_n_waves": args.compact_every,
-                    "rolling_summaries_enabled": not args.no_rolling_summaries,
-                    "report_max_chars": args.report_max_chars,
-                    "flock_backend": args.flock_backend,
-                    "flock_backend_model": (
-                        flock_backend_config.model if flock_backend_config else default_model
-                    ),
-                    "flock_backend_tier": (
-                        flock_backend_config.risk_tier.value if flock_backend_config else "self_hosted"
-                    ),
+                    "flock_backend": "local",
+                    "flock_backend_model": default_model,
+                    "flock_backend_tier": "self_hosted",
                     "total_elapsed_s": result.metrics.total_elapsed_s,
                     "total_waves": result.metrics.total_waves,
                     "total_findings_stored": result.metrics.total_findings_stored,
@@ -867,41 +849,25 @@ def main() -> None:
                 }, f, indent=2)
 
             print(f"\n{'═' * 60}")
-            print(f"  MCP SWARM TEST COMPLETE")
+            print(f"  MCP SWARM COMPLETE")
             print(f"{'═' * 60}")
             print(f"  Model:              {default_model}")
-            print(f"  Flock backend:      {args.flock_backend}")
-            if flock_backend_config:
-                print(f"  Flock model:        {flock_backend_config.model}")
-                print(f"  Flock risk tier:    {flock_backend_config.risk_tier.value}")
-            print(f"  Source model:       {resolved_source_model}")
-            print(f"  Source run:         {resolved_source_run}")
-            print(f"  API base:           {api_base}")
-            print(f"  Temperature:        {args.temperature}")
-            print(f"  Max tokens:         {args.max_tokens}")
-            print(f"  Max return chars:   {args.max_return_chars}")
-            print(f"  Report max chars:   {args.report_max_chars}")
-            print(f"  Convergence:        {args.convergence_threshold}")
-            print(f"  Serendipity:        {not args.no_serendipity}")
-            print(f"  Rolling summaries:  {not args.no_rolling_summaries}")
-            print(f"  Compact every:      {args.compact_every} waves")
+            print(f"  Flock:              local (always)")
+            print(f"  Workers:            {resolved_workers} (matched to {len(REQUIRED_ANGLE_LABELS)} angles)")
+            print(f"  Run:                {resolved_source_run}")
             print(f"  Elapsed:            {result.metrics.total_elapsed_s:.1f}s")
             print(f"  Waves:              {result.metrics.total_waves}")
-            print(f"  Findings stored:    {result.metrics.total_findings_stored}")
+            print(f"  Findings:           {result.metrics.total_findings_stored}")
             print(f"  Tool calls:         {result.metrics.total_tool_calls}")
-            print(f"  Findings/wave:      {result.metrics.findings_per_wave}")
             print(f"  Convergence:        {result.metrics.convergence_reason}")
             print(f"  Report:             {len(result.report):,} chars")
             print(f"  Angles:             {result.angles_detected}")
-            print(f"\n  Output directory:   {output_path.resolve()}")
-            print(f"  Report:             {report_path.name}")
-            print(f"  Metrics:            {metrics_path.name}")
+            print(f"  Output:             {output_path.resolve()}")
             print(f"{'═' * 60}\n")
 
         asyncio.run(_run_mcp())
     else:
         # Original gossip engine
-        # Use LineageStore backed by ConditionStore if available
         if store is not None:
             config.lineage_store = store
 
