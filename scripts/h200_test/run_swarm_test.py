@@ -251,8 +251,9 @@ _DEEPSEEK_V4_PRO_MODEL = "deepseek/deepseek-v4-pro"
 # vLLM base port — instances use 8000, 8001, 8002, ...
 _VLLM_BASE_PORT = 8000
 
-# Track running vLLM subprocesses for cleanup
+# Track running vLLM subprocesses and their log file handles for cleanup
 _vllm_processes: list[subprocess.Popen[bytes]] = []
+_vllm_log_handles: list[object] = []
 
 
 def _compute_instances_per_gpu(
@@ -364,12 +365,14 @@ async def start_vllm_instances(
             i, port, gpu_ids, model, mem_util,
         )
 
+        log_fh = open(f"/workspace/vllm_{port}.log", "w")  # noqa: SIM115
         proc = subprocess.Popen(
             cmd, env=env,
-            stdout=open(f"/workspace/vllm_{port}.log", "w"),
+            stdout=log_fh,
             stderr=subprocess.STDOUT,
         )
         _vllm_processes.append(proc)
+        _vllm_log_handles.append(log_fh)
         endpoints.append(f"http://localhost:{port}/v1")
 
     # Wait for all instances to become healthy
@@ -428,6 +431,14 @@ def stop_vllm_instances() -> None:
         except subprocess.TimeoutExpired:
             proc.kill()
     _vllm_processes.clear()
+
+    # Close log file handles
+    for fh in _vllm_log_handles:
+        try:
+            fh.close()  # type: ignore[union-attr]
+        except Exception:
+            pass
+    _vllm_log_handles.clear()
 
     # Also kill any orphaned vLLM processes
     subprocess.run(
@@ -1741,8 +1752,8 @@ def main() -> None:
                     return
 
                 # Probe first instance to discover model name
-                local_caps = _probe_vllm(local_eps[0])
-                local_model_name = local_caps.model_name
+                local_caps = await _probe_vllm(local_eps[0])
+                local_model_name = local_caps.model_id
 
                 logger.info(
                     "local_instances=<%d>, local_model=<%s>, "
@@ -1776,11 +1787,11 @@ def main() -> None:
                 )
 
                 if flock_ep:
-                    flock_caps = _probe_vllm(flock_ep)
+                    flock_caps = await _probe_vllm(flock_ep)
                     logger.info(
                         "flock_model=<%s>, context_window=<%d> | "
                         "Phase 2 ready — Flock model loaded",
-                        flock_caps.model_name,
+                        flock_caps.model_id,
                         flock_caps.context_window,
                     )
                     # Flock evaluation would run here using flock_ep
