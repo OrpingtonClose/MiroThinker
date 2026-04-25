@@ -2175,6 +2175,7 @@ def main() -> None:
                         model=args.local_model,
                         num_gpus=args.num_gpus,
                         max_model_len=131072,
+                        instances_per_gpu=1,
                     )
 
                     if not local_eps:
