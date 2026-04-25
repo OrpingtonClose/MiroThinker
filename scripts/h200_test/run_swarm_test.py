@@ -714,7 +714,11 @@ def _decide_token_budgets(
     Instead of hardcoded defaults, scales budgets proportionally to
     what the model can actually handle.
     """
-    ctx = caps.context_window or 32768  # fallback if probe failed
+    # Apply fallback directly to caps so that derived @property methods
+    # (usable_input_tokens, usable_input_chars) also use the fallback.
+    if not caps.context_window:
+        caps.context_window = 32768
+    ctx = caps.context_window
 
     # Worker output: 25% of context, min 4096, max 16384
     worker_max = max(4096, min(16384, ctx // 4))
@@ -769,7 +773,7 @@ def _decide_queen_routing(
     """
     # Estimate queen input: each worker produces a summary, plus query and framing
     # Conservative: assume each worker summary is ~max_summary_chars
-    est_summary_per_worker = min(corpus_chars // worker_count, 100_000)
+    est_summary_per_worker = min(corpus_chars // max(worker_count, 1), 100_000)
     est_queen_input_chars = (
         est_summary_per_worker * worker_count  # worker summaries
         + 5_000                                 # query + framing prompt
