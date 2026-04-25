@@ -1749,6 +1749,7 @@ def main() -> None:
 
                 if not local_eps:
                     logger.error("no local vLLM instances started — aborting")
+                    stop_vllm_instances()
                     return
 
                 try:
@@ -1767,6 +1768,21 @@ def main() -> None:
                     config.max_section_chars = actual_budgets["max_section_chars"]
                     config.context_budget = actual_budgets["context_budget"]
 
+                    # Re-evaluate queen routing with actual capabilities.
+                    # main() computed queen_routing using stale 32K fallback
+                    # because no vLLM was running yet.  With the real context
+                    # window the queen may fit locally.
+                    actual_queen_routing, queen_reason = _decide_queen_routing(
+                        corpus_chars=len(corpus),
+                        worker_count=resolved_workers,
+                        caps=local_caps,
+                    )
+                    logger.info(
+                        "queen_routing=<%s>, reason=<%s> | "
+                        "queen routing re-evaluated with actual context",
+                        actual_queen_routing, queen_reason,
+                    )
+
                     logger.info(
                         "local_instances=<%d>, local_model=<%s>, "
                         "context_window=<%d> | Phase 1 ready "
@@ -1781,7 +1797,7 @@ def main() -> None:
                         query=query,
                         config=config,
                         output_dir=args.output_dir,
-                        queen_routing=queen_routing,
+                        queen_routing=actual_queen_routing,
                         resolved_model=local_model_name,
                         local_endpoints=local_eps,
                     )
