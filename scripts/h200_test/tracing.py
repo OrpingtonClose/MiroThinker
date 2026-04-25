@@ -516,7 +516,7 @@ def upload_output_dir_to_b2(
     # Extract timestamp portion from run_id (e.g. "run_20260425_162306" →
     # "20260425_162306") so we can match output files that embed the
     # timestamp but not the full run_id prefix.
-    ts_part = run_id.replace("run_", "").replace("api_run_", "")
+    ts_part = run_id.replace("api_run_", "").replace("run_", "")
 
     urls: list[str] = []
     for f in sorted(output_path.iterdir()):

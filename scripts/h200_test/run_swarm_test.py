@@ -663,11 +663,17 @@ def build_worker_routing(
                     backend="vllm-local",
                 )
                 routing[angle] = traced_fn
-            logger.info(
-                "angle=<%s>, backend=<local> | "
-                "worker routing assigned (no API keys available)",
-                angle,
-            )
+                logger.info(
+                    "angle=<%s>, backend=<local> | "
+                    "worker routing assigned (no API keys available)",
+                    angle,
+                )
+            else:
+                logger.warning(
+                    "angle=<%s> | no API keys and no local endpoint — "
+                    "angle not routed (will use default worker_complete)",
+                    angle,
+                )
 
     logger.info(
         "total_angles=<%d>, backend=<%s> | worker routing complete",
