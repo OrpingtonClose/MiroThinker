@@ -236,7 +236,8 @@ def _prescore_enrichment_conditions(store: ConditionStore) -> int:
     with lock:
         rows = store.conn.execute(
             "SELECT id, angle, LENGTH(fact) as fact_len FROM conditions "
-            "WHERE consider_for_use = TRUE AND row_type = 'finding'"
+            "WHERE consider_for_use = TRUE AND row_type = 'finding' "
+            "AND (score_version IS NULL OR score_version = 0)"
         ).fetchall()
 
     updated = 0
