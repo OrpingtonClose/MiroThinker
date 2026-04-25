@@ -356,12 +356,19 @@ def load_corpus_from_store(store: ConditionStore) -> str:
 
 # ── Main test runner ─────────────────────────────────────────────────
 
+# Default OpenRouter queen model — used when auto-routing decides the queen
+# should go remote but SWARM_QUEEN_MODEL is not explicitly set to an
+# OpenRouter-compatible identifier.
+_OPENROUTER_QUEEN_DEFAULT = "deepseek/deepseek-r1"
+
+
 async def run_swarm_test(
     corpus: str,
     query: str,
     config: SwarmConfig,
     output_dir: str = ".",
     queen_routing: str = "local",
+    resolved_model: str = "",
 ) -> SwarmResult:
     """Run the full gossip swarm pipeline and save results.
 
@@ -372,13 +379,28 @@ async def run_swarm_test(
         output_dir: Directory for output files.
         queen_routing: "local" or "openrouter" — decided by main() based on
             whether synthesis input fits in local context window.
+        resolved_model: Model name discovered by main() via vLLM probing.
+            When provided, used as the default instead of the hardcoded
+            fallback.  Ensures the gossip engine uses the same model that
+            main() discovered from the running vLLM instance.
     """
     api_base = _get_api_base()
-    worker_model = _get_model(
-        "SWARM_WORKER_MODEL", "huihui-ai/Qwen3.5-32B-abliterated",
-    )
-    queen_model = _get_model("SWARM_QUEEN_MODEL", worker_model)
+
+    # Use the model main() discovered from vLLM, falling back to env var
+    # then hardcoded default only if nothing was discovered.
+    _fallback = resolved_model or "huihui-ai/Qwen3.5-32B-abliterated"
+    worker_model = _get_model("SWARM_WORKER_MODEL", _fallback)
     serendipity_model = _get_model("SWARM_SERENDIPITY_MODEL", worker_model)
+
+    # Queen model resolution depends on routing decision:
+    # - "local": use SWARM_QUEEN_MODEL env var, fallback to worker_model
+    # - "openrouter": use SWARM_QUEEN_MODEL env var, fallback to a known
+    #   OpenRouter model (local vLLM names are NOT valid OpenRouter ids)
+    queen_model_env = os.environ.get("SWARM_QUEEN_MODEL", "")
+    if queen_routing == "openrouter":
+        queen_model = queen_model_env or _OPENROUTER_QUEEN_DEFAULT
+    else:
+        queen_model = queen_model_env or worker_model
 
     worker_fn = make_complete_fn(
         worker_model, api_base,
@@ -1267,6 +1289,7 @@ def main() -> None:
             config=config,
             output_dir=args.output_dir,
             queen_routing=queen_routing,
+            resolved_model=default_model,
         ))
 
 
