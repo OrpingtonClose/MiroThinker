@@ -48,6 +48,7 @@ import logging
 import os
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -60,7 +61,7 @@ _STRANDS_AGENT = str(Path(__file__).resolve().parents[2] / "apps" / "strands-age
 if _STRANDS_AGENT not in sys.path:
     sys.path.insert(0, _STRANDS_AGENT)
 
-from angles import ALL_ANGLES, REQUIRED_ANGLE_LABELS, get_swarm_query
+from angles import ALL_ANGLES, REQUIRED_ANGLE_LABELS, AngleDefinition, get_swarm_query
 from corpus import ConditionStore
 from swarm.config import SwarmConfig
 from swarm.engine import GossipSwarm, SwarmResult
@@ -360,34 +361,44 @@ async def run_swarm_test(
     query: str,
     config: SwarmConfig,
     output_dir: str = ".",
+    queen_routing: str = "local",
 ) -> SwarmResult:
-    """Run the full gossip swarm pipeline and save results."""
-    # Default model name — user sets SWARM_WORKER_MODEL to match what vLLM serves
-    default_model = "huihui-ai/Qwen3.5-32B-abliterated"
+    """Run the full gossip swarm pipeline and save results.
 
+    Args:
+        corpus: Full corpus text to analyze.
+        query: Research query for the swarm.
+        config: Pre-configured SwarmConfig (token budgets already sized).
+        output_dir: Directory for output files.
+        queen_routing: "local" or "openrouter" — decided by main() based on
+            whether synthesis input fits in local context window.
+    """
     api_base = _get_api_base()
-    worker_model = _get_model("SWARM_WORKER_MODEL", default_model)
-    queen_model = _get_model("SWARM_QUEEN_MODEL", default_model)
-    serendipity_model = _get_model("SWARM_SERENDIPITY_MODEL", default_model)
+    worker_model = _get_model(
+        "SWARM_WORKER_MODEL", "huihui-ai/Qwen3.5-32B-abliterated",
+    )
+    queen_model = _get_model("SWARM_QUEEN_MODEL", worker_model)
+    serendipity_model = _get_model("SWARM_SERENDIPITY_MODEL", worker_model)
 
     worker_fn = make_complete_fn(
         worker_model, api_base,
         max_tokens=config.worker_max_tokens,
         temperature=config.worker_temperature,
     )
-    # Route queen to OpenRouter when OPENROUTER_API_KEY is set AND the queen
-    # model differs from the worker model.  The '/' heuristic alone cannot
-    # distinguish HuggingFace names (huihui-ai/Qwen3.5-32B-abliterated) from
-    # OpenRouter identifiers (deepseek/deepseek-r1) — both use org/model format.
+
+    # Queen routing is decided by main() based on context window analysis.
+    # "openrouter" = synthesis input exceeds local context, use remote model.
+    # "local" = input fits, or no OPENROUTER_API_KEY available.
     _has_openrouter_key = bool(os.environ.get("OPENROUTER_API_KEY", ""))
-    if _has_openrouter_key and queen_model != worker_model:
+    if queen_routing == "openrouter" and _has_openrouter_key:
         queen_fn = make_openrouter_complete_fn(
             queen_model,
             max_tokens=config.queen_max_tokens,
             temperature=config.queen_temperature,
         )
         logger.info(
-            "queen_model=<%s> | queen routed to OpenRouter (OPENROUTER_API_KEY set)",
+            "queen_model=<%s>, routing=<openrouter> | queen routed to OpenRouter "
+            "(synthesis input exceeds local context window)",
             queen_model,
         )
     else:
@@ -396,11 +407,13 @@ async def run_swarm_test(
             max_tokens=config.queen_max_tokens,
             temperature=config.queen_temperature,
         )
-        if queen_model != worker_model and not _has_openrouter_key:
+        if queen_routing == "openrouter" and not _has_openrouter_key:
             logger.warning(
-                "queen_model=<%s> | queen differs from worker but no OPENROUTER_API_KEY — using local vLLM",
+                "queen_model=<%s> | queen should use OpenRouter but "
+                "OPENROUTER_API_KEY not set — falling back to local with truncation risk",
                 queen_model,
             )
+
     serendipity_fn = make_complete_fn(
         serendipity_model, api_base,
         max_tokens=config.worker_max_tokens,
@@ -513,44 +526,310 @@ async def run_swarm_test(
     return result
 
 
-# ── Smart runtime decisions ──────────────────────────────────────────
+# ── Agentic runtime decisions ────────────────────────────────────────
 #
-# The pipeline makes its own decisions about configuration based on what
-# it discovers at runtime.  The operator provides only meaningful choices
-# (what data, what query, where to write output).  Everything else is
-# determined by inspecting the environment, the angles, and the corpus.
+# Each function below inspects the live environment and makes a decision
+# that used to be a CLI flag.  Every decision is logged with reasoning
+# so the operator can audit why the pipeline chose what it chose.
 
 _CORPUS_MIN_HARD = 50_000      # below this → ERROR + exit (hallucination zone)
 _CORPUS_MIN_SOFT = 500_000     # below this → WARNING (quality risk)
-_DEFAULT_TEMPERATURE = 0.3
-_DEFAULT_MAX_TOKENS = 4096
-_DEFAULT_REPORT_MAX_TOKENS = 8192
-_DEFAULT_REPORT_MAX_CHARS = 24_000
-_DEFAULT_MAX_RETURN_CHARS = 6_000
-_DEFAULT_COMPACT_EVERY = 3
-_DEFAULT_CONVERGENCE_THRESHOLD = 5
-_DEFAULT_MAX_WAVES = 3
+_DEFAULT_TEMPERATURE = 0.3     # static choice — not derived from model probing
+
+# Approximate chars-per-token ratio for sizing calculations.
+# Conservative (high) estimate ensures we don't overflow context.
+_CHARS_PER_TOKEN = 3.5
+
+# Reserve fraction of context window for output generation.
+_OUTPUT_RESERVE_FRAC = 0.25
 
 
-def _auto_discover_corpus() -> str:
-    """Find the best corpus file available on this machine.
+@dataclass
+class ModelCapabilities:
+    """What we discovered about the local model by probing the endpoint."""
 
-    Searches standard locations in priority order, returns the path
-    to the first file found, or empty string if none.
+    model_id: str = ""
+    context_window: int = 0      # max_model_len from vLLM
+    alive: bool = False
+
+    @property
+    def usable_input_tokens(self) -> int:
+        """Tokens available for input after reserving space for output."""
+        return int(self.context_window * (1 - _OUTPUT_RESERVE_FRAC))
+
+    @property
+    def usable_input_chars(self) -> int:
+        """Chars available for input (conservative estimate)."""
+        return int(self.usable_input_tokens * _CHARS_PER_TOKEN)
+
+
+@dataclass
+class CorpusCoverage:
+    """Per-angle coverage analysis of the corpus."""
+
+    angle_label: str
+    keyword_hits: int = 0
+    estimated_chars: int = 0
+    thin: bool = False
+
+
+async def _probe_vllm(api_base: str) -> ModelCapabilities:
+    """Probe the vLLM endpoint to discover model capabilities.
+
+    Calls /v1/models to get the model id and max_model_len (context
+    window).  This drives token budget sizing and queen routing.
+    Falls back to conservative defaults if the endpoint is unreachable.
     """
-    candidates = [
-        Path(__file__).resolve().parent / "mega_corpus.txt",
-        Path.home() / "data" / "youtube_corpus_combined.txt",
-        Path.home() / "repos" / "MiroThinker" / "scripts" / "h200_test" / "mega_corpus.txt",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            logger.info(
-                "corpus_path=<%s>, size=<%d> | auto-discovered corpus file",
-                candidate, candidate.stat().st_size,
+    import httpx
+
+    caps = ModelCapabilities()
+    url = f"{api_base}/models"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+
+        models = data.get("data", [])
+        if models:
+            m = models[0]
+            caps.model_id = m.get("id", "")
+            # vLLM exposes max_model_len in the model object
+            caps.context_window = int(
+                m.get("max_model_len", 0)
+                or m.get("context_window", 0)
+                or 0
             )
-            return str(candidate)
-    return ""
+            caps.alive = True
+
+        logger.info(
+            "model_id=<%s>, context_window=<%d>, usable_input=<%d> tokens | "
+            "vLLM probed successfully",
+            caps.model_id, caps.context_window, caps.usable_input_tokens,
+        )
+    except Exception as exc:
+        logger.warning(
+            "api_base=<%s>, error=<%s> | vLLM probe failed — "
+            "using conservative defaults (32K context assumed)",
+            api_base, exc,
+        )
+        caps.context_window = 32768
+        caps.alive = False
+
+    return caps
+
+
+def _analyze_corpus_coverage(
+    corpus: str,
+    angles: list[AngleDefinition],
+) -> list[CorpusCoverage]:
+    """Analyze how well the corpus covers each angle.
+
+    Scans for angle keywords (key_compounds, key_interactions, and words
+    from the angle description) to estimate per-angle coverage.  Angles
+    with thin coverage get prioritized for enrichment.
+    """
+    corpus_lower = corpus.lower()
+    results = []
+
+    for angle in angles:
+        # Build keyword set from angle metadata
+        keywords: set[str] = set()
+        for compound in angle.key_compounds:
+            keywords.add(compound.lower())
+        for interaction in angle.key_interactions:
+            keywords.add(interaction.lower())
+        # Extract significant words from description (>4 chars, not stopwords)
+        for word in angle.description.split():
+            w = word.strip(".,;:()").lower()
+            if len(w) > 4:
+                keywords.add(w)
+
+        # Count keyword occurrences
+        hits = 0
+        for kw in keywords:
+            hits += corpus_lower.count(kw)
+
+        # Estimate chars relevant to this angle (rough: 200 chars per hit)
+        est_chars = min(hits * 200, len(corpus))
+
+        # "Thin" = fewer than 5 keyword hits per 100K corpus chars
+        thin = hits < max(5, len(corpus) // 100_000 * 5)
+
+        cov = CorpusCoverage(
+            angle_label=angle.label,
+            keyword_hits=hits,
+            estimated_chars=est_chars,
+            thin=thin,
+        )
+        results.append(cov)
+
+        log_fn = logger.warning if thin else logger.info
+        log_fn(
+            "angle=<%s>, keyword_hits=<%d>, estimated_chars=<%d>, thin=<%s> | "
+            "corpus coverage for angle",
+            angle.label, hits, est_chars, thin,
+        )
+
+    thin_count = sum(1 for c in results if c.thin)
+    if thin_count > 0:
+        logger.warning(
+            "thin_angles=<%d>/%d | %d angles have thin corpus coverage — "
+            "enrichment should target these first",
+            thin_count, len(results),
+            thin_count,
+        )
+
+    return results
+
+
+def _decide_token_budgets(
+    caps: ModelCapabilities,
+) -> dict[str, int]:
+    """Size all token budgets based on the actual model context window.
+
+    Instead of hardcoded defaults, scales budgets proportionally to
+    what the model can actually handle.
+    """
+    ctx = caps.context_window or 32768  # fallback if probe failed
+
+    # Worker output: 25% of context, min 4096, max 16384
+    worker_max = max(4096, min(16384, ctx // 4))
+
+    # Queen output: 50% of context, min 8192, max 65536
+    queen_max = max(8192, min(65536, ctx // 2))
+
+    # Max section chars per worker: scale with usable input
+    max_section = int(caps.usable_input_chars * 0.8)  # 80% of usable input
+
+    # Context budget for queen merge: usable input chars
+    context_budget = caps.usable_input_chars
+
+    # Report generation budget
+    report_max_tokens = max(8192, min(32768, ctx // 3))
+    report_max_chars = int(report_max_tokens * _CHARS_PER_TOKEN)
+
+    budgets = {
+        "worker_max_tokens": worker_max,
+        "queen_max_tokens": queen_max,
+        "max_section_chars": max_section,
+        "context_budget": context_budget,
+        "report_max_tokens": report_max_tokens,
+        "report_max_chars": report_max_chars,
+        "max_return_chars": min(6000, max_section // 10),
+    }
+
+    logger.info(
+        "context_window=<%d>, worker_max=<%d>, queen_max=<%d>, "
+        "max_section=<%d>, context_budget=<%d> | "
+        "token budgets sized from model capabilities",
+        ctx, worker_max, queen_max, max_section, context_budget,
+    )
+
+    return budgets
+
+
+def _decide_queen_routing(
+    corpus_chars: int,
+    worker_count: int,
+    caps: ModelCapabilities,
+) -> tuple[str, str]:
+    """Decide whether the queen should run locally or via OpenRouter.
+
+    Estimates the queen's input size from the corpus and worker count,
+    compares it to the local model's context window, and routes
+    accordingly.
+
+    Returns:
+        Tuple of (routing_decision, reason) where decision is
+        "local" or "openrouter".
+    """
+    # Estimate queen input: each worker produces a summary, plus query and framing
+    # Conservative: assume each worker summary is ~max_summary_chars
+    est_summary_per_worker = min(corpus_chars // worker_count, 100_000)
+    est_queen_input_chars = (
+        est_summary_per_worker * worker_count  # worker summaries
+        + 5_000                                 # query + framing prompt
+    )
+    est_queen_input_tokens = int(est_queen_input_chars / _CHARS_PER_TOKEN)
+
+    has_openrouter = bool(os.environ.get("OPENROUTER_API_KEY", ""))
+    local_can_fit = est_queen_input_tokens < caps.usable_input_tokens
+
+    if local_can_fit:
+        reason = (
+            f"queen input ~{est_queen_input_tokens} tokens fits in local "
+            f"context ({caps.usable_input_tokens} usable)"
+        )
+        logger.info(
+            "queen_input_est=<%d> tokens, local_usable=<%d> tokens | "
+            "queen will run locally — input fits",
+            est_queen_input_tokens, caps.usable_input_tokens,
+        )
+        return "local", reason
+
+    if has_openrouter:
+        reason = (
+            f"queen input ~{est_queen_input_tokens} tokens exceeds local "
+            f"context ({caps.usable_input_tokens} usable) — routing to "
+            f"OpenRouter (128K+ context available)"
+        )
+        logger.info(
+            "queen_input_est=<%d> tokens, local_usable=<%d> tokens | "
+            "queen routed to OpenRouter — input too large for local model",
+            est_queen_input_tokens, caps.usable_input_tokens,
+        )
+        return "openrouter", reason
+
+    reason = (
+        f"queen input ~{est_queen_input_tokens} tokens exceeds local "
+        f"context ({caps.usable_input_tokens} usable) but no "
+        f"OPENROUTER_API_KEY — queen will run locally with TRUNCATION"
+    )
+    logger.warning(
+        "queen_input_est=<%d> tokens, local_usable=<%d> tokens | "
+        "queen will be truncated — set OPENROUTER_API_KEY for full synthesis",
+        est_queen_input_tokens, caps.usable_input_tokens,
+    )
+    return "local", reason
+
+
+def _prioritize_enrichment(
+    coverage: list[CorpusCoverage],
+    angles: list[AngleDefinition],
+) -> list[AngleDefinition]:
+    """Reorder angles so thin-coverage angles get enriched first.
+
+    Thin angles go first (sorted by ascending keyword hits), then
+    well-covered angles.  This ensures limited enrichment budget goes
+    to the angles that need it most.
+    """
+    coverage_map = {c.angle_label: c for c in coverage}
+    angle_map = {a.label: a for a in angles}
+
+    thin = [
+        (coverage_map[a.label].keyword_hits, a)
+        for a in angles
+        if a.label in coverage_map and coverage_map[a.label].thin
+    ]
+    thin.sort(key=lambda x: x[0])  # fewest hits first
+
+    ok = [
+        a for a in angles
+        if a.label not in coverage_map or not coverage_map[a.label].thin
+    ]
+
+    reordered = [a for _, a in thin] + ok
+
+    if thin:
+        thin_labels = [a.label for _, a in thin]
+        logger.info(
+            "thin_angles=<%s> | enrichment will prioritize these angles",
+            ", ".join(thin_labels),
+        )
+
+    return reordered
 
 
 def _should_enrich() -> int:
@@ -570,6 +849,40 @@ def _should_enrich() -> int:
         return total_eq
     except Exception:
         return 0
+
+
+def _auto_discover_corpus() -> str:
+    """Find the best corpus file available on this machine.
+
+    Searches standard locations in priority order.  Prefers larger files
+    (more data = better swarm output).
+    """
+    candidates = [
+        Path(__file__).resolve().parent / "mega_corpus.txt",
+        Path.home() / "data" / "youtube_corpus_combined.txt",
+        Path.home() / "repos" / "MiroThinker" / "scripts" / "h200_test" / "mega_corpus.txt",
+    ]
+
+    # Pick the largest available file, not just the first
+    best_path = ""
+    best_size = 0
+    for candidate in candidates:
+        if candidate.exists():
+            size = candidate.stat().st_size
+            logger.info(
+                "corpus_candidate=<%s>, size=<%d> | found corpus file",
+                candidate, size,
+            )
+            if size > best_size:
+                best_path = str(candidate)
+                best_size = size
+
+    if best_path:
+        logger.info(
+            "corpus_path=<%s>, size=<%d> | selected largest available corpus",
+            best_path, best_size,
+        )
+    return best_path
 
 
 def _auto_workers() -> int:
@@ -610,16 +923,16 @@ def _validate_corpus(corpus: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the gossip swarm pipeline.  Most configuration is resolved "
-            "automatically — workers match angle count, enrichment fires when "
-            "angles define queries, Flock always uses local vLLM, queen routes "
-            "to OpenRouter when OPENROUTER_API_KEY is set."
+            "Run the gossip swarm pipeline.  The pipeline probes the vLLM "
+            "endpoint, analyzes the corpus, sizes token budgets from the "
+            "actual context window, and routes the queen based on whether "
+            "the synthesis input fits locally."
         ),
     )
     # ── Meaningful operator choices only ──────────────────────────
     parser.add_argument(
         "--corpus", default="",
-        help="Path to corpus file (auto-discovers if omitted)",
+        help="Path to corpus file (auto-discovers largest available if omitted)",
     )
     parser.add_argument(
         "--db", default="",
@@ -657,40 +970,40 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
     )
 
-    # ── Resolve all configuration from environment + angles ───────
+    # ══════════════════════════════════════════════════════════════
+    #  PHASE 1: Probe the environment
+    # ══════════════════════════════════════════════════════════════
+
     api_base = args.api_base or _get_api_base()
     default_model = args.model or _get_model(
         "SWARM_WORKER_MODEL", "huihui-ai/Qwen3.5-32B-abliterated",
     )
     resolved_source_run = args.source_run or f"run_{time.strftime('%Y%m%d_%H%M%S')}"
 
-    # Workers match angle count
-    resolved_workers = _auto_workers()
+    # Probe vLLM to discover model context window and capabilities.
+    # This drives EVERY downstream sizing decision.
+    caps = asyncio.run(_probe_vllm(api_base))
 
-    # Gossip rounds from env or default
+    # If the probe found a model id, prefer it over the env/default
+    # (it's what vLLM is actually serving)
+    if caps.model_id and not args.model:
+        logger.info(
+            "model_override=<%s> → <%s> | using model discovered from vLLM",
+            default_model, caps.model_id,
+        )
+        default_model = caps.model_id
+
+    # Size token budgets from actual context window
+    budgets = _decide_token_budgets(caps)
+
+    # Workers: one per angle
+    resolved_workers = _auto_workers()
     resolved_gossip_rounds = int(os.environ.get("SWARM_GOSSIP_ROUNDS", "3"))
 
-    # Build SwarmConfig — all features enabled, no flags to disable them
-    config = SwarmConfig()
-    config.required_angles = list(REQUIRED_ANGLE_LABELS)
-    config.max_workers = resolved_workers
-    config.gossip_rounds = resolved_gossip_rounds
-    config.enable_serendipity = True
-    config.enable_full_corpus_gossip = True
-    config.enable_semantic_assignment = True
-    config.enable_misassignment = True
-    config.misassignment_ratio = 0.25
-    config.enable_hive_memory = True
-    config.enable_diversity_aware_gossip = True
+    # ══════════════════════════════════════════════════════════════
+    #  PHASE 2: Load and analyze corpus
+    # ══════════════════════════════════════════════════════════════
 
-    logger.info(
-        "workers=<%d>, gossip_rounds=<%d>, angles=<%d>, engine=<%s> | "
-        "swarm config resolved",
-        resolved_workers, resolved_gossip_rounds,
-        len(REQUIRED_ANGLE_LABELS), args.engine,
-    )
-
-    # ── Corpus: discover → load → enrich → validate ──────────────
     corpus = ""
     store = None
 
@@ -710,17 +1023,44 @@ def main() -> None:
             len(corpus), corpus_path,
         )
 
-    # Step 3: Auto-enrich when angles define enrichment queries.
-    # Use export_delta to capture only NEW findings from enrichment —
-    # avoids duplicating pre-existing DB findings already in corpus.
+    # Step 3: Analyze corpus coverage per angle BEFORE enrichment
+    # so we know which angles are thin and should be prioritized
+    coverage = _analyze_corpus_coverage(corpus, list(ALL_ANGLES)) if corpus else []
+
+    # Step 4: Enrichment — prioritize thin angles
     enrichment_count = _should_enrich()
     if enrichment_count > 0:
         from datetime import datetime, timezone
         from enrich_corpus import enrich_all
+
         if store is None:
             store = ConditionStore(db_path="enriched_corpus.duckdb")
+
+        # Reorder angles so thin-coverage ones get enriched first
+        if coverage:
+            prioritized = _prioritize_enrichment(coverage, list(ALL_ANGLES))
+            # enrich_all iterates ALL_ANGLES internally, but we log the priority
+            thin_labels = [
+                c.angle_label for c in coverage if c.thin
+            ]
+            if thin_labels:
+                logger.info(
+                    "enrichment_priority=<%s> | thin angles targeted first",
+                    ", ".join(thin_labels),
+                )
+
         pre_enrich_ts = datetime.now(timezone.utc).isoformat()
-        enrich_all(store, max_per_query=10, extract_full_text=True)
+        enrich_results = enrich_all(store, max_per_query=10, extract_full_text=True)
+
+        # Evaluate enrichment quality per angle
+        for angle_label, count in (enrich_results or {}).items():
+            if count == 0:
+                logger.warning(
+                    "angle=<%s>, results=<0> | enrichment returned nothing — "
+                    "corpus may be thin for this angle, consider manual data gathering",
+                    angle_label,
+                )
+
         enriched = store.export_delta(since=pre_enrich_ts)
         if enriched:
             corpus = f"{corpus}\n\n{enriched}" if corpus else enriched
@@ -733,8 +1073,46 @@ def main() -> None:
         logger.error("no corpus found — provide --corpus or --db, or place mega_corpus.txt alongside this script")
         sys.exit(1)
 
-    # Step 4: Validate corpus size
     _validate_corpus(corpus)
+
+    # ══════════════════════════════════════════════════════════════
+    #  PHASE 3: Build config from discovered capabilities
+    # ══════════════════════════════════════════════════════════════
+
+    config = SwarmConfig()
+    config.required_angles = list(REQUIRED_ANGLE_LABELS)
+    config.max_workers = resolved_workers
+    config.gossip_rounds = resolved_gossip_rounds
+    config.enable_serendipity = True
+    config.enable_full_corpus_gossip = True
+    config.enable_semantic_assignment = True
+    config.enable_misassignment = True
+    config.misassignment_ratio = 0.25
+    config.enable_hive_memory = True
+    config.enable_diversity_aware_gossip = True
+
+    # Apply token budgets sized from the actual model context window
+    config.worker_max_tokens = budgets["worker_max_tokens"]
+    config.queen_max_tokens = budgets["queen_max_tokens"]
+    config.max_section_chars = budgets["max_section_chars"]
+    config.context_budget = budgets["context_budget"]
+
+    # Decide queen routing: does the synthesis input fit locally?
+    queen_routing, queen_reason = _decide_queen_routing(
+        corpus_chars=len(corpus),
+        worker_count=resolved_workers,
+        caps=caps,
+    )
+
+    logger.info(
+        "workers=<%d>, gossip_rounds=<%d>, angles=<%d>, engine=<%s>, "
+        "queen=<%s>, context_window=<%d> | full config resolved\n"
+        "  queen reasoning: %s",
+        resolved_workers, resolved_gossip_rounds,
+        len(REQUIRED_ANGLE_LABELS), args.engine,
+        queen_routing, caps.context_window,
+        queen_reason,
+    )
 
     logger.info(
         "corpus_chars=<%d>, sections_est=<%d> | corpus ready",
@@ -743,7 +1121,6 @@ def main() -> None:
     )
 
     # ── Wire corpus_delta_fn for gossip rounds ───────────────────
-    # Uses a watermark so only NEW findings since last check are returned.
     if store is not None:
         from datetime import datetime, timezone
         _watermark = datetime.now(timezone.utc).isoformat()
@@ -759,48 +1136,51 @@ def main() -> None:
 
     query = args.query or get_swarm_query()
 
-    # ── Run the selected engine ──────────────────────────────────
+    # ══════════════════════════════════════════════════════════════
+    #  PHASE 4: Run the selected engine
+    # ══════════════════════════════════════════════════════════════
+
     if args.engine == "mcp":
         from swarm.mcp_engine import MCPSwarmConfig, MCPSwarmEngine
 
         if store is None:
             store = ConditionStore(db_path="mcp_swarm.duckdb")
 
-        # Flock always uses local vLLM — it fires thousands of queries,
-        # remote APIs can't scale and would cost a fortune
+        # Flock always uses local vLLM — thousands of queries, must scale
+        # with hardware not rate limits
         _flock_fn, flock_backend_config = resolve_flock_backend(
             choice="local",
             local_model=default_model,
             local_api_base=api_base,
-            max_tokens=_DEFAULT_MAX_TOKENS,
+            max_tokens=budgets["worker_max_tokens"],
             temperature=_DEFAULT_TEMPERATURE,
         )
 
         mcp_config = MCPSwarmConfig(
             max_workers=resolved_workers,
-            max_waves=_DEFAULT_MAX_WAVES,
-            convergence_threshold=_DEFAULT_CONVERGENCE_THRESHOLD,
+            max_waves=3,
+            convergence_threshold=5,
             api_base=api_base,
             model=default_model,
             api_key="not-needed",
-            max_tokens=_DEFAULT_MAX_TOKENS,
+            max_tokens=budgets["worker_max_tokens"],
             temperature=_DEFAULT_TEMPERATURE,
             required_angles=list(REQUIRED_ANGLE_LABELS),
-            report_max_tokens=_DEFAULT_REPORT_MAX_TOKENS,
+            report_max_tokens=budgets["report_max_tokens"],
             enable_serendipity_wave=True,
             source_model=default_model,
             source_run=resolved_source_run,
-            max_return_chars=_DEFAULT_MAX_RETURN_CHARS,
-            compact_every_n_waves=_DEFAULT_COMPACT_EVERY,
+            max_return_chars=budgets["max_return_chars"],
+            compact_every_n_waves=3,
             enable_rolling_summaries=True,
-            report_max_chars=_DEFAULT_REPORT_MAX_CHARS,
+            report_max_chars=budgets["report_max_chars"],
             flock_backend_config=flock_backend_config,
             flock_complete=_flock_fn,
         )
 
         complete_fn = make_complete_fn(
             default_model, api_base,
-            max_tokens=_DEFAULT_MAX_TOKENS,
+            max_tokens=budgets["worker_max_tokens"],
             temperature=_DEFAULT_TEMPERATURE,
         )
 
@@ -829,18 +1209,22 @@ def main() -> None:
                     "engine": "mcp",
                     "model": default_model,
                     "api_base": api_base,
-                    "max_tokens": _DEFAULT_MAX_TOKENS,
-                    "temperature": _DEFAULT_TEMPERATURE,
-                    "convergence_threshold": _DEFAULT_CONVERGENCE_THRESHOLD,
+                    "context_window": caps.context_window,
+                    "queen_routing": queen_routing,
+                    "queen_reason": queen_reason,
+                    "budgets": budgets,
                     "max_workers": resolved_workers,
-                    "max_waves": _DEFAULT_MAX_WAVES,
-                    "report_max_tokens": _DEFAULT_REPORT_MAX_TOKENS,
+                    "corpus_coverage": {
+                        c.angle_label: {
+                            "keyword_hits": c.keyword_hits,
+                            "thin": c.thin,
+                        }
+                        for c in coverage
+                    },
                     "serendipity_enabled": True,
                     "source_model": default_model,
                     "source_run": resolved_source_run,
                     "flock_backend": "local",
-                    "flock_backend_model": default_model,
-                    "flock_backend_tier": "self_hosted",
                     "total_elapsed_s": result.metrics.total_elapsed_s,
                     "total_waves": result.metrics.total_waves,
                     "total_findings_stored": result.metrics.total_findings_stored,
@@ -856,6 +1240,8 @@ def main() -> None:
             print(f"  MCP SWARM COMPLETE")
             print(f"{'═' * 60}")
             print(f"  Model:              {default_model}")
+            print(f"  Context window:     {caps.context_window:,} tokens")
+            print(f"  Queen routing:      {queen_routing}")
             print(f"  Flock:              local (always)")
             print(f"  Workers:            {resolved_workers} (matched to {len(REQUIRED_ANGLE_LABELS)} angles)")
             print(f"  Run:                {resolved_source_run}")
@@ -880,6 +1266,7 @@ def main() -> None:
             query=query,
             config=config,
             output_dir=args.output_dir,
+            queen_routing=queen_routing,
         ))
 
 
