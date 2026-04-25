@@ -46,6 +46,8 @@ import asyncio
 import json
 import logging
 import os
+import signal
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -232,6 +234,392 @@ def make_openrouter_complete_fn(
     return _complete
 
 
+# ── Multi-instance vLLM management ────────────────────────────────────
+#
+# Manages multiple vLLM processes across GPUs for the multi-model swarm.
+# Phase 1 (bees+gossip): N Kimi-Linear instances packed onto GPUs
+# Phase 2 (Flock): kill all, start Qwen3-235B on TP=8
+
+# Default models for each phase
+_KIMI_LINEAR_MODEL = "huihui-ai/Huihui-Kimi-Linear-48B-A3B-Instruct-abliterated"
+_QWEN3_235B_MODEL = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
+
+# Remote worker models via OpenRouter
+_LING_MODEL = "inclusionai/ling-2.6-1t:free"
+_DEEPSEEK_V4_PRO_MODEL = "deepseek/deepseek-v4-pro"
+
+# vLLM base port — instances use 8000, 8001, 8002, ...
+_VLLM_BASE_PORT = 8000
+
+# Track running vLLM subprocesses for cleanup
+_vllm_processes: list[subprocess.Popen[bytes]] = []
+
+
+def _compute_instances_per_gpu(
+    model_vram_gb: float,
+    gpu_vram_gb: float = 143.7,
+    kv_reserve_gb: float = 10.0,
+) -> int:
+    """Compute how many model instances fit on a single GPU.
+
+    Packs as many instances as possible while reserving space for
+    KV cache per instance.
+
+    Args:
+        model_vram_gb: Estimated model weight VRAM in GB.
+        gpu_vram_gb: Total GPU VRAM in GB (H200 = 143.7).
+        kv_reserve_gb: VRAM reserved per instance for KV cache.
+
+    Returns:
+        Number of instances that fit on one GPU (minimum 1).
+    """
+    usable = gpu_vram_gb * 0.95  # 5% overhead for CUDA context
+    per_instance = model_vram_gb + kv_reserve_gb
+    count = int(usable // per_instance)
+    return max(1, count)
+
+
+# Known model VRAM estimates (FP8 weights) in GB
+_MODEL_VRAM_ESTIMATES: dict[str, float] = {
+    _KIMI_LINEAR_MODEL: 48.0,   # 48B MoE at FP8
+    _QWEN3_235B_MODEL: 235.0,   # 235B MoE at FP8, needs TP
+}
+
+
+async def start_vllm_instances(
+    model: str,
+    num_gpus: int = 8,
+    tp_per_instance: int = 1,
+    max_model_len: int = 131072,
+    *,
+    instances_per_gpu: int | None = None,
+    model_vram_gb: float | None = None,
+    extra_vllm_args: list[str] | None = None,
+) -> list[str]:
+    """Start vLLM instances packed across GPUs.
+
+    Automatically computes how many instances fit per GPU based on
+    model weight size.  For small MoE models (e.g. Kimi-Linear 48B
+    with 3B active at FP8 = ~48 GB), this packs 2 instances per
+    143 GB H200 GPU = 16 instances across 8 GPUs.
+
+    Args:
+        model: HuggingFace model id or local path.
+        num_gpus: Total available GPUs.
+        tp_per_instance: Tensor-parallel degree per instance.
+        max_model_len: Context window per instance.
+        instances_per_gpu: Override auto-computed packing density.
+        model_vram_gb: Model weight size in GB (auto-looked up if None).
+        extra_vllm_args: Additional CLI args passed to vLLM.
+
+    Returns:
+        List of API base URLs (e.g. ["http://localhost:8000/v1", ...]).
+    """
+    import httpx
+
+    # Compute packing density
+    if instances_per_gpu is None:
+        vram = model_vram_gb or _MODEL_VRAM_ESTIMATES.get(model, 50.0)
+        instances_per_gpu = _compute_instances_per_gpu(vram)
+
+    num_instances = instances_per_gpu * (num_gpus // tp_per_instance)
+    # Each instance's share of GPU memory
+    mem_util = round(0.95 / instances_per_gpu, 2)
+
+    logger.info(
+        "model=<%s>, instances_per_gpu=<%d>, total_instances=<%d>, "
+        "mem_util_each=<%.2f>, tp=<%d> | packing vLLM instances",
+        model, instances_per_gpu, num_instances, mem_util, tp_per_instance,
+    )
+
+    endpoints: list[str] = []
+
+    for i in range(num_instances):
+        port = _VLLM_BASE_PORT + i
+        # Pack instances onto GPUs: instances 0..N-1 on GPU 0,
+        # instances N..2N-1 on GPU 1, etc.
+        gpu_idx = (i // instances_per_gpu) * tp_per_instance
+        gpu_ids = ",".join(
+            str(gpu_idx + g) for g in range(tp_per_instance)
+        )
+
+        env = {**os.environ, "CUDA_VISIBLE_DEVICES": gpu_ids}
+        cmd = [
+            "python3", "-m", "vllm.entrypoints.openai.api_server",
+            "--model", model,
+            "--port", str(port),
+            "--tensor-parallel-size", str(tp_per_instance),
+            "--max-model-len", str(max_model_len),
+            "--gpu-memory-utilization", str(mem_util),
+            "--trust-remote-code",
+            "--dtype", "auto",
+            "--disable-log-requests",
+        ]
+        if extra_vllm_args:
+            cmd.extend(extra_vllm_args)
+
+        logger.info(
+            "instance=<%d>, port=<%d>, gpus=<%s>, model=<%s>, "
+            "mem_util=<%.2f> | starting vLLM",
+            i, port, gpu_ids, model, mem_util,
+        )
+
+        proc = subprocess.Popen(
+            cmd, env=env,
+            stdout=open(f"/workspace/vllm_{port}.log", "w"),
+            stderr=subprocess.STDOUT,
+        )
+        _vllm_processes.append(proc)
+        endpoints.append(f"http://localhost:{port}/v1")
+
+    # Wait for all instances to become healthy
+    logger.info(
+        "instances=<%d> | waiting for vLLM instances to become healthy",
+        num_instances,
+    )
+    healthy = set()
+    for attempt in range(120):  # up to 10 min
+        await asyncio.sleep(5)
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            for idx, ep in enumerate(endpoints):
+                if idx in healthy:
+                    continue
+                try:
+                    resp = await client.get(f"{ep}/models")
+                    if resp.status_code == 200:
+                        healthy.add(idx)
+                        logger.info(
+                            "instance=<%d>, endpoint=<%s> | vLLM healthy",
+                            idx, ep,
+                        )
+                except Exception:
+                    pass
+        if len(healthy) == len(endpoints):
+            break
+
+    if len(healthy) < len(endpoints):
+        failed = [
+            endpoints[i] for i in range(len(endpoints)) if i not in healthy
+        ]
+        logger.warning(
+            "healthy=<%d>, total=<%d>, failed=<%s> | "
+            "some vLLM instances did not become healthy",
+            len(healthy), len(endpoints), failed,
+        )
+
+    logger.info(
+        "healthy=<%d>, total=<%d> | vLLM startup complete",
+        len(healthy), len(endpoints),
+    )
+    return [endpoints[i] for i in sorted(healthy)]
+
+
+def stop_vllm_instances() -> None:
+    """Kill all tracked vLLM processes."""
+    for proc in _vllm_processes:
+        try:
+            proc.send_signal(signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    # Wait briefly then force-kill stragglers
+    for proc in _vllm_processes:
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    _vllm_processes.clear()
+
+    # Also kill any orphaned vLLM processes
+    subprocess.run(
+        ["pkill", "-9", "-f", "vllm.entrypoints"],
+        capture_output=True,
+    )
+    logger.info("vllm_processes=<0> | all vLLM instances stopped")
+
+
+def build_worker_routing(
+    angles: list[str],
+    local_endpoints: list[str],
+    local_model: str,
+    max_tokens: int = 16384,
+    temperature: float = 0.3,
+) -> dict[str, Callable[[str], Awaitable[str]]]:
+    """Build per-angle CompleteFn routing for multi-model swarm.
+
+    Distributes angles across three tiers:
+      1. Remote Ling 2.6-1T (free, deepest reasoning) — first third
+      2. Remote DeepSeek V4 Pro (1M context) — second third
+      3. Local Kimi-Linear instances (fallback, third architecture) — rest
+
+    Each remote worker has a local fallback: if the remote call fails
+    3 times, it falls back to a local Kimi-Linear instance.
+
+    Args:
+        angles: List of angle labels from the swarm config.
+        local_endpoints: API base URLs of local vLLM instances.
+        local_model: Model name served by local vLLM.
+        max_tokens: Max tokens per response.
+        temperature: Sampling temperature.
+
+    Returns:
+        Dict mapping angle label to CompleteFn.
+    """
+    has_openrouter = bool(os.environ.get("OPENROUTER_API_KEY", ""))
+    routing: dict[str, Callable[[str], Awaitable[str]]] = {}
+
+    if not local_endpoints:
+        logger.warning("no local vLLM endpoints — all workers will use remote")
+
+    # Split angles into thirds: Ling, DeepSeek, Local
+    n = len(angles)
+    ling_count = n // 3
+    deepseek_count = n // 3
+    # Remainder goes to local (always-available fallback)
+
+    for idx, angle in enumerate(angles):
+        # Local endpoint for this worker (round-robin)
+        local_ep = local_endpoints[idx % len(local_endpoints)] if local_endpoints else ""
+        local_fn = make_complete_fn(
+            local_model, local_ep, max_tokens, temperature,
+        ) if local_ep else None
+
+        if has_openrouter and idx < ling_count:
+            # Tier 1: Ling 2.6-1T (free, ~100B+ active, 262K context)
+            remote_fn = make_openrouter_complete_fn(
+                _LING_MODEL, max_tokens, temperature,
+            )
+            routing[angle] = _make_fallback_fn(remote_fn, local_fn, angle)
+            logger.info(
+                "angle=<%s>, backend=<ling-2.6-1t>, fallback=<local> | "
+                "worker routing assigned",
+                angle,
+            )
+        elif has_openrouter and idx < ling_count + deepseek_count:
+            # Tier 2: DeepSeek V4 Pro ($1.74/M, 1M context, 49B active)
+            remote_fn = make_openrouter_complete_fn(
+                _DEEPSEEK_V4_PRO_MODEL, max_tokens, temperature,
+            )
+            routing[angle] = _make_fallback_fn(remote_fn, local_fn, angle)
+            logger.info(
+                "angle=<%s>, backend=<deepseek-v4-pro>, fallback=<local> | "
+                "worker routing assigned",
+                angle,
+            )
+        else:
+            # Tier 3: Local Kimi-Linear
+            if local_fn:
+                routing[angle] = local_fn
+            logger.info(
+                "angle=<%s>, backend=<local-kimi-linear> | "
+                "worker routing assigned",
+                angle,
+            )
+
+    logger.info(
+        "total_angles=<%d>, ling=<%d>, deepseek=<%d>, local=<%d> | "
+        "worker routing complete",
+        n, ling_count, deepseek_count, n - ling_count - deepseek_count,
+    )
+    return routing
+
+
+def _make_fallback_fn(
+    primary: Callable[[str], Awaitable[str]],
+    fallback: Callable[[str], Awaitable[str]] | None,
+    angle: str,
+    max_retries: int = 3,
+) -> Callable[[str], Awaitable[str]]:
+    """Wrap a primary CompleteFn with retry + local fallback.
+
+    Tries primary up to max_retries times.  On exhaustion, falls back
+    to the local CompleteFn.  If no fallback is available, returns empty.
+
+    Args:
+        primary: Remote CompleteFn (e.g. OpenRouter).
+        fallback: Local CompleteFn (e.g. Kimi-Linear vLLM).
+        angle: Angle label for logging.
+        max_retries: Retries before falling back.
+
+    Returns:
+        A resilient CompleteFn.
+    """
+
+    async def _resilient(prompt: str) -> str:
+        for attempt in range(1, max_retries + 1):
+            result = await primary(prompt)
+            if result:
+                return result
+            logger.warning(
+                "angle=<%s>, attempt=<%d>, max=<%d> | "
+                "remote call returned empty, retrying",
+                angle, attempt, max_retries,
+            )
+            await asyncio.sleep(2 ** attempt)  # exponential backoff
+
+        # Primary exhausted — fall back to local
+        if fallback is not None:
+            logger.warning(
+                "angle=<%s> | remote exhausted after %d attempts, "
+                "falling back to local",
+                angle, max_retries,
+            )
+            return await fallback(prompt)
+
+        logger.error(
+            "angle=<%s> | remote exhausted and no fallback available",
+            angle,
+        )
+        return ""
+
+    return _resilient
+
+
+async def swap_to_flock_model(
+    model: str = _QWEN3_235B_MODEL,
+    num_gpus: int = 8,
+    max_model_len: int = 131072,
+) -> str:
+    """Kill current vLLM instances and start the Flock model on all GPUs.
+
+    Uses tensor parallelism across all GPUs for maximum throughput
+    and prefix cache capacity.
+
+    Args:
+        model: Model for Flock evaluation.
+        num_gpus: GPUs for tensor parallelism.
+        max_model_len: Context window.
+
+    Returns:
+        API base URL of the Flock vLLM instance.
+    """
+    logger.info(
+        "model=<%s>, tp=<%d> | swapping to Flock model",
+        model, num_gpus,
+    )
+    stop_vllm_instances()
+
+    # Give CUDA a moment to release memory
+    await asyncio.sleep(10)
+
+    endpoints = await start_vllm_instances(
+        model=model,
+        num_gpus=num_gpus,
+        tp_per_instance=num_gpus,
+        max_model_len=max_model_len,
+        instances_per_gpu=1,  # one large model across all GPUs
+    )
+
+    if not endpoints:
+        logger.error("flock model failed to start — no healthy endpoints")
+        return ""
+
+    logger.info(
+        "endpoint=<%s> | Flock model ready",
+        endpoints[0],
+    )
+    return endpoints[0]
+
+
 # ── Flock backend resolution ─────────────────────────────────────────
 
 # Known OpenRouter models for the Flock evaluation phase.
@@ -369,6 +757,7 @@ async def run_swarm_test(
     output_dir: str = ".",
     queen_routing: str = "local",
     resolved_model: str = "",
+    local_endpoints: list[str] | None = None,
 ) -> SwarmResult:
     """Run the full gossip swarm pipeline and save results.
 
@@ -383,6 +772,10 @@ async def run_swarm_test(
             When provided, used as the default instead of the hardcoded
             fallback.  Ensures the gossip engine uses the same model that
             main() discovered from the running vLLM instance.
+        local_endpoints: API base URLs of local vLLM instances for
+            multi-model worker routing.  When provided, builds a
+            worker_complete_map that distributes angles across local
+            instances + remote OpenRouter models.
     """
     api_base = _get_api_base()
 
@@ -442,12 +835,26 @@ async def run_swarm_test(
         temperature=0.5,  # Slightly higher for serendipity creativity
     )
 
+    # Build per-worker routing map when local endpoints are available.
+    # This enables multi-model swarms: local Kimi-Linear instances +
+    # remote Ling/DeepSeek workers confronting each other during gossip.
+    worker_map: dict[str, Callable[[str], Awaitable[str]]] | None = None
+    if local_endpoints:
+        worker_map = build_worker_routing(
+            angles=list(REQUIRED_ANGLE_LABELS),
+            local_endpoints=local_endpoints,
+            local_model=worker_model,
+            max_tokens=config.worker_max_tokens,
+            temperature=config.worker_temperature,
+        )
+
     swarm = GossipSwarm(
         complete=worker_fn,
         worker_complete=worker_fn,
         queen_complete=queen_fn,
         serendipity_complete=serendipity_fn,
         config=config,
+        worker_complete_map=worker_map,
     )
 
     # Progress callback
@@ -988,6 +1395,26 @@ def main() -> None:
         "--source-run", default="",
         help="Run identifier for provenance (auto-generated if omitted)",
     )
+    parser.add_argument(
+        "--multi-model", action="store_true",
+        help=(
+            "Enable multi-model swarm: auto-start vLLM instances packed "
+            "across GPUs, route workers to local + remote OpenRouter models, "
+            "then swap to Qwen3-235B for Flock evaluation"
+        ),
+    )
+    parser.add_argument(
+        "--local-model", default=_KIMI_LINEAR_MODEL,
+        help="Model for local vLLM instances in multi-model mode",
+    )
+    parser.add_argument(
+        "--flock-model", default=_QWEN3_235B_MODEL,
+        help="Model for Flock evaluation phase (loaded after gossip)",
+    )
+    parser.add_argument(
+        "--num-gpus", type=int, default=8,
+        help="Number of GPUs available (default: 8 for H200)",
+    )
 
     args = parser.parse_args()
 
@@ -1290,14 +1717,92 @@ def main() -> None:
         if store is not None:
             config.lineage_store = store
 
-        asyncio.run(run_swarm_test(
-            corpus=corpus,
-            query=query,
-            config=config,
-            output_dir=args.output_dir,
-            queen_routing=queen_routing,
-            resolved_model=default_model,
-        ))
+        if args.multi_model:
+            # ── Multi-model pipeline ─────────────────────────────────
+            # Phase 1: Start local vLLM instances packed across GPUs,
+            #          run bees + gossip + serendipity + queen.
+            # Phase 2: Swap to Flock model, run evaluation.
+            async def _run_multi_model() -> None:
+                logger.info(
+                    "local_model=<%s>, flock_model=<%s>, gpus=<%d> | "
+                    "starting multi-model pipeline",
+                    args.local_model, args.flock_model, args.num_gpus,
+                )
+
+                # Phase 1: Start local instances (auto-packed per GPU)
+                local_eps = await start_vllm_instances(
+                    model=args.local_model,
+                    num_gpus=args.num_gpus,
+                    max_model_len=131072,
+                )
+
+                if not local_eps:
+                    logger.error("no local vLLM instances started — aborting")
+                    return
+
+                # Probe first instance to discover model name
+                local_caps = _probe_vllm(local_eps[0])
+                local_model_name = local_caps.model_name
+
+                logger.info(
+                    "local_instances=<%d>, local_model=<%s>, "
+                    "context_window=<%d> | Phase 1 ready",
+                    len(local_eps), local_model_name,
+                    local_caps.context_window,
+                )
+
+                # Run bees + gossip + serendipity + queen
+                result = await run_swarm_test(
+                    corpus=corpus,
+                    query=query,
+                    config=config,
+                    output_dir=args.output_dir,
+                    queen_routing=queen_routing,
+                    resolved_model=local_model_name,
+                    local_endpoints=local_eps,
+                )
+
+                logger.info(
+                    "phase1_elapsed=<%.1f>s, worker_summaries=<%d> | "
+                    "Phase 1 complete (bees + gossip + queen)",
+                    result.metrics.total_elapsed_s,
+                    len(result.worker_summaries),
+                )
+
+                # Phase 2: Swap to Flock model
+                flock_ep = await swap_to_flock_model(
+                    model=args.flock_model,
+                    num_gpus=args.num_gpus,
+                )
+
+                if flock_ep:
+                    flock_caps = _probe_vllm(flock_ep)
+                    logger.info(
+                        "flock_model=<%s>, context_window=<%d> | "
+                        "Phase 2 ready — Flock model loaded",
+                        flock_caps.model_name,
+                        flock_caps.context_window,
+                    )
+                    # Flock evaluation would run here using flock_ep
+                    # (FlockQueryManager integration is a separate step)
+                else:
+                    logger.warning(
+                        "flock model swap failed — skipping Flock evaluation"
+                    )
+
+                # Cleanup
+                stop_vllm_instances()
+
+            asyncio.run(_run_multi_model())
+        else:
+            asyncio.run(run_swarm_test(
+                corpus=corpus,
+                query=query,
+                config=config,
+                output_dir=args.output_dir,
+                queen_routing=queen_routing,
+                resolved_model=default_model,
+            ))
 
 
 if __name__ == "__main__":

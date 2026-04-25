@@ -152,19 +152,34 @@ class GossipSwarm:
     Lineage tracking: pass ``config=SwarmConfig(lineage_store=store)`` to
     record every phase output with parent pointers forming a DAG.
 
+    Per-worker model routing: pass ``worker_complete_map`` to assign
+    specific angles to specific backends.  Workers whose angle is not
+    in the map fall back to ``worker_complete``.  This enables
+    multi-model swarms where local and remote models confront each
+    other during gossip.
+
     Usage:
         async def fast_local(prompt: str) -> str:
-            # Ollama Gemma-4-uncensored on H200
+            # Kimi-Linear on local vLLM
+            ...
+
+        async def frontier_remote(prompt: str) -> str:
+            # Ling 2.6-1T via OpenRouter
             ...
 
         async def best_writer(prompt: str) -> str:
-            # Qwen-Claude-Opus or remote Claude
+            # DeepSeek V4 Pro via OpenRouter
             ...
 
         swarm = GossipSwarm(
             complete=fast_local,
             queen_complete=best_writer,
             config=SwarmConfig(gossip_rounds=3),
+            worker_complete_map={
+                "Insulin Signaling": frontier_remote,
+                "Trenbolone Pharmacology": frontier_remote,
+                "GH/IGF-1 Axis": fast_local,
+            },
         )
         result = await swarm.synthesize(corpus="...", query="...")
         print(result.user_report)
@@ -178,12 +193,20 @@ class GossipSwarm:
         queen_complete: CompleteFn | None = None,
         serendipity_complete: CompleteFn | None = None,
         config: SwarmConfig | None = None,
+        *,
+        worker_complete_map: dict[str, CompleteFn] | None = None,
     ) -> None:
         self.complete = complete
         self.worker_complete = worker_complete or complete
         self.queen_complete = queen_complete or complete
         self.serendipity_complete = serendipity_complete or complete
         self.config = config or SwarmConfig()
+        # Per-worker routing: maps angle name → CompleteFn.
+        # Workers whose angle is not in the map fall back to
+        # self.worker_complete.  Enables multi-model swarms where
+        # different workers use different backends (local vLLM,
+        # remote OpenRouter, etc.).
+        self.worker_complete_map: dict[str, CompleteFn] = worker_complete_map or {}
         # Local lineage entry cache for swarm-internal RAG (hive memory).
         # Reset at the start of each synthesize() call.
         self._lineage_entries: list[LineageEntry] = []
@@ -393,13 +416,16 @@ class GossipSwarm:
 
         async def _bounded_synthesize(assignment: WorkerAssignment) -> None:
             async with sem:
+                _worker_fn = self.worker_complete_map.get(
+                    assignment.angle, self.worker_complete,
+                )
                 try:
                     assignment.summary = await worker_synthesize(
                         angle=assignment.angle,
                         section_content=assignment.raw_content,
                         query=query,
                         max_chars=config.max_summary_chars,
-                        complete_fn=self.worker_complete,
+                        complete_fn=_worker_fn,
                         has_off_angle_data=_has_off_angle,
                     )
                 except Exception:
@@ -532,6 +558,9 @@ class GossipSwarm:
                     # Hive memory for this worker (from RAG query above)
                     hive_mem = _hive_map.get(assignment.worker_id, "")
 
+                    _worker_fn = self.worker_complete_map.get(
+                        assignment.angle, self.worker_complete,
+                    )
                     try:
                         assignment.summary = await worker_gossip_refine(
                             angle=assignment.angle,
@@ -540,7 +569,7 @@ class GossipSwarm:
                             raw_section=raw,
                             query=query,
                             max_chars=config.max_summary_chars,
-                            complete_fn=self.worker_complete,
+                            complete_fn=_worker_fn,
                             round_prompt=_round_prompt,
                             delta_text=_delta,
                             hive_memory=hive_mem,
