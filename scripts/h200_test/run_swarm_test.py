@@ -68,6 +68,15 @@ from corpus import ConditionStore
 from swarm.config import SwarmConfig
 from swarm.engine import GossipSwarm, SwarmResult
 from swarm.lineage import LineageStore
+from tracing import (
+    init_tracing,
+    shutdown_tracing,
+    trace_event,
+    trace_phase,
+    traced_complete_fn,
+    upload_output_dir_to_b2,
+    upload_traces_to_b2,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -234,19 +243,127 @@ def make_openrouter_complete_fn(
     return _complete
 
 
+# ── DeepSeek API completion function ──────────────────────────────────
+#
+# Direct DeepSeek API for V4 Flash workers — cheap, fast, uncensored,
+# unlimited concurrency (API-based, no GPU cost for bees).
+
+
+async def _deepseek_api_complete(
+    prompt: str,
+    model: str,
+    api_key: str,
+    max_tokens: int = 16384,
+    temperature: float = 0.3,
+) -> str:
+    """Call DeepSeek API chat completions endpoint.
+
+    Uses the OpenAI-compatible chat format.  DeepSeek V4 Flash returns
+    separate reasoning_content (chain-of-thought) and content fields —
+    we concatenate both for maximum analytical depth.
+
+    Args:
+        prompt: The full prompt (system message content).
+        model: DeepSeek model identifier (e.g. "deepseek-v4-flash").
+        api_key: DeepSeek API key.
+        max_tokens: Max tokens per response.
+        temperature: Sampling temperature.
+
+    Returns:
+        The completion text (reasoning + content), or empty string on failure.
+    """
+    import httpx
+
+    url = "https://api.deepseek.com/v1/chat/completions"
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": "Produce your analysis."},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+
+    async with httpx.AsyncClient(timeout=600.0) as client:
+        try:
+            resp = await client.post(
+                url,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if "error" in data:
+                logger.warning(
+                    "model=<%s>, error=<%s> | deepseek api returned error",
+                    model, data["error"],
+                )
+                return ""
+            msg = data["choices"][0]["message"]
+            # V4 models return reasoning_content (CoT) + content
+            reasoning = msg.get("reasoning_content", "") or ""
+            content = msg.get("content", "") or ""
+            # Concatenate reasoning and content for full analytical depth
+            if reasoning and content:
+                return f"<reasoning>\n{reasoning}\n</reasoning>\n\n{content}"
+            return content or reasoning
+        except Exception:
+            logger.exception(
+                "model=<%s> | deepseek api call failed", model,
+            )
+            return ""
+
+
+def make_deepseek_api_complete_fn(
+    model: str = _DEEPSEEK_V4_FLASH_MODEL,
+    max_tokens: int = 16384,
+    temperature: float = 0.3,
+) -> Callable[[str], Awaitable[str]]:
+    """Create a CompleteFn targeting the DeepSeek API.
+
+    Reads DEEPSEEK_API_KEY from environment.
+
+    Args:
+        model: DeepSeek model identifier.
+        max_tokens: Max tokens per response.
+        temperature: Sampling temperature.
+
+    Returns:
+        An async completion callable.
+    """
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if not api_key:
+        logger.warning("DEEPSEEK_API_KEY not set — DeepSeek API calls will fail")
+
+    async def _complete(prompt: str) -> str:
+        return await _deepseek_api_complete(
+            prompt, model, api_key, max_tokens, temperature,
+        )
+
+    return _complete
+
+
 # ── Multi-instance vLLM management ────────────────────────────────────
 #
 # Manages multiple vLLM processes across GPUs for the multi-model swarm.
-# Phase 1 (bees+gossip): N Kimi-Linear instances packed onto GPUs
-# Phase 2 (Flock): kill all, start Qwen3-235B on TP=8
+# Phase 1 (bees+gossip): DeepSeek V4 Flash via API (unlimited concurrency)
+# Phase 2 (Flock): DeepSeek V4 Pro on 8×H200 via vLLM docker
 
 # Default models for each phase
 _KIMI_LINEAR_MODEL = "huihui-ai/Huihui-Kimi-Linear-48B-A3B-Instruct-abliterated"
 _QWEN3_235B_MODEL = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
 
-# Remote worker models via OpenRouter
+# DeepSeek V4 models
+_DEEPSEEK_V4_FLASH_MODEL = "deepseek-v4-flash"  # via DeepSeek API
+_DEEPSEEK_V4_PRO_MODEL = "deepseek-ai/DeepSeek-V4-Pro"  # local vLLM
+_DEEPSEEK_V4_PRO_OPENROUTER = "deepseek/deepseek-v4-pro"  # via OpenRouter
+
+# Legacy remote worker models via OpenRouter
 _LING_MODEL = "inclusionai/ling-2.6-1t:free"
-_DEEPSEEK_V4_PRO_MODEL = "deepseek/deepseek-v4-pro"
 
 # vLLM base port — instances use 8000, 8001, 8002, ...
 _VLLM_BASE_PORT = 8000
@@ -457,79 +574,93 @@ def build_worker_routing(
 ) -> dict[str, Callable[[str], Awaitable[str]]]:
     """Build per-angle CompleteFn routing for multi-model swarm.
 
-    Distributes angles across three tiers:
-      1. Remote Ling 2.6-1T (free, deepest reasoning) — first third
-      2. Remote DeepSeek V4 Pro (1M context) — second third
-      3. Local Kimi-Linear instances (fallback, third architecture) — rest
+    All worker bees use DeepSeek V4 Flash via the DeepSeek API.
+    This is cheap, fast, uncensored (8/8 censorship test pass),
+    and has unlimited concurrency (API-based, no GPU cost).
 
-    Each remote worker has a local fallback: if the remote call fails
-    3 times, it falls back to a local Kimi-Linear instance.
+    Each worker is wrapped with tracing for per-angle observability,
+    plus a local vLLM fallback if the API is unreachable.
 
     Args:
         angles: List of angle labels from the swarm config.
-        local_endpoints: API base URLs of local vLLM instances.
-        local_model: Model name served by local vLLM.
+        local_endpoints: API base URLs of local vLLM instances (fallback).
+        local_model: Model name served by local vLLM (fallback).
         max_tokens: Max tokens per response.
         temperature: Sampling temperature.
 
     Returns:
-        Dict mapping angle label to CompleteFn.
+        Dict mapping angle label to traced CompleteFn.
     """
+    has_deepseek = bool(os.environ.get("DEEPSEEK_API_KEY", ""))
     has_openrouter = bool(os.environ.get("OPENROUTER_API_KEY", ""))
     routing: dict[str, Callable[[str], Awaitable[str]]] = {}
 
-    if not local_endpoints:
-        logger.warning("no local vLLM endpoints — all workers will use remote")
-
-    # Split angles into thirds: Ling, DeepSeek, Local
     n = len(angles)
-    ling_count = n // 3
-    deepseek_count = n // 3
-    # Remainder goes to local (always-available fallback)
 
     for idx, angle in enumerate(angles):
-        # Local endpoint for this worker (round-robin)
+        # Local endpoint for fallback (round-robin across instances)
         local_ep = local_endpoints[idx % len(local_endpoints)] if local_endpoints else ""
         local_fn = make_complete_fn(
             local_model, local_ep, max_tokens, temperature,
         ) if local_ep else None
 
-        if has_openrouter and idx < ling_count:
-            # Tier 1: Ling 2.6-1T (free, ~100B+ active, 262K context)
-            remote_fn = make_openrouter_complete_fn(
-                _LING_MODEL, max_tokens, temperature,
+        if has_deepseek:
+            # All workers use DeepSeek V4 Flash via API — unlimited concurrency
+            raw_fn = make_deepseek_api_complete_fn(
+                _DEEPSEEK_V4_FLASH_MODEL, max_tokens, temperature,
             )
-            routing[angle] = _make_fallback_fn(remote_fn, local_fn, angle)
+            # Wrap with tracing
+            traced_fn = traced_complete_fn(
+                raw_fn,
+                f"worker.{angle}",
+                model_name=_DEEPSEEK_V4_FLASH_MODEL,
+                backend="deepseek-api",
+            )
+            routing[angle] = _make_fallback_fn(traced_fn, local_fn, angle)
             logger.info(
-                "angle=<%s>, backend=<ling-2.6-1t>, fallback=<local> | "
+                "angle=<%s>, backend=<deepseek-v4-flash>, fallback=<local> | "
                 "worker routing assigned",
                 angle,
             )
-        elif has_openrouter and idx < ling_count + deepseek_count:
-            # Tier 2: DeepSeek V4 Pro ($1.74/M, 1M context, 49B active)
-            remote_fn = make_openrouter_complete_fn(
-                _DEEPSEEK_V4_PRO_MODEL, max_tokens, temperature,
+        elif has_openrouter:
+            # Fallback: use OpenRouter if DeepSeek API key not available
+            raw_fn = make_openrouter_complete_fn(
+                _DEEPSEEK_V4_PRO_OPENROUTER, max_tokens, temperature,
             )
-            routing[angle] = _make_fallback_fn(remote_fn, local_fn, angle)
+            traced_fn = traced_complete_fn(
+                raw_fn,
+                f"worker.{angle}",
+                model_name=_DEEPSEEK_V4_PRO_OPENROUTER,
+                backend="openrouter",
+            )
+            routing[angle] = _make_fallback_fn(traced_fn, local_fn, angle)
             logger.info(
-                "angle=<%s>, backend=<deepseek-v4-pro>, fallback=<local> | "
+                "angle=<%s>, backend=<deepseek-v4-pro-openrouter>, fallback=<local> | "
                 "worker routing assigned",
                 angle,
             )
         else:
-            # Tier 3: Local Kimi-Linear
+            # Last resort: local vLLM only
             if local_fn:
-                routing[angle] = local_fn
+                traced_fn = traced_complete_fn(
+                    local_fn,
+                    f"worker.{angle}",
+                    model_name=local_model,
+                    backend="vllm-local",
+                )
+                routing[angle] = traced_fn
             logger.info(
-                "angle=<%s>, backend=<local-kimi-linear> | "
-                "worker routing assigned",
+                "angle=<%s>, backend=<local> | "
+                "worker routing assigned (no API keys available)",
                 angle,
             )
 
     logger.info(
-        "total_angles=<%d>, ling=<%d>, deepseek=<%d>, local=<%d> | "
-        "worker routing complete",
-        n, ling_count, deepseek_count, n - ling_count - deepseek_count,
+        "total_angles=<%d>, backend=<%s> | worker routing complete",
+        n,
+        "deepseek-v4-flash" if has_deepseek else (
+            "openrouter" if has_openrouter else "local"
+        ),
     )
     return routing
 
@@ -587,38 +718,52 @@ def _make_fallback_fn(
 
 
 async def swap_to_flock_model(
-    model: str = _QWEN3_235B_MODEL,
+    model: str = _DEEPSEEK_V4_PRO_MODEL,
     num_gpus: int = 8,
-    max_model_len: int = 131072,
+    max_model_len: int = 1048576,
+    *,
+    use_docker: bool = True,
 ) -> str:
     """Kill current vLLM instances and start the Flock model on all GPUs.
 
-    Uses tensor parallelism across all GPUs for maximum throughput
-    and prefix cache capacity.
+    For DeepSeek V4 Pro, uses the official vLLM deepseekv4-cu130 Docker
+    image with data-parallel-size=8 and hybrid attention optimisations
+    (FP8 KV cache, FP4 indexer, 256-token blocks, expert parallelism).
+
+    For other models, falls back to the standard vLLM Python entrypoint
+    with tensor parallelism.
 
     Args:
         model: Model for Flock evaluation.
-        num_gpus: GPUs for tensor parallelism.
+        num_gpus: GPUs available.
         max_model_len: Context window.
+        use_docker: Use Docker for V4 Pro (recommended for production).
 
     Returns:
         API base URL of the Flock vLLM instance.
     """
     logger.info(
-        "model=<%s>, tp=<%d> | swapping to Flock model",
-        model, num_gpus,
+        "model=<%s>, gpus=<%d>, docker=<%s> | swapping to Flock model",
+        model, num_gpus, use_docker,
     )
     stop_vllm_instances()
 
     # Give CUDA a moment to release memory
     await asyncio.sleep(10)
 
+    is_v4_pro = "DeepSeek-V4-Pro" in model or "deepseek-v4-pro" in model.lower()
+
+    if is_v4_pro and use_docker:
+        # Use the official vLLM deepseekv4-cu130 Docker image
+        return await _start_v4_pro_docker(model, num_gpus)
+
+    # Fallback: standard vLLM Python entrypoint with tensor parallelism
     endpoints = await start_vllm_instances(
         model=model,
         num_gpus=num_gpus,
         tp_per_instance=num_gpus,
         max_model_len=max_model_len,
-        instances_per_gpu=1,  # one large model across all GPUs
+        instances_per_gpu=1,
     )
 
     if not endpoints:
@@ -630,6 +775,110 @@ async def swap_to_flock_model(
         endpoints[0],
     )
     return endpoints[0]
+
+
+async def _start_v4_pro_docker(
+    model: str = _DEEPSEEK_V4_PRO_MODEL,
+    num_gpus: int = 8,
+) -> str:
+    """Start DeepSeek V4 Pro via the official vLLM Docker image.
+
+    Uses the exact command from the vLLM blog post "DeepSeek V4 in vLLM:
+    Efficient Long-context Attention" (April 24, 2026):
+    - vllm/vllm-openai:deepseekv4-cu130 image
+    - data-parallel-size 8 (NOT tensor-parallel-size)
+    - FP8 KV cache + FP4 indexer cache
+    - 256-token blocks for hybrid CSA+HCA attention
+    - Expert parallelism for MoE efficiency
+    - Full+piecewise CUDA graph compilation
+    - DeepSeek V4 tokenizer and reasoning parser
+
+    Args:
+        model: HuggingFace model identifier.
+        num_gpus: GPU count for data parallelism.
+
+    Returns:
+        API base URL (http://localhost:8000/v1) or empty on failure.
+    """
+    import httpx
+
+    hf_home = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+
+    cmd = [
+        "docker", "run",
+        "--gpus", "all",
+        "--ipc=host",
+        "-p", "8000:8000",
+        "-v", f"{hf_home}:/root/.cache/huggingface",
+        "-d",  # detach so we can poll for readiness
+        "--name", "vllm-v4-pro",
+        "vllm/vllm-openai:deepseekv4-cu130",
+        model,
+        "--trust-remote-code",
+        "--kv-cache-dtype", "fp8",
+        "--block-size", "256",
+        "--enable-expert-parallel",
+        "--data-parallel-size", str(num_gpus),
+        "--compilation-config",
+        '{"cudagraph_mode":"FULL_AND_PIECEWISE", "custom_ops":["all"]}',
+        "--attention_config.use_fp4_indexer_cache=True",
+        "--tokenizer-mode", "deepseek_v4",
+        "--tool-call-parser", "deepseek_v4",
+        "--enable-auto-tool-choice",
+        "--reasoning-parser", "deepseek_v4",
+    ]
+
+    logger.info(
+        "model=<%s>, gpus=<%d> | starting V4 Pro via Docker "
+        "(vllm/vllm-openai:deepseekv4-cu130)",
+        model, num_gpus,
+    )
+
+    # Remove any existing container with the same name
+    subprocess.run(
+        ["docker", "rm", "-f", "vllm-v4-pro"],
+        capture_output=True,
+    )
+
+    log_fh = open("/workspace/vllm_v4_pro_docker.log", "w")  # noqa: SIM115
+    proc = subprocess.Popen(
+        cmd,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
+    )
+    _vllm_processes.append(proc)
+    _vllm_log_handles.append(log_fh)
+
+    endpoint = "http://localhost:8000/v1"
+
+    # Wait for the container to become healthy (model loading can take
+    # 10-30 minutes for V4 Pro depending on download speed)
+    logger.info(
+        "endpoint=<%s> | waiting for V4 Pro to become healthy "
+        "(this may take 10-30 minutes for model loading)",
+        endpoint,
+    )
+
+    for attempt in range(360):  # up to 30 min
+        await asyncio.sleep(5)
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{endpoint}/models")
+                if resp.status_code == 200:
+                    logger.info(
+                        "attempt=<%d>, endpoint=<%s> | V4 Pro Docker healthy",
+                        attempt, endpoint,
+                    )
+                    return endpoint
+        except Exception:
+            if attempt % 12 == 0:  # log every minute
+                logger.info(
+                    "attempt=<%d> | still waiting for V4 Pro Docker...",
+                    attempt,
+                )
+
+    logger.error("V4 Pro Docker did not become healthy after 30 minutes")
+    return ""
 
 
 # ── Flock backend resolution ─────────────────────────────────────────
@@ -860,6 +1109,21 @@ async def run_swarm_test(
             temperature=config.worker_temperature,
         )
 
+    # Wrap completion functions with tracing before building the swarm
+    worker_fn = traced_complete_fn(
+        worker_fn, "swarm.worker",
+        model_name=worker_model, backend="vllm-local",
+    )
+    queen_fn = traced_complete_fn(
+        queen_fn, "swarm.queen",
+        model_name=queen_model,
+        backend="openrouter" if queen_routing == "openrouter" else "vllm-local",
+    )
+    serendipity_fn = traced_complete_fn(
+        serendipity_fn, "swarm.serendipity",
+        model_name=serendipity_model, backend="vllm-local",
+    )
+
     swarm = GossipSwarm(
         complete=worker_fn,
         worker_complete=worker_fn,
@@ -869,10 +1133,15 @@ async def run_swarm_test(
         worker_complete_map=worker_map,
     )
 
-    # Progress callback
+    # Progress callback — emits OTel events alongside structured logs
     async def on_event(event: dict) -> None:
         phase = event.get("type", "unknown")
         logger.info("swarm_event=<%s> | %s", phase, json.dumps(event, default=str))
+        # Emit OTel event on the current span
+        trace_event(
+            f"swarm.{phase}",
+            {k: str(v) for k, v in event.items()},
+        )
 
     logger.info(
         "corpus_chars=<%d>, workers=<%d>, gossip_rounds=<%d>, angles=<%d> | "
@@ -882,12 +1151,36 @@ async def run_swarm_test(
     )
 
     t0 = time.monotonic()
-    result = await swarm.synthesize(
-        corpus=corpus,
-        query=query,
-        on_event=on_event,
-    )
-    elapsed = time.monotonic() - t0
+
+    # Run the full swarm under a pipeline-level tracing span
+    tracer = __import__("tracing").get_tracer()
+    with tracer.start_as_current_span(
+        "pipeline.swarm_synthesis",
+        attributes={
+            "pipeline.corpus_chars": len(corpus),
+            "pipeline.workers": config.max_workers,
+            "pipeline.gossip_rounds": config.gossip_rounds,
+            "pipeline.angles": len(config.required_angles),
+            "pipeline.queen_routing": queen_routing,
+            "pipeline.worker_model": worker_model,
+            "pipeline.queen_model": queen_model,
+        },
+    ) as pipeline_span:
+        result = await swarm.synthesize(
+            corpus=corpus,
+            query=query,
+            on_event=on_event,
+        )
+        elapsed = time.monotonic() - t0
+
+        # Record pipeline-level metrics on the span
+        pipeline_span.set_attribute("pipeline.elapsed_s", round(elapsed, 1))
+        pipeline_span.set_attribute("pipeline.total_llm_calls", result.metrics.total_llm_calls)
+        pipeline_span.set_attribute("pipeline.total_workers", result.metrics.total_workers)
+        pipeline_span.set_attribute("pipeline.gossip_rounds_executed", result.metrics.gossip_rounds_executed)
+        pipeline_span.set_attribute("pipeline.gossip_converged_early", result.metrics.gossip_converged_early)
+        pipeline_span.set_attribute("pipeline.user_report_chars", len(result.user_report))
+        pipeline_span.set_attribute("pipeline.knowledge_report_chars", len(result.knowledge_report))
 
     # Save results
     output_path = Path(output_dir)
@@ -1410,22 +1703,34 @@ def main() -> None:
     parser.add_argument(
         "--multi-model", action="store_true",
         help=(
-            "Enable multi-model swarm: auto-start vLLM instances packed "
-            "across GPUs, route workers to local + remote OpenRouter models, "
-            "then swap to Qwen3-235B for Flock evaluation"
+            "Enable multi-model swarm: worker bees use DeepSeek V4 Flash "
+            "via API (unlimited concurrency), then swap to DeepSeek V4 Pro "
+            "on 8×H200 via vLLM Docker for Flock evaluation"
         ),
     )
     parser.add_argument(
         "--local-model", default=_KIMI_LINEAR_MODEL,
-        help="Model for local vLLM instances in multi-model mode",
+        help="Model for local vLLM instances (fallback for workers)",
     )
     parser.add_argument(
-        "--flock-model", default=_QWEN3_235B_MODEL,
-        help="Model for Flock evaluation phase (loaded after gossip)",
+        "--flock-model", default=_DEEPSEEK_V4_PRO_MODEL,
+        help="Model for Flock evaluation phase (default: DeepSeek V4 Pro)",
     )
     parser.add_argument(
         "--num-gpus", type=int, default=8,
         help="Number of GPUs available (default: 8 for H200)",
+    )
+    parser.add_argument(
+        "--trace-dir", default="/workspace/traces",
+        help="Directory for OpenTelemetry trace files",
+    )
+    parser.add_argument(
+        "--upload-b2", action="store_true",
+        help="Upload traces and outputs to Backblaze B2 after run completes",
+    )
+    parser.add_argument(
+        "--b2-bucket", default="mirothinker-traces",
+        help="B2 bucket name for trace/output uploads",
     )
 
     args = parser.parse_args()
@@ -1436,6 +1741,16 @@ def main() -> None:
     )
 
     # ══════════════════════════════════════════════════════════════
+    #  PHASE 0: Initialise tracing
+    # ══════════════════════════════════════════════════════════════
+
+    resolved_source_run = args.source_run or f"run_{time.strftime('%Y%m%d_%H%M%S')}"
+    tracer, trace_path = init_tracing(
+        run_id=resolved_source_run,
+        trace_dir=args.trace_dir,
+    )
+
+    # ══════════════════════════════════════════════════════════════
     #  PHASE 1: Probe the environment
     # ══════════════════════════════════════════════════════════════
 
@@ -1443,7 +1758,6 @@ def main() -> None:
     default_model = args.model or _get_model(
         "SWARM_WORKER_MODEL", "huihui-ai/Qwen3.5-32B-abliterated",
     )
-    resolved_source_run = args.source_run or f"run_{time.strftime('%Y%m%d_%H%M%S')}"
 
     # Probe vLLM to discover model context window and capabilities.
     # This drives EVERY downstream sizing decision.
@@ -1843,6 +2157,41 @@ def main() -> None:
                 queen_routing=queen_routing,
                 resolved_model=default_model,
             ))
+
+    # ══════════════════════════════════════════════════════════════
+    #  POST-RUN: Flush traces and upload to B2
+    # ══════════════════════════════════════════════════════════════
+
+    shutdown_tracing()
+
+    if args.upload_b2:
+        logger.info(
+            "run_id=<%s>, bucket=<%s> | uploading traces and outputs to B2",
+            resolved_source_run, args.b2_bucket,
+        )
+        trace_urls = upload_traces_to_b2(
+            trace_dir=args.trace_dir,
+            run_id=resolved_source_run,
+            bucket_name=args.b2_bucket,
+        )
+        output_urls = upload_output_dir_to_b2(
+            output_dir=args.output_dir,
+            run_id=resolved_source_run,
+            bucket_name=args.b2_bucket,
+        )
+        all_urls = trace_urls + output_urls
+        if all_urls:
+            print(f"\n{'═' * 60}")
+            print(f"  B2 UPLOAD COMPLETE")
+            print(f"{'═' * 60}")
+            for url in all_urls:
+                print(f"  {url}")
+            print(f"{'═' * 60}\n")
+    else:
+        logger.info(
+            "trace_dir=<%s> | traces saved locally (use --upload-b2 to push to B2)",
+            args.trace_dir,
+        )
 
 
 if __name__ == "__main__":
