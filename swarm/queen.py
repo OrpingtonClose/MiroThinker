@@ -39,9 +39,24 @@ Key principles:
 from __future__ import annotations
 
 import logging
+import re
+import time
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
+
+# Pattern to strip raw model reasoning tokens that should never appear in output
+_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def _sanitize_output(text: str) -> str:
+    """Strip raw model artifacts from queen output.
+
+    Removes `<think>` reasoning tokens and leading/trailing whitespace.
+    These tags indicate raw model internals leaking into the output.
+    """
+    cleaned = _THINK_TAG_RE.sub("", text)
+    return cleaned.strip()
 
 
 def _build_queen_prompt(
@@ -172,19 +187,62 @@ async def queen_merge(
         serendipity_block=serendipity_block,
     )
 
-    try:
-        result = await complete_fn(prompt)
-        if result and len(result.strip()) > 100:
-            return result
-        logger.warning(
-            "queen merge returned short/empty response (%d chars), falling back to concatenation",
-            len(result.strip()) if result else 0,
-        )
-    except Exception as exc:
-        logger.warning("queen merge LLM call failed: %s, falling back to concatenation", exc)
+    # Attempt queen merge with retry on suspiciously fast completion
+    for attempt in range(2):
+        t0 = time.monotonic()
+        try:
+            result = await complete_fn(prompt)
+            elapsed = time.monotonic() - t0
 
-    # Fallback: concatenate worker summaries
-    parts = []
+            if elapsed < 2.0:
+                logger.error(
+                    "attempt=<%d>, elapsed_s=<%.3f> | queen merge completed suspiciously fast — "
+                    "likely a crash or empty response, retrying",
+                    attempt + 1, elapsed,
+                )
+                if attempt == 0:
+                    continue
+                # Second attempt also fast — fall through to fallback
+
+            if result:
+                result = _sanitize_output(result)
+
+            if result and len(result) > 100:
+                if "<think>" in result.lower():
+                    logger.warning(
+                        "queen output contains residual <think> tags after sanitization"
+                    )
+                logger.info(
+                    "attempt=<%d>, elapsed_s=<%.1f>, output_chars=<%d> | queen merge succeeded",
+                    attempt + 1, elapsed, len(result),
+                )
+                return result
+
+            logger.warning(
+                "attempt=<%d>, output_chars=<%d> | queen merge returned short/empty response",
+                attempt + 1, len(result) if result else 0,
+            )
+            if attempt == 0:
+                continue
+
+        except Exception as exc:
+            logger.error(
+                "attempt=<%d>, error=<%s> | queen merge LLM call failed",
+                attempt + 1, exc,
+            )
+            if attempt == 0:
+                continue
+
+    # Fallback: concatenate worker summaries with warning header
+    logger.error(
+        "queen merge failed after 2 attempts — falling back to concatenated worker summaries"
+    )
+    parts = [
+        "# ⚠️ QUEEN MERGE FAILED — RAW WORKER OUTPUT\n\n"
+        "The queen synthesis failed after 2 attempts. Below are the raw worker "
+        "analyses concatenated without editorial integration. This output lacks "
+        "cross-section stitching and narrative flow.\n\n---\n"
+    ]
     for angle, summary in worker_summaries.items():
         parts.append(f"## {angle}\n{summary}")
     if serendipity_insights:
@@ -300,10 +358,12 @@ async def build_knowledge_report(
     )
     try:
         exec_summary = await complete_fn(prompt)
-        if not exec_summary or len(exec_summary.strip()) < 50:
+        if exec_summary:
+            exec_summary = _sanitize_output(exec_summary)
+        if not exec_summary or len(exec_summary) < 50:
             logger.warning(
                 "knowledge report exec summary returned short/empty response (%d chars), using fallback",
-                len(exec_summary.strip()) if exec_summary else 0,
+                len(exec_summary) if exec_summary else 0,
             )
             exec_summary = fallback_summary
     except Exception as exc:

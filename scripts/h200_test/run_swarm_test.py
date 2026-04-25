@@ -365,11 +365,24 @@ async def run_swarm_test(
         max_tokens=config.worker_max_tokens,
         temperature=config.worker_temperature,
     )
-    queen_fn = make_complete_fn(
-        queen_model, api_base,
-        max_tokens=config.queen_max_tokens,
-        temperature=config.queen_temperature,
-    )
+    # Route queen to OpenRouter if model looks like an OpenRouter identifier
+    # (contains '/'), otherwise use local vLLM.
+    if "/" in queen_model and queen_model != worker_model:
+        queen_fn = make_openrouter_complete_fn(
+            queen_model,
+            max_tokens=config.queen_max_tokens,
+            temperature=config.queen_temperature,
+        )
+        logger.info(
+            "queen_model=<%s> | queen routed to OpenRouter",
+            queen_model,
+        )
+    else:
+        queen_fn = make_complete_fn(
+            queen_model, api_base,
+            max_tokens=config.queen_max_tokens,
+            temperature=config.queen_temperature,
+        )
     serendipity_fn = make_complete_fn(
         serendipity_model, api_base,
         max_tokens=config.worker_max_tokens,
@@ -488,7 +501,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--corpus", default="",
-        help="Path to corpus text file",
+        help="Path to corpus text file (auto-discovers mega_corpus.txt or youtube_corpus if empty)",
     )
     parser.add_argument(
         "--db", default="",
@@ -496,7 +509,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--enrich", action="store_true",
-        help="Run enrichment pipeline before swarm",
+        help="Run enrichment pipeline before swarm (auto-enabled when angles have enrichment_queries)",
+    )
+    parser.add_argument(
+        "--skip-enrich", action="store_true",
+        help="Skip auto-enrichment even when angles have enrichment_queries",
+    )
+    parser.add_argument(
+        "--min-corpus-chars", type=int, default=500000,
+        help="Minimum corpus size in chars — warns if below this (default: 500000)",
     )
     parser.add_argument(
         "--output-dir", default="swarm_results",
@@ -615,9 +636,26 @@ def main() -> None:
     if args.gossip_rounds > 0:
         config.gossip_rounds = args.gossip_rounds
 
-    # Load corpus
+    # ── Corpus loading with auto-discovery and validation ──────────
     corpus = ""
     store = None
+
+    # Auto-discover corpus if --corpus not provided
+    corpus_path = args.corpus
+    if not corpus_path:
+        _candidates = [
+            Path(__file__).resolve().parent / "mega_corpus.txt",
+            Path.home() / "data" / "youtube_corpus_combined.txt",
+            Path.home() / "repos" / "MiroThinker" / "scripts" / "h200_test" / "mega_corpus.txt",
+        ]
+        for candidate in _candidates:
+            if candidate.exists():
+                corpus_path = str(candidate)
+                logger.info(
+                    "corpus_path=<%s> | auto-discovered corpus file",
+                    corpus_path,
+                )
+                break
 
     if args.enrich or args.db:
         db_path = args.db or "enriched_corpus.duckdb"
@@ -626,22 +664,79 @@ def main() -> None:
         if args.enrich:
             from enrich_corpus import enrich_all
             logger.info("running enrichment pipeline...")
-            enrich_all(store, max_per_query=10)
+            enrich_all(store, max_per_query=10, extract_full_text=True)
 
         corpus = load_corpus_from_store(store)
         logger.info("corpus_chars=<%d> | loaded from store", len(corpus))
 
-    if args.corpus:
-        file_corpus = load_corpus_from_file(args.corpus)
+    if corpus_path:
+        file_corpus = load_corpus_from_file(corpus_path)
         if corpus:
             corpus = f"{corpus}\n\n{file_corpus}"
         else:
             corpus = file_corpus
-        logger.info("corpus_chars=<%d> | loaded from file", len(corpus))
+        logger.info("corpus_chars=<%d> | loaded from file %s", len(corpus), corpus_path)
+
+    # Auto-enrichment: if angles have enrichment_queries and user didn't
+    # explicitly pass --enrich or --skip-enrich, auto-enrich
+    if not args.enrich and not args.skip_enrich and not args.db:
+        try:
+            from angles import ALL_ANGLES
+            total_eq = sum(len(a.enrichment_queries) for a in ALL_ANGLES)
+            if total_eq > 0:
+                logger.info(
+                    "enrichment_queries=<%d> | auto-enriching (use --skip-enrich to disable)",
+                    total_eq,
+                )
+                from enrich_corpus import enrich_all
+                if store is None:
+                    store = ConditionStore(db_path="enriched_corpus.duckdb")
+                enrich_all(store, max_per_query=10, extract_full_text=True)
+                enriched = load_corpus_from_store(store)
+                if enriched:
+                    corpus = f"{corpus}\n\n{enriched}" if corpus else enriched
+                    logger.info(
+                        "enriched_chars=<%d>, total_corpus=<%d> | auto-enrichment complete",
+                        len(enriched), len(corpus),
+                    )
+        except ImportError:
+            logger.debug("angles module not available for auto-enrichment check")
 
     if not corpus:
         logger.error("no corpus provided — use --corpus, --db, or --enrich")
         sys.exit(1)
+
+    # Corpus size validation
+    if len(corpus) < 50000:
+        logger.error(
+            "corpus_chars=<%d> | corpus dangerously small (<50K chars) — "
+            "model WILL hallucinate. provide a larger corpus",
+            len(corpus),
+        )
+        sys.exit(1)
+    elif len(corpus) < args.min_corpus_chars:
+        logger.warning(
+            "corpus_chars=<%d>, min_corpus_chars=<%d> | corpus below recommended minimum — "
+            "output quality may be poor. use --min-corpus-chars to adjust threshold",
+            len(corpus), args.min_corpus_chars,
+        )
+
+    logger.info(
+        "corpus_chars=<%d>, sections_est=<%d> | corpus loaded and validated",
+        len(corpus),
+        len(corpus) // config.max_section_chars + 1,
+    )
+
+    # Wire corpus_delta_fn for external research during gossip rounds
+    if store is not None:
+        async def _corpus_delta() -> str:
+            """Fetch new findings added to the store since last check."""
+            new_findings = store.get_findings(limit=500)
+            if not new_findings:
+                return ""
+            return load_corpus_from_store(store)
+
+        config.corpus_delta_fn = _corpus_delta
 
     query = args.query or get_swarm_query()
 
