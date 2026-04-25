@@ -710,18 +710,22 @@ def main() -> None:
             len(corpus), corpus_path,
         )
 
-    # Step 3: Auto-enrich when angles define enrichment queries
+    # Step 3: Auto-enrich when angles define enrichment queries.
+    # Use export_delta to capture only NEW findings from enrichment —
+    # avoids duplicating pre-existing DB findings already in corpus.
     enrichment_count = _should_enrich()
     if enrichment_count > 0:
+        from datetime import datetime, timezone
         from enrich_corpus import enrich_all
         if store is None:
             store = ConditionStore(db_path="enriched_corpus.duckdb")
+        pre_enrich_ts = datetime.now(timezone.utc).isoformat()
         enrich_all(store, max_per_query=10, extract_full_text=True)
-        enriched = load_corpus_from_store(store)
+        enriched = store.export_delta(since=pre_enrich_ts)
         if enriched:
             corpus = f"{corpus}\n\n{enriched}" if corpus else enriched
             logger.info(
-                "enriched_chars=<%d>, total_corpus=<%d> | enrichment complete",
+                "enriched_chars=<%d>, total_corpus=<%d> | enrichment complete (delta only)",
                 len(enriched), len(corpus),
             )
 
