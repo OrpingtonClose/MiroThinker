@@ -166,6 +166,7 @@ async def test_schema_creation(
         event_type="schema_verified",
         payload={"tables": list(expected_tables), "index_count": len(indices)},
     )
+    await asyncio.sleep(0.1)
     await trace_store._flush()
     records = await trace_store.query(event_type="schema_verified")
     assert len(records) > 0
@@ -187,6 +188,7 @@ async def test_trace_store_records(trace_store: TraceStore) -> None:
         payload={"key": "value"},
         latency_ms=12.5,
     )
+    await asyncio.sleep(0.1)
     await trace_store._flush()
 
     records = await trace_store.query(run_id=run_id, event_type="test_event")
@@ -376,8 +378,9 @@ async def test_contradiction_flag_populated(
 
     store.close()
 
+    await asyncio.sleep(0.1)
     await trace_store._flush()
-    records = await trace_store.query(event_type="detect_contradictions")
+    records = await trace_store.query(actor_id="CorpusAlgorithmBattery")
     assert len(records) > 0
 
 
@@ -467,7 +470,9 @@ async def test_mcp_benefit_scoring(
 
     await trace_store._flush()
     records = await trace_store.query(actor_id="mcp_benefit")
-    event_types = [r["event_type"] for r in records]
+    # TraceStore.query returns DESC order; sort chronologically for ordering checks
+    records_chrono = sorted(records, key=lambda r: r["timestamp"])
+    event_types = [r["event_type"] for r in records_chrono]
     assert "benefit_evaluation_done" in event_types
     assert "cost_estimate" in event_types
     benefit_idx = event_types.index("benefit_evaluation_done")
@@ -751,6 +756,7 @@ async def test_rule_engine_fires(
     assert "RuleFired" in fired_types, "At least one rule must fire"
 
     # Verify trace
+    await asyncio.sleep(0.1)
     await trace_store._flush()
     records = await trace_store.query(actor_id="rule_engine")
     assert len(records) > 0

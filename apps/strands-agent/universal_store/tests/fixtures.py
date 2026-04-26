@@ -124,65 +124,53 @@ class MinimalDuckDBStore:
 
     # -- Actor-facing API ----------------------------------------------------
 
-    def admit(
-        self,
-        fact: str,
-        source_url: str = "",
-        source_type: str = "researcher",
-        source_ref: str = "",
-        row_type: str = "finding",
-        angle: str = "",
-        parent_id: int | None = None,
-        related_id: int | None = None,
-        confidence: float = 0.5,
-        verification_status: str = "",
-        strategy: str = "",
-        expansion_depth: int = 0,
-        iteration: int = 0,
-        consider_for_use: bool = True,
-        source_model: str = "",
-        source_run: str = "",
-        phase: str = "",
-    ) -> int | None:
-        """Insert a single condition row and return its id."""
+    def admit(self, fact: str, **kwargs: Any) -> int | None:
+        """Insert a single condition row and return its id.
+
+        Accepts the full surface area of ``ConditionStore.admit`` plus any
+        extra keyword arguments that correspond to columns on the
+        ``conditions`` table (e.g. ``novelty_score``, ``cluster_id``).
+        """
         fact = fact.strip()
         if not fact:
             return None
         cid = self._next_id
         self._next_id += 1
         now = datetime.now(timezone.utc).isoformat()
+
+        row: dict[str, Any] = {
+            "id": cid,
+            "fact": fact,
+            "source_url": kwargs.get("source_url", ""),
+            "source_type": kwargs.get("source_type", "researcher"),
+            "source_ref": kwargs.get("source_ref", ""),
+            "row_type": kwargs.get("row_type", "finding"),
+            "related_id": kwargs.get("related_id"),
+            "consider_for_use": kwargs.get("consider_for_use", True),
+            "confidence": kwargs.get("confidence", 0.5),
+            "verification_status": kwargs.get("verification_status", ""),
+            "angle": kwargs.get("angle", ""),
+            "parent_id": kwargs.get("parent_id"),
+            "strategy": kwargs.get("strategy", ""),
+            "expansion_depth": kwargs.get("expansion_depth", 0),
+            "created_at": kwargs.get("created_at", now),
+            "iteration": kwargs.get("iteration", 0),
+            "source_model": kwargs.get("source_model", ""),
+            "source_run": kwargs.get("source_run", ""),
+            "phase": kwargs.get("phase", ""),
+        }
+
+        # Merge any extra columns that callers provide (e.g. novelty_score, cluster_id)
+        for k, v in kwargs.items():
+            if k not in row:
+                row[k] = v
+
+        cols = list(row.keys())
+        placeholders = ", ".join(["?"] * len(cols))
+        values = list(row.values())
         self.conn.execute(
-            """
-            INSERT INTO conditions
-            (id, fact, source_url, source_type, source_ref,
-             row_type, related_id, consider_for_use,
-             confidence, verification_status, angle,
-             parent_id, strategy,
-             expansion_depth, created_at, iteration,
-             source_model, source_run, phase)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                cid,
-                fact,
-                source_url,
-                source_type,
-                source_ref,
-                row_type,
-                related_id,
-                consider_for_use,
-                confidence,
-                verification_status,
-                angle,
-                parent_id,
-                strategy,
-                expansion_depth,
-                now,
-                iteration,
-                source_model,
-                source_run,
-                phase,
-            ],
+            f"INSERT INTO conditions ({', '.join(cols)}) VALUES ({placeholders})",
+            values,
         )
         return cid
 
@@ -428,6 +416,20 @@ async def reset_trace_store() -> None:
 # ---------------------------------------------------------------------------
 # Mock actor for scheduler / routing tests
 # ---------------------------------------------------------------------------
+
+# Patch LessonStore so that its ``lessons`` table auto-increments ``id``
+# (DuckDB does not do this by default for INTEGER PRIMARY KEY).
+from universal_store.actors.reflexion import LessonStore
+
+_original_lesson_ensure_conn = LessonStore._ensure_conn
+
+async def _patched_lesson_ensure_conn(self: LessonStore) -> Any:
+    conn = await _original_lesson_ensure_conn(self)
+    _fix_autoincrement(conn, "lessons")
+    return conn
+
+LessonStore._ensure_conn = _patched_lesson_ensure_conn  # type: ignore[method-assign]
+
 
 class MockActor:
     """Minimal stand-in actor that records every event it receives."""
