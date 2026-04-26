@@ -56,7 +56,18 @@ class MinimalDuckDBStore:
         self._create_base_conditions()
         self._run_migrations()
         # DuckDB does not auto-increment INTEGER PRIMARY KEY by default
-        _fix_autoincrement(self.conn, "lessons")
+        for table in (
+            "score_history",
+            "lessons",
+            "lesson_applications",
+            "semantic_connections",
+            "source_fingerprints",
+            "chunks",
+            "source_utility_log",
+            "source_quality_registry",
+            "trace_records",
+        ):
+            _fix_autoincrement(self.conn, table)
         self.conn.commit()
 
     def _create_base_conditions(self) -> None:

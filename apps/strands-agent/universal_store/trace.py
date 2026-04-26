@@ -92,6 +92,13 @@ class TraceStore:
                     await self._flush()
 
     async def _flush(self) -> None:
+        # Drain the queue so records enqueued after the last flush_loop
+        # iteration are captured when _flush() is called explicitly.
+        while not self._queue.empty():
+            try:
+                self._buffer.append(self._queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
         if not self._buffer:
             return
         batch = self._buffer[:]
