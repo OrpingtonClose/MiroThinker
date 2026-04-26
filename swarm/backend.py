@@ -495,7 +495,10 @@ class RiskAwareBackend:
         # The backoff sleep is OUTSIDE the semaphore so that slots
         # are freed for other callers during the wait.
         last_error: Exception | None = None
-        for attempt in range(1, self.config.max_retries + 1):
+        # max_retries means retries AFTER the initial attempt, so
+        # total attempts = 1 (initial) + max_retries.
+        max_attempts = 1 + self.config.max_retries
+        for attempt in range(1, max_attempts + 1):
             need_retry = False
             async with self._semaphore:
                 try:
@@ -520,7 +523,10 @@ class RiskAwareBackend:
 
                 except Exception as exc:
                     last_error = exc
-                    self.metrics.retries += 1
+                    # Only count as a retry metric if this is not
+                    # the initial attempt
+                    if attempt > 1:
+                        self.metrics.retries += 1
                     self._consecutive_failures += 1
 
                     # Check if we should open the circuit breaker
@@ -535,7 +541,7 @@ class RiskAwareBackend:
                             cooldown,
                         )
 
-                    if attempt < self.config.max_retries:
+                    if attempt < max_attempts:
                         need_retry = True
 
             # Backoff sleep after releasing the semaphore so other
@@ -546,7 +552,7 @@ class RiskAwareBackend:
                     "backend=<%s>, attempt=<%d/%d>, error=<%s>, "
                     "retry_delay_s=<%.1f> | retrying",
                     self.config.name, attempt,
-                    self.config.max_retries, last_error, delay,
+                    max_attempts, last_error, delay,
                 )
                 await asyncio.sleep(delay)
 
