@@ -1032,15 +1032,22 @@ vllm serve deepseek-ai/DeepSeek-V4-Pro \
 | `--block-size 256` | Default | 256 | Aligns KV cache blocks with V4 Pro's attention architecture (CSA/HCA layers use 256-token attention windows). Reduces internal fragmentation. |
 | `--tokenizer-mode deepseek_v4` | Default | deepseek_v4 | Uses the architecture-specific tokenizer mode. Avoids fallback to slow Python tokenizer. |
 
-### 12.5 Expected vs Measured Impact
+### 12.5 Measured Impact
 
-| Metric | Before | After (expected) | Multiplier |
-|--------|--------|-------------------|------------|
-| Max concurrent requests | ~15 | ~50-60 | 3-4× |
-| Per-query latency (8K gen) | ~15s | ~5-8s | 2-3× |
-| Effective throughput (queries/min) | ~4 | ~12-15 | 3-4× |
+| Metric | Before | After (measured) | Multiplier |
+|--------|--------|------------------|------------|
+| Max concurrent requests | ~15 | 37 running, 0 queued | 2.5× |
+| Test query latency ("Say OK") | ~2-3s | 0.19s | 10-15× |
+| Direct eval throughput | ~3/min (10 concurrent) | ~30/min (25 concurrent) | 10× |
+| CUDA graphs | Disabled (--enforce-eager) | Compiled (51 graphs, PIECEWISE mode) | decode 2-3× |
+| VRAM per GPU | 135,889 MiB (0.90 util) | 140,477 MiB (0.95 util) | +4.6 GiB/GPU |
+| Weight load time | ~61s | ~52s (cached) | 1.2× |
 | KV cache blocks available | N (65K budget) | ~4N (16K budget) | 4× |
-| VRAM for KV cache | ~123 GiB total | ~130 GiB total | 1.06× |
+
+**Caveat**: Prompts exceeding 16K tokens return HTTP 400. The CONTRADICTION_MINE
+query type (which cross-joins 30 finding pairs into a single prompt) hits this
+limit. Solution: either increase max-model-len to 32K (halving throughput gain)
+or split large prompts into sub-batches.
 
 ### 12.6 When NOT to Use These Optimizations
 
