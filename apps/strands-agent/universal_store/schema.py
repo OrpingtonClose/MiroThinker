@@ -99,8 +99,9 @@ UPDATE conditions SET trust_score = 0.5 WHERE trust_score IS NULL;
 # ---------------------------------------------------------------------------
 
 RUNS_TABLE = """
+CREATE SEQUENCE IF NOT EXISTS runs_run_number_seq START 1;
 CREATE TABLE IF NOT EXISTS runs (
-    run_number INTEGER PRIMARY KEY,
+    run_number INTEGER PRIMARY KEY DEFAULT nextval('runs_run_number_seq'),
     run_id TEXT UNIQUE NOT NULL,
     started_at TEXT,
     ended_at TEXT,
@@ -395,9 +396,30 @@ def _supports_index_include() -> bool:
         return False
 
 
+# Tables whose ``id`` column needs a sequence for auto-increment.
+# ``runs`` uses ``run_number`` and is handled directly in RUNS_TABLE DDL.
+_AUTOINCREMENT_TABLES = [
+    "score_history",
+    "lessons",
+    "lesson_applications",
+    "semantic_connections",
+    "source_fingerprints",
+    "chunks",
+    "source_utility_log",
+    "source_quality_registry",
+    "trace_records",
+]
+
+_AUTOINCREMENT_DDL = "\n".join(
+    f"CREATE SEQUENCE IF NOT EXISTS {t}_id_seq START 1;\n"
+    f"ALTER TABLE {t} ALTER COLUMN id SET DEFAULT nextval('{t}_id_seq');"
+    for t in _AUTOINCREMENT_TABLES
+)
+
+
 def get_all_ddl() -> str:
     import re
-    ddl = "\n".join(ALL_DDL)
+    ddl = "\n".join(ALL_DDL) + "\n" + _AUTOINCREMENT_DDL
     if not _supports_index_include():
         # Strip INCLUDE (...) clauses from index definitions for older DuckDB builds
         ddl = re.sub(r"\)\s*INCLUDE\s*\([^)]*\)", ")", ddl)
