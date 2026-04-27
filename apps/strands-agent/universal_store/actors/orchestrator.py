@@ -69,9 +69,6 @@ class OrchestratorActor(RootSupervisor):
             "flock_adapter",
             lambda: FlockAdapterActor(config=self.config)
         )
-        # Keep bootstrap actor to drive remaining state machine transitions
-        from universal_store.actors.bootstrap import BootstrapActor
-        self.register_child("bootstrap", lambda: BootstrapActor())
 
     # ------------------------------------------------------------------
     # Internal helpers
