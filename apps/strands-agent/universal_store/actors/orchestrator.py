@@ -63,6 +63,12 @@ class OrchestratorActor(RootSupervisor):
             "swarm_adapter",
             lambda: SwarmAdapterActor(store=None, config=self.config)
         )
+        # Register flock adapter (runs real FlockSupervisor)
+        from universal_store.actors.flock_adapter import FlockAdapterActor
+        self.register_child(
+            "flock_adapter",
+            lambda: FlockAdapterActor(config=self.config)
+        )
         # Keep bootstrap actor to drive remaining state machine transitions
         from universal_store.actors.bootstrap import BootstrapActor
         self.register_child("bootstrap", lambda: BootstrapActor())
@@ -325,6 +331,11 @@ class OrchestratorActor(RootSupervisor):
             message=f"Swarm complete; {len(findings)} findings, {len(gaps)} gaps",
             data={"findings_count": len(findings), "gaps": gaps},
         )
+        flock_child = self._children.get("flock_adapter")
+        if flock_child is not None:
+            await flock_child.send(
+                Event("flock_start", {"findings": findings, "gaps": gaps})
+            )
         await self.broadcast_to_children(
             Event("flock_start", {"findings": findings, "gaps": gaps})
         )
