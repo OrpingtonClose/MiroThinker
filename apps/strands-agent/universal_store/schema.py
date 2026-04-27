@@ -115,8 +115,9 @@ CREATE TABLE IF NOT EXISTS runs (
 """
 
 SCORE_HISTORY_TABLE = """
+CREATE SEQUENCE IF NOT EXISTS score_history_id_seq START 1;
 CREATE TABLE IF NOT EXISTS score_history (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY DEFAULT nextval('score_history_id_seq'),
     condition_id INTEGER NOT NULL,
     run_number INTEGER,
     evaluator_angle TEXT DEFAULT '',
@@ -133,8 +134,9 @@ CREATE TABLE IF NOT EXISTS score_history (
 """
 
 LESSONS_TABLE = """
+CREATE SEQUENCE IF NOT EXISTS lessons_id_seq START 1;
 CREATE TABLE IF NOT EXISTS lessons (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY DEFAULT nextval('lessons_id_seq'),
     lesson_type TEXT NOT NULL,
     fact TEXT NOT NULL,
     run_id TEXT NOT NULL,
@@ -152,8 +154,9 @@ CREATE TABLE IF NOT EXISTS lessons (
 """
 
 LESSON_APPLICATIONS_TABLE = """
+CREATE SEQUENCE IF NOT EXISTS lesson_applications_id_seq START 1;
 CREATE TABLE IF NOT EXISTS lesson_applications (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY DEFAULT nextval('lesson_applications_id_seq'),
     lesson_id INTEGER NOT NULL,
     target_run_id TEXT NOT NULL,
     target_actor TEXT DEFAULT '',
@@ -163,8 +166,9 @@ CREATE TABLE IF NOT EXISTS lesson_applications (
 """
 
 SEMANTIC_CONNECTIONS_TABLE = """
+CREATE SEQUENCE IF NOT EXISTS semantic_connections_id_seq START 1;
 CREATE TABLE IF NOT EXISTS semantic_connections (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY DEFAULT nextval('semantic_connections_id_seq'),
     source_condition_id INTEGER NOT NULL,
     target_condition_id INTEGER NOT NULL,
     connection_type TEXT NOT NULL,
@@ -182,8 +186,9 @@ CREATE TABLE IF NOT EXISTS semantic_connections (
 """
 
 SOURCE_FINGERPRINTS_TABLE = """
+CREATE SEQUENCE IF NOT EXISTS source_fingerprints_id_seq START 1;
 CREATE TABLE IF NOT EXISTS source_fingerprints (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY DEFAULT nextval('source_fingerprints_id_seq'),
     source_url TEXT NOT NULL,
     source_type TEXT NOT NULL,
     byte_sha256 TEXT,
@@ -203,8 +208,9 @@ CREATE TABLE IF NOT EXISTS source_fingerprints (
 """
 
 CHUNKS_TABLE = """
+CREATE SEQUENCE IF NOT EXISTS chunks_id_seq START 1;
 CREATE TABLE IF NOT EXISTS chunks (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY DEFAULT nextval('chunks_id_seq'),
     source_fingerprint_id INTEGER NOT NULL,
     parent_condition_id INTEGER,
     chunk_index INTEGER NOT NULL,
@@ -221,8 +227,9 @@ CREATE TABLE IF NOT EXISTS chunks (
 """
 
 SOURCE_UTILITY_LOG_TABLE = """
+CREATE SEQUENCE IF NOT EXISTS source_utility_log_id_seq START 1;
 CREATE TABLE IF NOT EXISTS source_utility_log (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY DEFAULT nextval('source_utility_log_id_seq'),
     source_fingerprint_id INTEGER NOT NULL,
     query_embedding FLOAT[768],
     query_text TEXT,
@@ -241,8 +248,9 @@ CREATE TABLE IF NOT EXISTS source_utility_log (
 """
 
 SOURCE_QUALITY_REGISTRY_TABLE = """
+CREATE SEQUENCE IF NOT EXISTS source_quality_registry_id_seq START 1;
 CREATE TABLE IF NOT EXISTS source_quality_registry (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY DEFAULT nextval('source_quality_registry_id_seq'),
     domain TEXT NOT NULL,
     source_type TEXT NOT NULL,
     authority_score FLOAT DEFAULT 0.5,
@@ -279,8 +287,9 @@ CREATE TABLE IF NOT EXISTS condition_embeddings (
 """
 
 TRACE_TABLE = """
+CREATE SEQUENCE IF NOT EXISTS trace_records_id_seq START 1;
 CREATE TABLE IF NOT EXISTS trace_records (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY DEFAULT nextval('trace_records_id_seq'),
     trace_id TEXT NOT NULL,
     run_id TEXT NOT NULL,
     actor_id TEXT NOT NULL,
