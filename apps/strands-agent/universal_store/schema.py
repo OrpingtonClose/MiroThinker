@@ -410,11 +410,11 @@ _AUTOINCREMENT_TABLES = [
     "trace_records",
 ]
 
-_AUTOINCREMENT_DDL = "\n".join(
-    f"CREATE SEQUENCE IF NOT EXISTS {t}_id_seq START 1;\n"
-    f"ALTER TABLE {t} ALTER COLUMN id SET DEFAULT nextval('{t}_id_seq');"
-    for t in _AUTOINCREMENT_TABLES
-)
+# NOTE: Disabled auto-increment sequences. DuckDB 1.5.x WAL replay fails
+# when ALTER TABLE ... SET DEFAULT nextval(...) is used, causing
+# "Failure while replaying WAL file" on reconnect after crash.
+# All inserts now provide explicit id values.
+_AUTOINCREMENT_DDL = ""
 
 
 def get_all_ddl() -> str:
