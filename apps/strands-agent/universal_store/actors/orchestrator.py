@@ -51,6 +51,8 @@ class OrchestratorActor(RootSupervisor):
         self._previous_phase: OrchestratorPhase = OrchestratorPhase.IDLE
         self._pending_gaps: list[str] = []
         self._paused_children: list[str] = []
+        self._swarm_flock_loops: int = 0
+        self._max_swarm_flock_loops: int = 3
         # Register source ingestion child (real actor with placeholder APIs)
         from universal_store.actors.sources import SourceIngestionActor
         self.register_child(
@@ -290,10 +292,19 @@ class OrchestratorActor(RootSupervisor):
         if directions:
             mcp_child = self._children.get("mcp_researcher")
             if mcp_child is None:
+                self._swarm_flock_loops += 1
+                if self._swarm_flock_loops >= self._max_swarm_flock_loops:
+                    await self._transition_to(
+                        OrchestratorPhase.CONVERGED,
+                        message=f"Flock complete; max loops reached without MCP researcher — converging",
+                        data={"directions": directions, "loops": self._swarm_flock_loops},
+                    )
+                    asyncio.create_task(self.stop(graceful=True))
+                    return
                 # No MCP researcher wired up — skip external fetch and loop back
                 await self._transition_to(
                     OrchestratorPhase.SWARMING,
-                    message=f"Flock complete; {len(directions)} directions but no MCP researcher; looping back",
+                    message=f"Flock complete; {len(directions)} directions but no MCP researcher; looping back ({self._swarm_flock_loops}/{self._max_swarm_flock_loops})",
                     data={
                         "directions": directions,
                         "convergence_reason": convergence_reason,
