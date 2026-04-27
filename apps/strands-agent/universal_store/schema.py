@@ -323,5 +323,23 @@ ALL_DDL = [
 ]
 
 
+def _supports_index_include() -> bool:
+    """Return True if the running DuckDB build supports INCLUDE in CREATE INDEX."""
+    import duckdb as _duckdb
+    try:
+        conn = _duckdb.connect()
+        conn.execute("CREATE TABLE _inc_probe (a INT, b INT)")
+        conn.execute("CREATE INDEX _inc_probe_idx ON _inc_probe (a) INCLUDE (b)")
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
 def get_all_ddl() -> str:
-    return "\n".join(ALL_DDL)
+    import re
+    ddl = "\n".join(ALL_DDL)
+    if not _supports_index_include():
+        # Strip INCLUDE (...) clauses from index definitions for older DuckDB builds
+        ddl = re.sub(r"\)\s*INCLUDE\s*\([^)]*\)", ")", ddl)
+    return ddl
