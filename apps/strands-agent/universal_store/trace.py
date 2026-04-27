@@ -68,18 +68,19 @@ class TraceStore:
         self._conn = duckdb.connect(self.db_path)
         from .schema import TRACE_TABLE
         self._conn.execute(TRACE_TABLE)
-        # Add sequence-backed auto-increment for id (DuckDB doesn't auto-increment
-        # INTEGER PRIMARY KEY without an explicit sequence).
-        self._conn.execute(
-            "CREATE SEQUENCE IF NOT EXISTS trace_records_id_seq START 1"
-        )
-        try:
-            self._conn.execute(
-                "ALTER TABLE trace_records ALTER COLUMN id"
-                " SET DEFAULT nextval('trace_records_id_seq')"
-            )
-        except Exception:
-            pass  # already set, or unsupported — inserts will provide id explicitly
+        # NOTE: Disabled sequence-backed auto-increment. DuckDB 1.5.x WAL replay
+        # fails when ALTER TABLE ... SET DEFAULT nextval(...) is used.
+        # Inserts must provide id explicitly (handled by the INSERT in _flush).
+        # self._conn.execute(
+        #     "CREATE SEQUENCE IF NOT EXISTS trace_records_id_seq START 1"
+        # )
+        # try:
+        #     self._conn.execute(
+        #         "ALTER TABLE trace_records ALTER COLUMN id"
+        #         " SET DEFAULT nextval('trace_records_id_seq')"
+        #     )
+        # except Exception:
+        #     pass
         self._conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_trace_run ON trace_records(run_id, timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_trace_actor ON trace_records(actor_id, timestamp DESC);
