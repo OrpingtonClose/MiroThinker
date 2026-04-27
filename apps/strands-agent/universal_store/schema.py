@@ -5,8 +5,66 @@ The append-only contract is preserved across all tables.
 """
 
 # ---------------------------------------------------------------------------
-# Core: conditions (extended from existing ConditionStore)
+# Core: conditions (base table + extensions)
 # ---------------------------------------------------------------------------
+
+# Base table — created here so universal_store can boot without a pre-existing
+# ConditionStore database.  All columns use IF NOT EXISTS / DEFAULT so this is
+# safe to run against an already-populated database too.
+CONDITIONS_BASE_TABLE = """
+CREATE TABLE IF NOT EXISTS conditions (
+    id INTEGER PRIMARY KEY,
+    fact TEXT NOT NULL,
+    source_url TEXT DEFAULT '',
+    source_type TEXT DEFAULT '',
+    source_ref TEXT DEFAULT '',
+    row_type TEXT DEFAULT 'finding',
+    parent_id INTEGER,
+    related_id INTEGER,
+    consider_for_use BOOLEAN DEFAULT TRUE,
+    obsolete_reason TEXT DEFAULT '',
+    angle TEXT DEFAULT '',
+    strategy TEXT DEFAULT '',
+    expansion_depth INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT '',
+    iteration INTEGER DEFAULT 0,
+    confidence FLOAT DEFAULT 0.5,
+    trust_score FLOAT DEFAULT 0.5,
+    novelty_score FLOAT DEFAULT 0.5,
+    specificity_score FLOAT DEFAULT 0.5,
+    relevance_score FLOAT DEFAULT 0.5,
+    actionability_score FLOAT DEFAULT 0.5,
+    duplication_score FLOAT DEFAULT -1.0,
+    fabrication_risk FLOAT DEFAULT 0.0,
+    verification_status TEXT DEFAULT '',
+    scored_at TEXT DEFAULT '',
+    score_version INTEGER DEFAULT 0,
+    composite_quality FLOAT DEFAULT -1.0,
+    information_density FLOAT DEFAULT -1.0,
+    cross_ref_boost FLOAT DEFAULT 0.0,
+    processing_status TEXT DEFAULT 'raw',
+    expansion_tool TEXT DEFAULT 'none',
+    expansion_hint TEXT DEFAULT '',
+    expansion_fulfilled BOOLEAN DEFAULT FALSE,
+    expansion_gap TEXT DEFAULT '',
+    expansion_priority FLOAT DEFAULT 0.0,
+    cluster_id INTEGER DEFAULT -1,
+    cluster_rank INTEGER DEFAULT 0,
+    contradiction_flag BOOLEAN DEFAULT FALSE,
+    contradiction_partner INTEGER DEFAULT -1,
+    staleness_penalty FLOAT DEFAULT 0.0,
+    relationship_score FLOAT DEFAULT 0.0,
+    phase TEXT DEFAULT '',
+    parent_ids TEXT DEFAULT '',
+    source_model TEXT DEFAULT '',
+    source_run TEXT DEFAULT '',
+    evaluation_count INTEGER DEFAULT 0,
+    last_evaluated_at TEXT DEFAULT '',
+    evaluator_angles TEXT DEFAULT '',
+    mcp_research_status TEXT DEFAULT '',
+    information_gain FLOAT DEFAULT 0.0
+);
+"""
 
 CONDITIONS_EXTENDED_COLUMNS = """
 ALTER TABLE conditions ADD COLUMN IF NOT EXISTS run_number INTEGER DEFAULT 0;
@@ -305,6 +363,7 @@ CREATE INDEX IF NOT EXISTS idx_condition_embeddings ON condition_embeddings USIN
 # ---------------------------------------------------------------------------
 
 ALL_DDL = [
+    CONDITIONS_BASE_TABLE,
     CONDITIONS_EXTENDED_COLUMNS,
     RUNS_TABLE,
     SCORE_HISTORY_TABLE,
