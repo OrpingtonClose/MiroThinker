@@ -221,6 +221,8 @@ class OrchestratorActor(RootSupervisor):
                 message=f"Converged at layer {layer} with score {score}",
                 data={"layer": layer, "score": score},
             )
+            # Graceful shutdown after convergence so the event stream terminates
+            await self.stop(graceful=True)
 
     async def _on_store_delta(self, event: Event) -> None:
         row_types = event.payload.get("row_types", [])
@@ -418,8 +420,13 @@ class OrchestratorActor(RootSupervisor):
     async def events(self) -> AsyncIterator[OrchestratorEvent]:
         """Async iterator yielding :class:`OrchestratorEvent` for UI consumption."""
         while True:
-            event = await self.output_queue.get()
-            yield event
+            if self._shutdown and self.output_queue.empty():
+                return
+            try:
+                event = await asyncio.wait_for(self.output_queue.get(), timeout=0.5)
+                yield event
+            except asyncio.TimeoutError:
+                continue
 
     def run(self, query: str) -> asyncio.Queue[OrchestratorEvent]:
         """Set up the tree, start children, and begin the orchestrator loop.
