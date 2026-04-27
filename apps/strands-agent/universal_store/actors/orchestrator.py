@@ -51,7 +51,13 @@ class OrchestratorActor(RootSupervisor):
         self._previous_phase: OrchestratorPhase = OrchestratorPhase.IDLE
         self._pending_gaps: list[str] = []
         self._paused_children: list[str] = []
-        # Register bootstrap child so the pipeline can complete end-to-end
+        # Register source ingestion child (real actor with placeholder APIs)
+        from universal_store.actors.sources import SourceIngestionActor
+        self.register_child(
+            "source_ingestion",
+            lambda: SourceIngestionActor(store=None, config=self.config)
+        )
+        # Keep bootstrap actor to drive remaining state machine transitions
         from universal_store.actors.bootstrap import BootstrapActor
         self.register_child("bootstrap", lambda: BootstrapActor())
 
@@ -149,6 +155,12 @@ class OrchestratorActor(RootSupervisor):
             message=f"IngestQuery received; starting ingestion for: {self._query}",
             data={"query": self._query, "run_id": self._run_id},
         )
+        # Send specific event types to each child
+        source_child = self._children.get("source_ingestion")
+        if source_child is not None:
+            await source_child.send(
+                Event("IngestBooks", {"query": self._query, "run_id": self._run_id, "top_n": 3})
+            )
         await self.broadcast_to_children(
             Event("ingest", {"query": self._query, "run_id": self._run_id})
         )
