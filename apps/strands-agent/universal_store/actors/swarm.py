@@ -364,7 +364,7 @@ class DiffusionSupervisor(Supervisor):
         async with trace_block(
             self.actor_id, "diffusion_converged", f"passes_{self._diffusion_pass}"
         ):
-            await self.send(
+            await self.send_to_parent(
                 Event(
                     "diffusion_converged",
                     {
@@ -810,14 +810,14 @@ class SwarmSupervisor(Supervisor):
                         info_gain=info_gain,
                         gaps_found=len(gaps),
                     )
-                    await self.send(event)
+                    await self.send_to_parent(event)
 
                     # Convergence check
                     if round_num >= min_rounds and len(self._info_gain_history) >= 2:
                         last_two = self._info_gain_history[-2:]
                         if all(g < threshold for g in last_two):
                             self._gaps = gaps
-                            await self.send(
+                            await self.send_to_parent(
                                 SwarmComplete(
                                     findings=self._findings, gaps=self._gaps
                                 )
@@ -826,7 +826,7 @@ class SwarmSupervisor(Supervisor):
                             return
 
             # Max rounds reached without convergence
-            await self.send(
+            await self.send_to_parent(
                 SwarmComplete(findings=self._findings, gaps=self._gaps)
             )
             await self.stop(graceful=True)
