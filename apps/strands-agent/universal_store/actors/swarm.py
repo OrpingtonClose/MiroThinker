@@ -822,14 +822,14 @@ class SwarmSupervisor(Supervisor):
                                     findings=self._findings, gaps=self._gaps
                                 )
                             )
-                            await self.stop(graceful=True)
+                            asyncio.create_task(self.stop(graceful=True))
                             return
 
             # Max rounds reached without convergence
             await self.send_to_parent(
                 SwarmComplete(findings=self._findings, gaps=self._gaps)
             )
-            await self.stop(graceful=True)
+            asyncio.create_task(self.stop(graceful=True))
 
     # -- phase 3: synthesis ------------------------------------------------
 

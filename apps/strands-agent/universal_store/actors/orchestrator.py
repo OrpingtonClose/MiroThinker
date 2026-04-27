@@ -57,6 +57,12 @@ class OrchestratorActor(RootSupervisor):
             "source_ingestion",
             lambda: SourceIngestionActor(store=None, config=self.config)
         )
+        # Register swarm adapter (runs real SwarmSupervisor)
+        from universal_store.actors.swarm_adapter import SwarmAdapterActor
+        self.register_child(
+            "swarm_adapter",
+            lambda: SwarmAdapterActor(store=None, config=self.config)
+        )
         # Keep bootstrap actor to drive remaining state machine transitions
         from universal_store.actors.bootstrap import BootstrapActor
         self.register_child("bootstrap", lambda: BootstrapActor())
@@ -245,12 +251,23 @@ class OrchestratorActor(RootSupervisor):
         if "raw" in row_types and self.phase in {
             OrchestratorPhase.IDLE,
             OrchestratorPhase.CONVERGED,
+            OrchestratorPhase.INGESTING,
         }:
             await self._transition_to(
                 OrchestratorPhase.SWARMING,
                 message=f"New raw data ({rows_added} rows); restarting swarm",
                 data={"rows_added": rows_added, "row_types": row_types},
             )
+            # Send swarm_restart specifically to the swarm adapter
+            swarm_child = self._children.get("swarm_adapter")
+            if swarm_child is not None:
+                await swarm_child.send(
+                    Event(
+                        "swarm_restart",
+                        {"reason": "new_raw_data", "rows_added": rows_added, "query": self._query},
+                    )
+                )
+            # Also broadcast to bootstrap for backward compatibility
             await self.broadcast_to_children(
                 Event(
                     "swarm_restart",
