@@ -126,6 +126,30 @@ class OrchestratorActor(RootSupervisor):
     # Event handlers
     # ------------------------------------------------------------------
 
+    async def _on_ingest_query(self, event: Event) -> None:
+        """Bootstrap the orchestrator from an IngestQuery event sent by the entrypoint."""
+        query = event.payload.get("query", self._query)
+        run_id = event.payload.get("run_id", self._run_id)
+        if query:
+            self._query = query
+        if run_id:
+            self._run_id = run_id
+        if self.phase != OrchestratorPhase.IDLE:
+            await self._emit(
+                f"IngestQuery received in non-IDLE phase {self.phase!r}; ignoring duplicate",
+                {"phase": str(self.phase)},
+            )
+            return
+        await self.spawn_all_registered()
+        await self._transition_to(
+            OrchestratorPhase.INGESTING,
+            message=f"IngestQuery received; starting ingestion for: {self._query}",
+            data={"query": self._query, "run_id": self._run_id},
+        )
+        await self.broadcast_to_children(
+            Event("ingest", {"query": self._query, "run_id": self._run_id})
+        )
+
     async def _on_user_interrupt(self, event: Event) -> None:
         action = event.payload.get("action", "pause")
         message = event.payload.get("message", "")
@@ -338,7 +362,9 @@ class OrchestratorActor(RootSupervisor):
                         "source": event.source_actor,
                     },
                 ):
-                    if event.event_type == "UserInterrupt":
+                    if event.event_type == "IngestQuery":
+                        await self._on_ingest_query(event)
+                    elif event.event_type == "UserInterrupt":
                         await self._on_user_interrupt(event)
                     elif event.event_type == "ConvergenceDetected":
                         await self._on_convergence_detected(event)
