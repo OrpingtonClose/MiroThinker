@@ -116,8 +116,15 @@ class Actor(ActorProtocol):
             if not graceful:
                 self._task.cancel()
             try:
-                await asyncio.wait_for(self._task, timeout=30.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(self._task, timeout=5.0)
+            except asyncio.TimeoutError:
+                # Force cancel if graceful shutdown took too long
+                self._task.cancel()
+                try:
+                    await asyncio.wait_for(self._task, timeout=2.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+            except asyncio.CancelledError:
                 pass
         # Stop children
         for child in list(self._children.values()):
