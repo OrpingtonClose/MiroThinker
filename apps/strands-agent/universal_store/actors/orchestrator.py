@@ -251,14 +251,14 @@ class OrchestratorActor(RootSupervisor):
         row_types = event.payload.get("row_types", [])
         rows_added = event.payload.get("rows_added", 0)
 
-        if "raw" in row_types and self.phase in {
+        if self.phase in {
             OrchestratorPhase.IDLE,
             OrchestratorPhase.CONVERGED,
             OrchestratorPhase.INGESTING,
         }:
             await self._transition_to(
                 OrchestratorPhase.SWARMING,
-                message=f"New raw data ({rows_added} rows); restarting swarm",
+                message=f"New data ({rows_added} rows); restarting swarm",
                 data={"rows_added": rows_added, "row_types": row_types},
             )
             # Send swarm_restart specifically to the swarm adapter
