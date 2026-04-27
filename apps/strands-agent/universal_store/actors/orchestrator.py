@@ -288,6 +288,22 @@ class OrchestratorActor(RootSupervisor):
         convergence_reason = event.payload.get("convergence_reason", "")
 
         if directions:
+            mcp_child = self._children.get("mcp_researcher")
+            if mcp_child is None:
+                # No MCP researcher wired up — skip external fetch and loop back
+                await self._transition_to(
+                    OrchestratorPhase.SWARMING,
+                    message=f"Flock complete; {len(directions)} directions but no MCP researcher; looping back",
+                    data={
+                        "directions": directions,
+                        "convergence_reason": convergence_reason,
+                    },
+                )
+                await self.broadcast_to_children(
+                    Event("swarm_restart", {"reason": "new_directions", "directions": directions})
+                )
+                return
+
             await self._transition_to(
                 OrchestratorPhase.FETCHING_EXTERNAL,
                 message=f"Flock complete; {len(directions)} research directions",
@@ -303,11 +319,7 @@ class OrchestratorActor(RootSupervisor):
                     "convergence_reason": convergence_reason,
                 },
             )
-            mcp_child = self._children.get("mcp_researcher")
-            if mcp_child is not None:
-                await mcp_child.send(research_event)
-            else:
-                await self.broadcast_to_children(research_event)
+            await mcp_child.send(research_event)
         else:
             # No directions needed — converge immediately
             await self._transition_to(
