@@ -51,6 +51,9 @@ class OrchestratorActor(RootSupervisor):
         self._previous_phase: OrchestratorPhase = OrchestratorPhase.IDLE
         self._pending_gaps: list[str] = []
         self._paused_children: list[str] = []
+        # Register bootstrap child so the pipeline can complete end-to-end
+        from universal_store.actors.bootstrap import BootstrapActor
+        self.register_child("bootstrap", lambda: BootstrapActor())
 
     # ------------------------------------------------------------------
     # Internal helpers
