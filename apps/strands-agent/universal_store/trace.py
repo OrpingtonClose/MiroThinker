@@ -126,8 +126,10 @@ class TraceStore:
                         payload_json, timestamp, latency_ms, error, stack_trace
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    rec.trace_id, rec.run_id, rec.actor_id, rec.event_type, rec.phase,
-                    rec.payload_json, rec.timestamp, rec.latency_ms, rec.error, rec.stack_trace
+                    str(rec.trace_id), str(rec.run_id), str(rec.actor_id),
+                    str(rec.event_type), str(rec.phase), str(rec.payload_json),
+                    str(rec.timestamp), float(rec.latency_ms),
+                    str(rec.error), str(rec.stack_trace)
                 ))
             self._conn.commit()
         except Exception as e:
@@ -158,16 +160,16 @@ class TraceStore:
         error_str = str(error) if error else ""
         stack_str = traceback.format_exc() if error else ""
         rec = TraceRecord(
-            trace_id=trace_id,
-            run_id=self._run_id,
-            actor_id=actor_id,
-            event_type=event_type,
-            phase=phase,
-            payload_json=payload_json,
+            trace_id=str(trace_id),
+            run_id=str(self._run_id),
+            actor_id=str(actor_id),
+            event_type=str(event_type),
+            phase=str(phase),
+            payload_json=str(payload_json),
             timestamp=datetime.utcnow().isoformat(),
-            latency_ms=latency_ms,
-            error=error_str,
-            stack_trace=stack_str,
+            latency_ms=float(latency_ms),
+            error=str(error_str),
+            stack_trace=str(stack_str),
         )
         await self._queue.put(rec)
         return trace_id
