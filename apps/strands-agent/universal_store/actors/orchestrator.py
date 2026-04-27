@@ -222,7 +222,9 @@ class OrchestratorActor(RootSupervisor):
                 data={"layer": layer, "score": score},
             )
             # Graceful shutdown after convergence so the event stream terminates
-            await self.stop(graceful=True)
+            # Use create_task to avoid deadlocking: stop() awaits self._task
+            # which is the task currently running this handler.
+            asyncio.create_task(self.stop(graceful=True))
 
     async def _on_store_delta(self, event: Event) -> None:
         row_types = event.payload.get("row_types", [])
