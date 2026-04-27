@@ -312,14 +312,13 @@ class OrchestratorActor(RootSupervisor):
             else:
                 await self.broadcast_to_children(research_event)
         else:
+            # No directions needed — converge immediately
             await self._transition_to(
-                OrchestratorPhase.SYNTHESIZING,
+                OrchestratorPhase.CONVERGED,
                 message=f"Flock complete; no directions needed: {convergence_reason}",
                 data={"convergence_reason": convergence_reason},
             )
-            await self.broadcast_to_children(
-                Event("synthesize", {"reason": convergence_reason})
-            )
+            asyncio.create_task(self.stop(graceful=True))
 
     async def _on_swarm_complete(self, event: Event) -> None:
         findings = event.payload.get("findings", [])

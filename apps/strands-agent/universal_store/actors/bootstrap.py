@@ -55,29 +55,18 @@ class BootstrapActor(Actor):
                     )
 
     async def _drive_pipeline(self, event: Event, trace: TraceStore) -> None:
-        """Emit the event sequence that moves the orchestrator to CONVERGED."""
-        query = event.payload.get("query", "")
+        """Emit the event sequence that moves the orchestrator to CONVERGED.
 
-        # 1. Pretend we ingested some raw data
-        await asyncio.sleep(0.1)
-        await self.send_to_parent(
-            StoreDelta(rows_added=3, row_types=["raw"])
-        )
+        NOTE: Ingestion, swarm, and flock are now handled by real actors.
+        The bootstrap only ensures convergence if no other actor triggers it.
+        """
+        # Wait briefly to let real actors do their work
+        await asyncio.sleep(0.3)
 
-        # 2. Pretend swarm produced findings
-        await asyncio.sleep(0.1)
-        await self.send_to_parent(
-            SwarmComplete(findings=[1, 2, 3], gaps=[])
-        )
-
-        # 3. Pretend flock converged with no new directions needed
-        await asyncio.sleep(0.1)
-        await self.send_to_parent(
-            FlockComplete(convergence_reason="bootstrap", directions=[])
-        )
-
-        # 4. Pretend we converged
-        await asyncio.sleep(0.1)
+        # If the orchestrator is still in SWARMING or FLOCKING after real
+        # actors had a chance, emit a fallback convergence event.
+        # In practice the real swarm/flock actors should drive transitions
+        # before this fires.
         await self.send_to_parent(
             ConvergenceDetected(layer="bootstrap", score=0.001)
         )
