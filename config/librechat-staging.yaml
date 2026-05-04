@@ -113,6 +113,22 @@ modelSpecs:
     preset:
       endpoint: Tier Chooser
       model: tier-race-full-throttle
+  - name: prod-kimi-tier-race-full-throttle
+    label: Kimi Smart Combined
+    description: Kimi K2.6 orchestrates 15 frontier models including Venice Uncensored
+      and Nous Hermes 4. Searches web, extracts URLs, recalls memory. Deepest synthesis.
+    group: Experimental
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-race-full-throttle
+  - name: prod-kimi-tier-race-medium
+    label: Kimi Balanced
+    description: Kimi K2.6 orchestrates 12 balanced models with web search and memory.
+      Best price/performance.
+    group: Experimental
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-race-medium
   - name: prod-deep-researcher
     label: Miro Deep
     description: Full research engine. Builds a knowledge net from web, forums, archives,
@@ -645,6 +661,50 @@ endpoints:
       - tier-z-ai/glm-5-thinking
       - tier-moonshotai/kimi-k2.5-instant
       - tier-moonshotai/kimi-k2.5-thinking
+      fetch: true
+    titleConvo: true
+    titleModel: mistral-large-thinking
+    titleEndpoint: Mistral Thinking
+    titleMethod: completion
+    summarize: false
+    forcePrompt: false
+    maxContextTokens: 2000000
+    dropParams:
+    - stop
+    - user
+    - frequency_penalty
+    - presence_penalty
+  - name: Kimi Tier Proxy
+    apiKey: not-needed
+    baseURL: http://host.docker.internal:9901/v1
+    models:
+      default:
+      - kimi-tier-race-quick
+      - kimi-tier-race-medium
+      - kimi-tier-race-full-throttle
+      - kimi-tier-anthropic/claude-haiku-4.6
+      - kimi-tier-anthropic/claude-sonnet-4.6
+      - kimi-tier-anthropic/claude-opus-4.7
+      - kimi-tier-google/gemini-3.1-flash
+      - kimi-tier-google/gemini-3.1-pro
+      - kimi-tier-openai/gpt-5.4-mini
+      - kimi-tier-openai/gpt-5.5
+      - kimi-tier-x-ai/grok-4.3
+      - kimi-tier-deepseek/deepseek-v4-flash
+      - kimi-tier-deepseek/deepseek-v4-pro
+      - kimi-tier-mistralai/mistral-large-3
+      - kimi-tier-qwen/qwen3.6-flash
+      - kimi-tier-qwen/qwen3.6-max-preview
+      - kimi-tier-z-ai/glm-5-turbo
+      - kimi-tier-z-ai/glm-5.1
+      - kimi-tier-moonshotai/kimi-k2.6
+      - kimi-tier-minimax/minimax-m2.7
+      - kimi-tier-inclusionai/ling-2.6-1t
+      - kimi-tier-xiaomi/mimo-v2-flash
+      - kimi-tier-xiaomi/mimo-v2-pro
+      - kimi-tier-tencent/hy3-preview
+      - kimi-tier-venice/venice-uncensored-1.2
+      - kimi-tier-nous-research/hermes-4-70b
       fetch: true
     titleConvo: true
     titleModel: mistral-large-thinking

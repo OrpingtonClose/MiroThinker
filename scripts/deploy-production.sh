@@ -205,6 +205,7 @@ SERVICES=(
     "Miro Proxy:9951"
     "xAI Native Proxy:9700"
     "Tier Chooser:9900"
+    "Kimi Tier Proxy:9901"
     "G0DM0D3 Proxy:9600"
     "Deep Research:9200"
     "Thinking Proxy:9100"

@@ -90,7 +90,7 @@ wait_for_health() {
 # --- Signal trapping for clean shutdown ---
 cleanup() {
     echo "Shutting down services..."
-    for session in miro-proxy heretic-proxy tier-chooser mcp-exa mcp-firecrawl xai-native-proxy godmode-proxy swarm-proxy miroflow-sprint persistent-research deep-research thinking-proxy knowledge-engine search-dispatcher mcp-searxng litellm cftunnel searxng strands-agent; do
+    for session in miro-proxy heretic-proxy tier-chooser kimi-tier-proxy mcp-exa mcp-firecrawl xai-native-proxy godmode-proxy swarm-proxy miroflow-sprint persistent-research deep-research thinking-proxy knowledge-engine search-dispatcher mcp-searxng litellm cftunnel searxng strands-agent; do
         screen -S "$session" -X quit 2>/dev/null || true
     done
     # Stop LibreChat Docker stack
@@ -308,6 +308,13 @@ if ! pgrep -f "tier_chooser_proxy.py" > /dev/null; then
     echo "Tier Chooser Proxy starting..."
 fi
 wait_for_health "http://localhost:9900/health" "Tier Chooser Proxy" 15
+
+# --- Kimi Tier Race Proxy (Kimi K2.6 orchestrated racing + Letta memory + data services) ---
+if ! pgrep -f "kimi_tier_proxy.py" > /dev/null; then
+    screen -dmS kimi-tier-proxy bash -c "set -a; source /opt/.env 2>/dev/null; set +a; cd $MIRO_ROOT/proxies && KIMI_TIER_PROXY_PORT=9901 python3 kimi_tier_proxy.py 2>&1 | tee /var/log/kimi_tier_proxy.log"
+    echo "Kimi Tier Race Proxy starting..."
+fi
+wait_for_health "http://localhost:9901/health" "Kimi Tier Race Proxy" 15
 
 # --- Heretic Proxy (GLM-4.7 Flash Heretic + Firecrawl/Exa/Brave tools) ---
 if [ -z "$VENICE_API_KEY" ]; then
