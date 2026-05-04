@@ -538,7 +538,7 @@ def _init_conversation_db(db_path: Path) -> None:
             updated_at TEXT NOT NULL
         );
         CREATE VIRTUAL TABLE IF NOT EXISTS recall_fts USING fts5(
-            content, tokens='porter unicode61'
+            content, tokenize='porter unicode61'
         );
     """)
     conn.commit()
