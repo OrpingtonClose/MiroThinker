@@ -8,6 +8,16 @@
 # Staging instance: 33703935 (ssh5.vast.ai) — uses this config (all models)
 version: 1.3.5
 cache: true
+
+interface:
+  modelSelect: true
+  parameters: true
+  agents:
+    use: true
+    create: true
+    share: true
+    public: true
+
 modelSpecs:
   enforce: false
   prioritize: true
@@ -358,6 +368,210 @@ modelSpecs:
     preset:
       endpoint: Strands Agent
       model: strands-venice-deep
+  - name: base-anthropic-claude-haiku-4.6
+    label: Claude Haiku 4.6
+    description: "Fast Anthropic model. Good for quick tasks."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-anthropic/claude-haiku-4.6
+  - name: base-google-gemini-3.1-flash
+    label: Gemini 3.1 Flash
+    description: "Google's fast multimodal model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-google/gemini-3.1-flash
+  - name: base-openai-gpt-5.4-mini
+    label: GPT-5.4 Mini
+    description: "OpenAI's lightweight frontier model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-openai/gpt-5.4-mini
+  - name: base-x-ai-grok-4.3
+    label: Grok 4.3
+    description: "xAI's latest model with X/Twitter access."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-x-ai/grok-4.3
+  - name: base-deepseek-deepseek-v4-flash
+    label: DeepSeek V4 Flash
+    description: "Fast DeepSeek reasoning model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-deepseek/deepseek-v4-flash
+  - name: base-qwen-qwen3.6-flash
+    label: Qwen 3.6 Flash
+    description: "Alibaba's fast multilingual model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-qwen/qwen3.6-flash
+  - name: base-inclusionai-ling-2.6-1t
+    label: Ling 2.6 1T
+    description: "Inclusion AI's 1-trillion-parameter MoE model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-inclusionai/ling-2.6-1t
+  - name: base-z-ai-glm-5-turbo
+    label: GLM-5 Turbo
+    description: "Zhipu AI's fast general model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-z-ai/glm-5-turbo
+  - name: base-nvidia-nemotron-3-super
+    label: Nemotron 3 Super
+    description: "NVIDIA's efficient inference model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-nvidia/nemotron-3-super
+  - name: base-stepfun-step-3.5-flash
+    label: Step 3.5 Flash
+    description: "StepFun's fast Chinese-English model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-stepfun/step-3.5-flash
+  - name: base-openai-gpt-oss-120b
+    label: GPT-OSS 120B
+    description: "OpenAI's open-weights 120B model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-openai/gpt-oss-120b
+  - name: base-xiaomi-mimo-v2-flash
+    label: MiMo V2 Flash
+    description: "Xiaomi's fast reasoning model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-xiaomi/mimo-v2-flash
+  - name: base-anthropic-claude-sonnet-4.6
+    label: Claude Sonnet 4.6
+    description: "Anthropic's balanced power model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-anthropic/claude-sonnet-4.6
+  - name: base-google-gemini-3.1-pro
+    label: Gemini 3.1 Pro
+    description: "Google's flagship multimodal model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-google/gemini-3.1-pro
+  - name: base-openai-gpt-5.4
+    label: GPT-5.4
+    description: "OpenAI's mainline frontier model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-openai/gpt-5.4
+  - name: base-deepseek-deepseek-v4-pro
+    label: DeepSeek V4 Pro
+    description: "DeepSeek's advanced reasoning model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-deepseek/deepseek-v4-pro
+  - name: base-qwen-qwen3.6-max-preview
+    label: Qwen 3.6 Max Preview
+    description: "Alibaba's largest model preview."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-qwen/qwen3.6-max-preview
+  - name: base-mistralai-mistral-large-3
+    label: Mistral Large 3
+    description: "Mistral's European flagship model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-mistralai/mistral-large-3
+  - name: base-z-ai-glm-5.1
+    label: GLM-5.1
+    description: "Zhipu AI's advanced general model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-z-ai/glm-5.1
+  - name: base-minimax-minimax-m2.7
+    label: MiniMax M2.7
+    description: "MiniMax's multimodal model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-minimax/minimax-m2.7
+  - name: base-xiaomi-mimo-v2-pro
+    label: MiMo V2 Pro
+    description: "Xiaomi's advanced reasoning model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-xiaomi/mimo-v2-pro
+  - name: base-tencent-hy3-preview
+    label: HY3 Preview
+    description: "Tencent's Hunyuan preview model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-tencent/hy3-preview
+  - name: base-anthropic-claude-opus-4.7
+    label: Claude Opus 4.7
+    description: "Anthropic's most capable model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-anthropic/claude-opus-4.7
+  - name: base-openai-gpt-5.5
+    label: GPT-5.5
+    description: "OpenAI's top-tier frontier model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-openai/gpt-5.5
+  - name: base-deepseek-deepseek-v4-pro-max
+    label: DeepSeek V4 Pro Max
+    description: "DeepSeek's maximum reasoning model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-deepseek/deepseek-v4-pro-max
+  - name: base-moonshotai-kimi-k2.6
+    label: Kimi K2.6
+    description: "Moonshot's flagship reasoning model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-moonshotai/kimi-k2.6
+  - name: base-mistralai-mistral-medium-3.5
+    label: Mistral Medium 3.5
+    description: "Mistral's balanced power model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-mistralai/mistral-medium-3.5
+  - name: base-venice-venice-uncensored-1.2
+    label: Venice Uncensored 1.2
+    description: "Venice AI's uncensored model. No content filters."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-venice/venice-uncensored-1.2
+  - name: base-nous-research-hermes-4-70b
+    label: Hermes 4 70B
+    description: "Nous Research's uncensored instruct model."
+    group: base
+    preset:
+      endpoint: Kimi Tier Proxy
+      model: kimi-tier-nous-research/hermes-4-70b
+
 endpoints:
   custom:
   - name: Mistral Thinking
@@ -757,3 +971,18 @@ endpoints:
     - frequency_penalty
     - presence_penalty
     modelDisplayLabel: Strands Agent
+
+  agents:
+    recursionLimit: 50
+    maxRecursionLimit: 100
+    disableBuilder: false
+    maxCitations: 50
+    allowedProviders:
+      - openAI
+      - anthropic
+      - google
+      - xai
+      - moonshot
+      - openrouter
+      - custom
+
