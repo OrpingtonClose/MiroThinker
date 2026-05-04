@@ -12,6 +12,7 @@ Port: 9901 (configurable via KIMI_TIER_PROXY_PORT)
 """
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -84,6 +85,213 @@ IMAGE_ENRICHMENT_ENABLED = os.getenv("KIMI_TIER_IMAGE_ENRICHMENT", "true").lower
 
 # Deployment environment
 DEPLOYMENT_ENV = os.getenv("DEPLOYMENT_ENV", "staging").lower()
+
+# ---------------------------------------------------------------------------
+# Attachment handling — extract, save, describe
+# ---------------------------------------------------------------------------
+
+def extract_attachments(messages: list[dict]) -> tuple[str, list[dict]]:
+    """Extract text query and attachments from OpenAI multimodal messages.
+
+    Returns (text_query, attachments) where each attachment is:
+        {"type": "image"|"text_file"|"pdf", "data": str, "mime": str, "filename": str}
+    For images, data is the raw base64 (or URL).
+    For text files, data is the decoded text content.
+    """
+    text_parts: list[str] = []
+    attachments: list[dict] = []
+    file_index = 0
+
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            text_parts.append(content)
+        elif isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                ptype = part.get("type", "")
+                if ptype == "text":
+                    text_parts.append(part.get("text", ""))
+                elif ptype == "image_url":
+                    url = part.get("image_url", {}).get("url", "")
+                    if not url:
+                        continue
+                    # Determine MIME type from data URI or URL
+                    mime = "image/png"
+                    if url.startswith("data:"):
+                        # data:image/jpeg;base64,...
+                        header = url.split(";")[0]  # data:image/jpeg
+                        mime = header.replace("data:", "") or "image/png"
+                        b64_data = url.split(",", 1)[-1] if "," in url else ""
+                    else:
+                        # Regular URL
+                        ext = os.path.splitext(url.split("?")[0])[1].lower()
+                        mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                                    ".gif": "image/gif", ".webp": "image/webp"}
+                        mime = mime_map.get(ext, "image/png")
+                        b64_data = url  # will be fetched by vision model
+
+                    ext = MIME_TO_EXT.get(mime, ".bin")
+                    filename = f"attachment_{file_index}{ext}"
+                    file_index += 1
+
+                    if mime.startswith("image/"):
+                        attachments.append({
+                            "type": "image", "data": b64_data,
+                            "mime": mime, "filename": filename,
+                        })
+                    elif mime in TEXT_MIMES:
+                        try:
+                            decoded = base64.b64decode(b64_data).decode("utf-8", errors="replace")
+                        except Exception:
+                            decoded = b64_data
+                        attachments.append({
+                            "type": "text_file", "data": decoded,
+                            "mime": mime, "filename": filename,
+                        })
+                    elif mime == "application/pdf":
+                        attachments.append({
+                            "type": "pdf", "data": b64_data,
+                            "mime": mime, "filename": filename,
+                        })
+
+    return " ".join(text_parts), attachments
+
+
+def save_attachments(attachments: list[dict], conversation_id: str, req_id: str = "") -> list[dict]:
+    """Save attachments to filesystem. Returns list of saved file info dicts."""
+    saved = []
+    conv_dir = os.path.join(ATTACHMENT_DIR, conversation_id)
+    os.makedirs(conv_dir, exist_ok=True)
+
+    ts = int(time.time())
+    for i, att in enumerate(attachments):
+        filename = att.get("filename", f"attachment_{i}")
+        filepath = os.path.join(conv_dir, f"{ts}_{i}_{filename}")
+
+        try:
+            if att["type"] == "image":
+                # Save binary image
+                raw = base64.b64decode(att["data"])
+                with open(filepath, "wb") as f:
+                    f.write(raw)
+                saved.append({
+                    "path": filepath, "type": "image",
+                    "filename": filename, "mime": att["mime"],
+                    "size_bytes": len(raw),
+                })
+            elif att["type"] == "text_file":
+                # Save text content
+                text = att["data"]
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(text)
+                saved.append({
+                    "path": filepath, "type": "text_file",
+                    "filename": filename, "mime": att["mime"],
+                    "size_bytes": len(text.encode("utf-8")),
+                    "preview": text[:500],
+                })
+            elif att["type"] == "pdf":
+                # Save binary PDF
+                raw = base64.b64decode(att["data"])
+                with open(filepath, "wb") as f:
+                    f.write(raw)
+                saved.append({
+                    "path": filepath, "type": "pdf",
+                    "filename": filename, "mime": att["mime"],
+                    "size_bytes": len(raw),
+                })
+            log.info(f"[{req_id}] Saved attachment: {filepath} ({att['type']}, {os.path.getsize(filepath)} bytes)")
+        except Exception as e:
+            log.error(f"[{req_id}] Failed to save attachment {filename}: {e}")
+
+    return saved
+
+
+def read_attachment_file(path: str) -> str:
+    """Read a saved attachment file. For images, returns the companion description.
+    For text files, returns the content. For PDFs, returns a notice."""
+    # Security: only allow reading from ATTACHMENT_DIR
+    abs_path = os.path.abspath(path)
+    abs_attach = os.path.abspath(ATTACHMENT_DIR)
+    if not abs_path.startswith(abs_attach):
+        return "Error: access denied — path outside attachment directory"
+
+    if not os.path.isfile(abs_path):
+        return f"Error: file not found — {path}"
+
+    # Check for companion description file (for images)
+    desc_path = abs_path + ".description.txt"
+    if os.path.isfile(desc_path):
+        with open(desc_path, "r", encoding="utf-8") as f:
+            return f.read()
+
+    # Try to read as text
+    try:
+        with open(abs_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        return content
+    except UnicodeDecodeError:
+        return f"[Binary file: {os.path.basename(abs_path)}, {os.path.getsize(abs_path)} bytes. Use an image description tool for images.]"
+
+
+async def describe_image(image_path: str, tier: str, req_id: str = "") -> str:
+    """Describe an image using a vision-capable model from the tier.
+    Saves the description as a companion .description.txt file next to the image."""
+    vision_model = TIER_VISION_MODEL.get(tier, "google/gemini-3.1-flash")
+    base_url, api_key, native_model = resolve_provider(vision_model)
+
+    # Read and re-encode the image as base64 for the API call
+    with open(image_path, "rb") as f:
+        img_bytes = f.read()
+    img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+
+    # Determine MIME from extension
+    ext = os.path.splitext(image_path)[1].lower()
+    mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".gif": "image/gif", ".webp": "image/webp"}
+    mime = mime_map.get(ext, "image/png")
+
+    # Build vision request
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this image in detail. Include all visible text, numbers, UI elements, charts, diagrams, code, and visual content. Be thorough and specific."},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}},
+            ],
+        }
+    ]
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    body = _build_body(native_model, messages, vision_model.split("/")[0], temperature=0.3, max_tokens=2048, stream=False)
+
+    client = http_client()
+    try:
+        resp = await asyncio.wait_for(
+            client.post(f"{base_url}/chat/completions", json=body, headers=headers),
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            description = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        else:
+            description = f"[Image description failed: HTTP {resp.status_code}]"
+    except Exception as e:
+        description = f"[Image description failed: {e}]"
+
+    # Save companion description file
+    desc_path = image_path + ".description.txt"
+    with open(desc_path, "w", encoding="utf-8") as f:
+        f.write(description)
+
+    log.info(f"[{req_id}] Image described by {vision_model}: {len(description)} chars -> {desc_path}")
+    return description
+
 
 # ---------------------------------------------------------------------------
 # Provider Registry — route models to their native APIs
@@ -228,6 +436,45 @@ TIER_MODELS = {
 ALL_TIER_MODELS: list[str] = []
 for models in TIER_MODELS.values():
     ALL_TIER_MODELS.extend(models)
+
+# Vision-capable models in the roster
+VISION_MODELS = {
+    "google/gemini-3.1-flash", "google/gemini-3.1-pro",
+    "openai/gpt-5.4-mini", "openai/gpt-5.4", "openai/gpt-5.5",
+    "anthropic/claude-haiku-4.6", "anthropic/claude-sonnet-4.6", "anthropic/claude-opus-4.7",
+    "x-ai/grok-4.3",
+}
+
+# Cheapest vision model per tier for image description
+TIER_VISION_MODEL = {
+    "quick": "google/gemini-3.1-flash",
+    "medium": "google/gemini-3.1-pro",
+    "full-throttle": "google/gemini-3.1-pro",
+}
+
+# Attachment storage
+ATTACHMENT_DIR = os.path.join(MEMORY_DIR, "attachments")
+
+# MIME type to extension mapping
+MIME_TO_EXT = {
+    "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
+    "image/webp": ".webp", "image/svg+xml": ".svg",
+    "text/plain": ".txt", "text/csv": ".csv", "text/html": ".html",
+    "text/markdown": ".md", "text/x-python": ".py", "text/x-python3": ".py",
+    "application/json": ".json", "application/xml": ".xml",
+    "application/pdf": ".pdf",
+    "text/x-c": ".c", "text/x-c++": ".cpp", "text/x-java": ".java",
+    "text/x-ruby": ".rb", "text/x-shell": ".sh", "text/x-yaml": ".yaml",
+    "text/x-rst": ".rst", "text/x-diff": ".diff",
+}
+
+# MIME types that are text (decode from base64 to string)
+TEXT_MIMES = {
+    "text/plain", "text/csv", "text/html", "text/markdown",
+    "text/x-python", "text/x-python3", "application/json", "application/xml",
+    "text/x-c", "text/x-c++", "text/x-java", "text/x-ruby",
+    "text/x-shell", "text/x-yaml", "text/x-rst", "text/x-diff",
+}
 
 _background_tasks: set[asyncio.Task] = set()
 
@@ -878,6 +1125,20 @@ def _build_kimi_tools(tier: str) -> list[dict]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read the contents of an uploaded file attached by the user. Use when you need to examine the full content of a user's attachment. For images, returns the AI-generated description.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "File path from the attachment list provided in the user message"},
+                    },
+                    "required": ["path"],
+                },
+            },
+        },
     ]
     return tools
 
@@ -897,6 +1158,7 @@ async def execute_kimi_tool(
     messages: list[dict],
     conversation_id: str,
     req_id: str,
+    attachment_manifest: list[dict] | None = None,
 ) -> str:
     """Execute a tool call from Kimi and return the result."""
     if tool_name == "call_model":
@@ -907,8 +1169,31 @@ async def execute_kimi_tool(
         # Build messages for the specialist model: system prompt + user prompt
         model_messages = [
             {"role": "system", "content": "You are a specialist AI model. Provide the most comprehensive, accurate, and detailed response possible. Include specific facts, numbers, code examples, and actionable information."},
-            {"role": "user", "content": prompt},
         ]
+
+        # If the model supports vision and there are image attachments, include them
+        if full_model in VISION_MODELS and attachment_manifest:
+            image_parts = []
+            for att in attachment_manifest:
+                if att.get("type") == "image" and os.path.isfile(att.get("path", "")):
+                    try:
+                        with open(att["path"], "rb") as f:
+                            img_b64 = base64.b64encode(f.read()).decode("utf-8")
+                        ext = os.path.splitext(att["path"])[1].lower()
+                        mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                                    ".gif": "image/gif", ".webp": "image/webp"}
+                        mime = mime_map.get(ext, "image/png")
+                        image_parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}})
+                    except Exception as e:
+                        log.warning(f"[{req_id}] Failed to load image for vision model: {e}")
+
+            if image_parts:
+                user_content = [{"type": "text", "text": prompt}] + image_parts
+                model_messages.append({"role": "user", "content": user_content})
+            else:
+                model_messages.append({"role": "user", "content": prompt})
+        else:
+            model_messages.append({"role": "user", "content": prompt})
 
         result = await call_model_structured(full_model, model_messages, temperature=0.7, max_tokens=4096, req_id=req_id)
 
@@ -954,6 +1239,10 @@ async def execute_kimi_tool(
         update_core_memory(conversation_id, tool_args.get("key", ""), tool_args.get("value", ""))
         return "Core memory updated"
 
+    elif tool_name == "read_file":
+        path = tool_args.get("path", "")
+        return read_attachment_file(path)
+
     return f"Unknown tool: {tool_name}"
 
 
@@ -963,6 +1252,7 @@ async def run_kimi_orchestration(
     user_query: str,
     req_id: str,
     conversation_id: str = "",
+    attachment_manifest: list[dict] | None = None,
 ) -> AsyncGenerator[str, None]:
     """Run the Kimi K2.6 orchestration loop with tool calling."""
     request_id = f"chatcmpl-kimi-{uuid.uuid4().hex[:12]}"
@@ -1152,7 +1442,7 @@ async def run_kimi_orchestration(
             log.info(f"[{req_id}] Kimi tool call: {func_name}({json.dumps(func_args)[:200]})")
             yield _chunk("", reasoning_content=f"  → {func_name}({json.dumps(func_args)[:100]}...)\n")
 
-            result = await execute_kimi_tool(func_name, func_args, tier, messages, conversation_id, req_id)
+            result = await execute_kimi_tool(func_name, func_args, tier, messages, conversation_id, req_id, attachment_manifest=attachment_manifest)
 
             # Add tool result to conversation
             kimi_messages.append({
@@ -1349,9 +1639,44 @@ async def _stream_single_model(
     model: str,
     messages: list[dict],
     req_id: str,
+    attachment_manifest: list[dict] | None = None,
 ) -> AsyncGenerator[str, None]:
     request_id = f"chatcmpl-tier-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
+
+    # For vision models with image attachments, pass through multimodal messages
+    if model in VISION_MODELS and attachment_manifest:
+        image_parts = []
+        for att in attachment_manifest:
+            if att.get("type") == "image" and os.path.isfile(att.get("path", "")):
+                try:
+                    with open(att["path"], "rb") as f:
+                        img_b64 = base64.b64encode(f.read()).decode("utf-8")
+                    ext = os.path.splitext(att["path"])[1].lower()
+                    mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                                ".gif": "image/gif", ".webp": "image/webp"}
+                    mime = mime_map.get(ext, "image/png")
+                    image_parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}})
+                except Exception as e:
+                    log.warning(f"[{req_id}] Failed to load image for direct model: {e}")
+
+        if image_parts:
+            # Inject images into the last user message
+            enriched_messages = []
+            for msg in messages:
+                if msg.get("role") == "user" and msg == messages[-1]:
+                    content = msg.get("content", "")
+                    if isinstance(content, str):
+                        user_content = [{"type": "text", "text": content}] + image_parts
+                    elif isinstance(content, list):
+                        user_content = content + image_parts
+                    else:
+                        user_content = [{"type": "text", "text": str(content)}] + image_parts
+                    enriched_messages.append({"role": "user", "content": user_content})
+                else:
+                    enriched_messages.append(msg)
+            messages = enriched_messages
+
     try:
         async for content_chunk in stream_model(model, messages, temperature=0.7, max_tokens=4096, req_id=req_id):
             yield make_sse_chunk(content_chunk, request_id=request_id, created=created, model_id=f"tier-{model}")
@@ -1449,23 +1774,49 @@ async def chat_completions(request: Request):
     log.info(f"[{req_id}] New request: model={requested_model}, messages={len(messages)}, utility={utility}")
     tracker.start(req_id, model=requested_model, messages=len(messages))
 
-    # Extract user query
-    user_query = ""
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                user_query = content
-            elif isinstance(content, list):
-                user_query = " ".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
-            break
+    # Extract user query and attachments
+    user_query, raw_attachments = extract_attachments(messages)
 
-    if not user_query:
+    if not user_query and not raw_attachments:
         tracker.finish(req_id)
         return JSONResponse(status_code=400, content={"error": {"message": "No user message found", "type": "invalid_request"}})
 
     # Extract conversation ID for memory (from custom header or generate)
     conversation_id = request.headers.get("X-Conversation-ID", f"conv-{uuid.uuid4().hex[:12]}")
+
+    # Save attachments and build manifest
+    attachment_manifest = []
+    if raw_attachments:
+        saved = save_attachments(raw_attachments, conversation_id, req_id)
+        # Describe images asynchronously
+        for att_info in saved:
+            if att_info["type"] == "image":
+                try:
+                    # Determine tier for vision model selection
+                    tier_for_vision = "quick"
+                    if requested_model.startswith("kimi-tier-race-"):
+                        tier_for_vision = requested_model.replace("kimi-tier-race-", "")
+                    description = await describe_image(att_info["path"], tier_for_vision, req_id)
+                    att_info["description"] = description[:2000]
+                except Exception as e:
+                    log.error(f"[{req_id}] Image description failed: {e}")
+                    att_info["description"] = f"[Image description failed: {e}]"
+        attachment_manifest = saved
+        log.info(f"[{req_id}] Processed {len(saved)} attachments for conversation {conversation_id}")
+
+    # Build attachment context for the query
+    if attachment_manifest:
+        att_context = "\n[ATTACHED FILES]\n"
+        for att in attachment_manifest:
+            if att["type"] == "image":
+                att_context += f"- {att['filename']} (image, {att.get('size_bytes', 0)} bytes) — path: {att['path']}\n  Description: {att.get('description', 'N/A')[:500]}\n"
+            elif att["type"] == "text_file":
+                preview = att.get("preview", "")[:200]
+                att_context += f"- {att['filename']} (text, {att.get('size_bytes', 0)} bytes) — path: {att['path']}\n  Preview: {preview}...\n"
+            elif att["type"] == "pdf":
+                att_context += f"- {att['filename']} (PDF, {att.get('size_bytes', 0)} bytes) — path: {att['path']}\n"
+        att_context += "\nUse the `read_file` tool with the path to read full file contents.\n"
+        user_query = user_query + att_context
 
     # Utility requests — passthrough to a cheap fast model
     if utility:
@@ -1484,7 +1835,7 @@ async def chat_completions(request: Request):
             return JSONResponse(status_code=400, content={"error": {"message": f"Unknown tier: {tier}. Valid: {list(TIER_MODELS.keys())}", "type": "invalid_request"}})
         # Use Kimi orchestration if API key available, otherwise fallback to parallel race
         if KIMI_API_KEY:
-            generator = run_kimi_orchestration(tier, messages, user_query, req_id, conversation_id=conversation_id)
+            generator = run_kimi_orchestration(tier, messages, user_query, req_id, conversation_id=conversation_id, attachment_manifest=attachment_manifest)
         else:
             log.warning(f"[{req_id}] No Kimi API key — falling back to parallel race")
             generator = run_parallel_race(tier, messages, user_query, req_id)
@@ -1493,11 +1844,11 @@ async def chat_completions(request: Request):
         if actual_model not in ALL_TIER_MODELS:
             tracker.finish(req_id)
             return JSONResponse(status_code=400, content={"error": {"message": f"Unknown model: {actual_model}", "type": "invalid_request"}})
-        generator = _stream_single_model(actual_model, messages, req_id)
+        generator = _stream_single_model(actual_model, messages, req_id, attachment_manifest=attachment_manifest)
     else:
         # Default to quick race
         if KIMI_API_KEY:
-            generator = run_kimi_orchestration("quick", messages, user_query, req_id, conversation_id=conversation_id)
+            generator = run_kimi_orchestration("quick", messages, user_query, req_id, conversation_id=conversation_id, attachment_manifest=attachment_manifest)
         else:
             generator = run_parallel_race("quick", messages, user_query, req_id)
 
