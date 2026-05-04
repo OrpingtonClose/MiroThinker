@@ -1036,6 +1036,7 @@ async def run_kimi_orchestration(
 
         # Collect Kimi's response — both text and tool calls
         collected_text = ""
+        collected_reasoning = ""
         tool_calls = []
         current_tool_call = None
         finish_reason = None
@@ -1072,6 +1073,11 @@ async def run_kimi_orchestration(
                         if text:
                             collected_text += text
 
+                        # Collect reasoning content (Kimi thinking mode)
+                        reasoning = delta.get("reasoning_content", "")
+                        if reasoning:
+                            collected_reasoning += reasoning
+
                         # Collect tool calls
                         if "tool_calls" in delta:
                             for tc in delta["tool_calls"]:
@@ -1094,13 +1100,17 @@ async def run_kimi_orchestration(
             return
 
         # Stream Kimi's reasoning as reasoning_content
-        if collected_text:
+        if collected_reasoning:
+            yield _chunk("", reasoning_content=f"[Kimi round {round_num + 1}]\n{collected_reasoning[:500]}\n")
+        elif collected_text:
             yield _chunk("", reasoning_content=f"[Kimi round {round_num + 1}]\n{collected_text[:500]}\n")
 
         # Add Kimi's assistant message to conversation
         assistant_msg = {"role": "assistant", "content": collected_text or None}
         if tool_calls:
             assistant_msg["tool_calls"] = tool_calls
+        if collected_reasoning:
+            assistant_msg["reasoning_content"] = collected_reasoning
         if not assistant_msg["content"] and not tool_calls:
             # Kimi returned nothing — we're done
             break
