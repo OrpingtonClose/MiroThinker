@@ -1030,7 +1030,7 @@ async def run_kimi_orchestration(
             "messages": kimi_messages,
             "tools": tools,
             "stream": True,
-            "temperature": 0.3,
+            "temperature": 1,
             "max_tokens": 8192,
         }
 
@@ -1158,7 +1158,7 @@ async def run_kimi_orchestration(
     final_body = {
         "model": "kimi-k2.6",
         "messages": kimi_messages + [{"role": "user", "content": "Please provide your final synthesized answer now. Do not make any more tool calls."}],
-        "temperature": 0.3,
+        "temperature": 1,
         "max_tokens": 8192,
         "stream": False,
     }
